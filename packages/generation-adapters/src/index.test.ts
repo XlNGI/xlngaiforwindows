@@ -46,6 +46,44 @@ describe('extractVideoCost', () => {
 });
 
 describe('adapter registry', () => {
+  it('exposes the MiniMax text-to-audio API schema for role reference production', () => {
+    const adapter = getAdapter('TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1')!;
+    expect(adapter.parameterSchema.required).toEqual(['text', 'voice_setting']);
+    expect(adapter.parameterSchema.properties.voice_setting?.properties).toMatchObject({
+      voice_id: { title: '音色 ID' },
+      speed: { title: '语速', default: 1 },
+      pitch: { title: '音高', default: 0 },
+      emotion: { title: '情绪' },
+    });
+    expect(
+      validateAdapterParameters(adapter.key, {
+        text: '你好，很高兴认识你。',
+        voice_setting: { voice_id: 'fixed-voice-one', speed: 1, pitch: 0 },
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(adapter.key, {
+        text: '你好，很高兴认识你。',
+        voice_setting: { voice_id: 'fixed-voice-one', speed: 3, pitch: 0 },
+      }),
+    ).toMatchObject({ valid: false });
+  });
+
+  it('declares every schema parameter in the adapter UI when a custom layout is provided', () => {
+    for (const adapter of getAdapterCatalog().adapters) {
+      const hiddenKeys = new Set(
+        (adapter.uiSchema?.fields ?? []).filter((field) => field.hidden).map((field) => field.key),
+      );
+      const schemaKeys = Object.entries(adapter.parameterSchema.properties)
+        .filter(([key, property]) => property.const === undefined && !hiddenKeys.has(key))
+        .map(([key]) => key);
+      const fieldKeys = (adapter.uiSchema?.fields ?? [])
+        .filter((field) => !field.hidden)
+        .map((field) => field.key);
+      expect(fieldKeys).toEqual(expect.arrayContaining(schemaKeys));
+    }
+  });
+
   it('resolves every capability/provider/model tuple to exactly one adapter', () => {
     const catalog = getAdapterCatalog();
     const keys = catalog.adapters.map((adapter) => adapter.key);
@@ -162,6 +200,7 @@ describe('adapter registry', () => {
   it('exposes distinct video production modes and validates text-to-video parameters', () => {
     const catalog = getAdapterCatalog();
     expect(catalog.capabilities.map((item) => item.key)).toEqual([
+      'TEXT_TO_AUDIO',
       'TEXT_TO_IMAGE',
       'REFERENCE_TO_IMAGE',
       'TEXT_TO_VIDEO',
@@ -301,12 +340,28 @@ describe('adapter registry', () => {
 
   it('validates UniCompAPI template input and rejects undeclared request fields', () => {
     const key = 'IMAGE_TO_VIDEO:unicompapi:openai-compatible-video:v1';
+    const videoAdapter = getAdapter(key)!;
+    expect(videoAdapter.uiSchema.fields.map((field) => field.key)).toContain('duration');
+    expect(
+      videoAdapter.uiSchema.fields.filter((field) => !field.hidden).map((field) => field.key),
+    ).not.toContain('seconds');
+    expect(videoAdapter.uiSchema.fields.find((field) => field.key === 'seconds')).toMatchObject({
+      hidden: true,
+    });
     expect(
       validateAdapterParameters(key, {
         images: ['https://example.com/reference.png'],
         prompt: 'camera push',
         duration: 5,
         ratio: '16:9',
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(key, {
+        images: ['https://example.com/reference.png'],
+        prompt: 'camera push',
+        duration: 5,
+        seconds: '8',
       }),
     ).toMatchObject({ valid: true });
     expect(
@@ -400,6 +455,111 @@ describe('adapter registry', () => {
         remoteModelId: 'qwen-image',
       }),
     ).toBe(false);
+  });
+
+  it('routes OpenAI and custom image-capable models through the generic Images adapter', () => {
+    const official = getAdapter('TEXT_TO_IMAGE:openai:openai-images:v1')!;
+    const custom = getAdapter('TEXT_TO_IMAGE:custom:openai-images:v1')!;
+
+    expect(
+      adapterBindsCatalogModel(official, {
+        providerType: 'openai',
+        remoteModelId: 'gpt-image-1',
+      }),
+    ).toBe(true);
+    expect(
+      adapterBindsCatalogModel(official, {
+        providerType: 'openai',
+        remoteModelId: 'dall-e-3',
+      }),
+    ).toBe(false);
+    expect(
+      adapterBindsCatalogModel(custom, {
+        providerType: 'custom',
+        remoteModelId: 'vendor-image-model',
+      }),
+    ).toBe(true);
+    expect(
+      adapterBindsCatalogModel(custom, {
+        providerType: 'custom',
+        remoteModelId: 'vendor-image-model',
+        parameterTemplateKey: 'unrelated-template',
+      }),
+    ).toBe(true);
+    expect(
+      adapterBindsCatalogModel(official, {
+        providerType: 'custom',
+        remoteModelId: 'gpt-image-1',
+      }),
+    ).toBe(false);
+
+    expect(
+      validateAdapterParameters(official.key, {
+        prompt: 'A mountain lake at sunrise',
+        size: '1536x1024',
+        quality: 'high',
+        output_format: 'webp',
+        output_compression: 80,
+        background: 'transparent',
+        moderation: 'auto',
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(official.key, {
+        prompt: 'A mountain lake at sunrise',
+        response_format: 'url',
+      }),
+    ).toMatchObject({ valid: false });
+    expect(
+      validateAdapterParameters(custom.key, {
+        prompt: 'A mountain lake at sunrise',
+        size: '1792x1024',
+        response_format: 'url',
+        quality: 'hd',
+        style: 'vivid',
+      }),
+    ).toMatchObject({ valid: true });
+    expect(custom.parameterSchema.properties.size).not.toHaveProperty('default');
+    expect(custom.parameterSchema.properties.output_format).not.toHaveProperty('default');
+  });
+
+  it('routes custom video-capable models through the generic asynchronous video adapters', () => {
+    const textToVideo = getAdapter('TEXT_TO_VIDEO:custom:openai-compatible-video:v1')!;
+    const imageToVideo = getAdapter('IMAGE_TO_VIDEO:custom:openai-compatible-video:v1')!;
+
+    for (const adapter of [textToVideo, imageToVideo]) {
+      expect(
+        adapterBindsCatalogModel(adapter, {
+          providerType: 'custom',
+          remoteModelId: 'vendor-video-model',
+        }),
+      ).toBe(true);
+    }
+    expect(
+      adapterBindsCatalogModel(textToVideo, {
+        providerType: 'unicompapi',
+        remoteModelId: 'vendor-video-model',
+      }),
+    ).toBe(false);
+    expect(
+      validateAdapterParameters(textToVideo.key, {
+        prompt: 'A slow camera move across a mountain lake',
+        duration: 8,
+        size: '1280x720',
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(imageToVideo.key, {
+        images: ['https://example.com/reference.png'],
+        prompt: 'A slow camera move across a mountain lake',
+        duration: 8,
+      }),
+    ).toMatchObject({ valid: true });
+    expect(
+      validateAdapterParameters(imageToVideo.key, {
+        prompt: 'A slow camera move across a mountain lake',
+      }),
+    ).toMatchObject({ valid: false });
   });
 
   it('derives a descriptor and controls from a canonical JSON Schema', () => {

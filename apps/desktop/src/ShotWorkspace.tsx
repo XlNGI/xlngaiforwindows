@@ -1,12 +1,20 @@
-import { Save } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Save, Wrench } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AssetInfo,
-  AudioFileInfo,
   DocumentSummary,
-  SceneInfo,
+  ProductionShotAuthoringIR,
+  ProductionImageBindingPromptEntry,
   SceneCharacterBindingInfo,
   ShotReferenceBindingInfo,
+  ProductionImageSelection,
+} from '@ai-video/contracts';
+import {
+  productionImageBindingPrompt,
+  continuityReferenceImageIds,
+  continuitySourceImageIds,
+  productionShotReferenceIds,
+  stripProductionImageBindingPrompt,
 } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 import { AssetImagePreview } from './AssetImagePreview';
@@ -16,6 +24,42 @@ import type { ShotContinuityContext } from '@ai-video/contracts';
 import { SceneSettingCard, useSceneSettingImages } from './SceneSettingCard';
 import { SceneCastEditor } from './SceneCastEditor';
 import { effectiveSceneCast, readSceneMedia, sceneMediaParams, useSceneMedia } from './scene-media';
+import { MarkdownEditor } from './MarkdownEditor';
+import {
+  promptImageReferences as createPromptImageReferences,
+  remapPromptReferences,
+} from './prompt-references';
+
+export function shotReferenceImageSelections(
+  refs: ShotReferenceAssets,
+): ProductionImageSelection[] {
+  const selections: ProductionImageSelection[] = [];
+  const selected = new Set<string>();
+  const add = (assetId: string | undefined, role: ProductionImageSelection['role']) => {
+    if (!assetId) return;
+    if (selected.has(assetId)) {
+      // An explicit frame binding wins without uploading the same image twice.
+      if (role === 'first-frame')
+        selections.find((image) => image.assetId === assetId)!.role = role;
+      return;
+    }
+    selected.add(assetId);
+    selections.push({ assetId, role });
+  };
+  const characterIds = refs.characterBindings?.length
+    ? refs.characterBindings.map((binding) => binding.assetId)
+    : (refs.characterAssetIds ?? []);
+  characterIds.forEach((assetId) => add(assetId, 'character'));
+  add(refs.characterAssetId, 'character');
+  const sceneIds = refs.sceneBindings?.length
+    ? refs.sceneBindings.map((binding) => binding.assetId)
+    : (refs.sceneAssetIds ?? []);
+  add(refs.sceneAssetId, 'scene');
+  sceneIds.forEach((assetId) => add(assetId, 'scene'));
+  add(refs.firstFrameAssetId, 'first-frame');
+  refs.continuityReferenceAssetIds?.forEach((assetId) => add(assetId, 'reference'));
+  return selections;
+}
 
 const STORAGE_PREFIX = 'ai-video.shot-reference-assets:';
 
@@ -33,6 +77,19 @@ export interface ShotReferenceAssets {
   continuityRowVersion?: number;
   continuityPrompt?: string;
   ignoreSceneBinding?: boolean;
+}
+
+function durableReferences(next: ShotReferenceAssets): ShotReferenceBindingInfo {
+  return {
+    ...(next.characterBindings?.length ? { characterBindings: next.characterBindings } : {}),
+    ...(next.sceneBindings?.length ? { sceneBindings: next.sceneBindings } : {}),
+    ...(next.characterAssetId ? { characterAssetId: next.characterAssetId } : {}),
+    ...(next.characterAssetIds?.length ? { characterAssetIds: next.characterAssetIds } : {}),
+    ...(next.sceneAssetId ? { sceneAssetId: next.sceneAssetId } : {}),
+    ...(next.sceneAssetIds?.length ? { sceneAssetIds: next.sceneAssetIds } : {}),
+    ...(next.firstFrameAssetId ? { firstFrameAssetId: next.firstFrameAssetId } : {}),
+    ...(next.ignoreSceneBinding ? { ignoreSceneBinding: true } : {}),
+  };
 }
 
 export function loadShotReferences(projectId: string, shotId: string): ShotReferenceAssets {
@@ -71,7 +128,6 @@ export function ShotWorkspace(props: Parameters<typeof ShotWorkspaceContent>[0])
 function ShotWorkspaceContent({
   projectId,
   shotId,
-  sceneDocumentId,
   shotTitle,
   shotStatus,
   shotPosition,
@@ -85,26 +141,24 @@ function ShotWorkspaceContent({
   hasStoryboard,
   onPromptChange,
   onSavePrompt,
+  onRepairBindings,
+  onAskContinuityAgent,
+  onPrepareGenerate,
   onGenerateImage,
   onGenerateVideo,
   onStoryboardTitleChange,
   onStoryboardContentChange,
   onSaveStoryboard,
-  scene,
   mediaRevision,
-  onSaveSceneReferences,
-  onBindSceneDocument,
   onOpenDocument,
-  sceneBindingBusy,
-  sceneBindingMessage,
   referenceBindings,
+  authoringIR,
   onSaveReferenceBindings,
   continuitySourceDirty = false,
   llm,
 }: {
   projectId?: string;
   shotId: string;
-  sceneDocumentId?: string;
   shotTitle: string;
   shotStatus: string;
   shotPosition: number;
@@ -118,22 +172,18 @@ function ShotWorkspaceContent({
   hasStoryboard: boolean;
   onPromptChange: (value: string) => void;
   onSavePrompt: () => void;
-  onGenerateImage: (refs: ShotReferenceAssets) => void;
-  onGenerateVideo: (refs: ShotReferenceAssets) => void;
+  onRepairBindings?: (prompt: string) => Promise<unknown> | void;
+  onAskContinuityAgent?: (context: ShotContinuityContext) => Promise<void> | void;
+  onPrepareGenerate?: (mode: 'image' | 'video', prompt: string, refs: ShotReferenceAssets) => void;
+  onGenerateImage: (refs: ShotReferenceAssets, prompt?: string) => void;
+  onGenerateVideo: (refs: ShotReferenceAssets, prompt?: string) => void;
   onStoryboardTitleChange: (value: string) => void;
   onStoryboardContentChange: (value: string) => void;
   onSaveStoryboard: () => void;
-  scene?: SceneInfo;
   mediaRevision?: number;
-  onSaveSceneReferences?: (
-    characters: SceneCharacterBindingInfo[],
-    dialogueAudioId?: string,
-  ) => Promise<unknown>;
-  onBindSceneDocument?: (id: string) => void;
   onOpenDocument?: (id: string) => void;
-  sceneBindingBusy?: boolean;
-  sceneBindingMessage?: string;
   referenceBindings?: ShotReferenceBindingInfo;
+  authoringIR?: ProductionShotAuthoringIR;
   onSaveReferenceBindings?: (bindings: ShotReferenceBindingInfo | null) => Promise<unknown>;
   continuitySourceDirty?: boolean;
   llm?: { providerProfileId: string; modelId: string; name: string; vision: boolean };
@@ -150,72 +200,127 @@ function ShotWorkspaceContent({
         }
       : local;
   });
-  const [characters, setCharacters] = useState(scene?.characterBindings ?? []);
-  const [dialogueAudioId, setDialogueAudioId] = useState(scene?.dialogueAudioId);
-  const [audios, setAudios] = useState<AudioFileInfo[]>([]);
+  const [characters, setCharacters] = useState<SceneCharacterBindingInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [continuity, setContinuity] = useState<ShotContinuityContext>();
   const [continuityRevision, setContinuityRevision] = useState(0);
+  useEffect(() => {
+    const refresh = () => setContinuityRevision((value) => value + 1);
+    window.addEventListener('production-source-updated', refresh);
+    return () => window.removeEventListener('production-source-updated', refresh);
+  }, [projectId, shotId]);
+
   const continuityRefresh = useMemo(
     () => ({ mediaRevision, continuityRevision }),
     [mediaRevision, continuityRevision],
   );
   const revision = useMemo(() => ({ assets, mediaRevision }), [assets, mediaRevision]);
-  const sceneDocumentIds = Array.from(
-    new Set(
-      scene?.sceneDocumentIds?.length
-        ? scene.sceneDocumentIds
-        : sceneDocumentId
-          ? [sceneDocumentId]
-          : [],
-    ),
-  );
-  const primarySceneDocumentId = sceneDocumentId ?? sceneDocumentIds[0];
-  const sceneMaterials =
-    scene?.materialBindings?.filter(
-      (binding) =>
-        binding.role === 'scene' &&
-        (binding.source === 'manual' || sceneDocumentIds.includes(binding.sourceDocumentId ?? '')),
-    ) ?? [];
-  const sceneMaterial = scene?.materialBindings?.find(
-    (b) =>
-      b.role === 'scene' &&
-      (b.source === 'manual' || sceneDocumentIds.includes(b.sourceDocumentId ?? '')),
-  );
+  const promptCharacterScopeKey = `${projectId ?? ''}:${shotId}`;
+  const [promptCharacterScope, setPromptCharacterScope] = useState<
+    | {
+        key: string;
+        authoringIR?: ProductionShotAuthoringIR;
+      }
+    | undefined
+  >();
+  useEffect(() => {
+    let active = true;
+    const apply = (ir?: ProductionShotAuthoringIR) => {
+      setPromptCharacterScope({ key: promptCharacterScopeKey, authoringIR: ir });
+    };
+    setPromptCharacterScope(undefined);
+    if (authoringIR) {
+      apply(authoringIR);
+      return () => {
+        active = false;
+      };
+    }
+    if (!projectId) {
+      apply();
+      return;
+    }
+    void Promise.resolve()
+      .then(() => callWorker('production.read', { target: { kind: 'shot', id: shotId } }))
+      .then((production) => {
+        const ir = production?.authoringIR;
+        if (active) apply(ir?.kind === 'shot' ? (ir as ProductionShotAuthoringIR) : undefined);
+      })
+      .catch(() => {
+        if (active) apply();
+      });
+    return () => {
+      active = false;
+    };
+  }, [authoringIR, projectId, shotId, promptCharacterScopeKey]);
+  const currentPromptCharacterScope =
+    promptCharacterScope?.key === promptCharacterScopeKey
+      ? {
+          key: promptCharacterScope.key,
+          ...productionShotReferenceIds({
+            authoringIR: promptCharacterScope.authoringIR,
+            referenceBindings,
+          }),
+        }
+      : undefined;
+  const sceneDocumentIds = currentPromptCharacterScope?.sceneDocumentIds ?? [];
+  const primarySceneDocumentId = sceneDocumentIds[0];
+  const promptDocumentGroups = [
+    {
+      key: 'character',
+      label: '角色',
+      documentIds: currentPromptCharacterScope?.characterDocumentIds ?? [],
+    },
+    { key: 'scene', label: '场景', documentIds: sceneDocumentIds },
+    {
+      key: 'prop',
+      label: '道具',
+      documentIds: currentPromptCharacterScope?.propDocumentIds ?? [],
+    },
+  ] as const;
+  const sceneMaterials = refs.sceneBindings ?? [];
   const castMedia = useSceneMedia(
     projectId,
     sceneMediaParams(
       characters,
       [
-        sceneMaterial?.assetId,
         refs.characterAssetId,
         refs.sceneAssetId,
         ...(refs.sceneAssetIds ?? []),
+        ...sceneMaterials.map((binding) => binding.assetId),
         refs.firstFrameAssetId,
       ].filter((id): id is string => Boolean(id)),
     ),
     revision,
   );
-  const savedCharacters = JSON.stringify(scene?.characterBindings ?? []);
   useEffect(() => {
-    setCharacters(scene?.characterBindings ?? []);
-  }, [savedCharacters]);
-  useEffect(() => {
-    setDialogueAudioId(scene?.dialogueAudioId);
-  }, [scene?.dialogueAudioId]);
-  useEffect(() => {
-    let active = true;
-    if (projectId && onSaveSceneReferences)
-      void callWorker('audio.list', {})
-        .then((items) => {
-          if (active) setAudios(items);
-        })
-        .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [projectId]);
+    if (!currentPromptCharacterScope) {
+      setCharacters([]);
+      return;
+    }
+    const savedBindings = new Map(
+      (refs.characterBindings ?? []).map((binding) => [
+        binding.characterDocumentId,
+        binding.assetId,
+      ]),
+    );
+    const legacyAssets =
+      refs.characterAssetIds ?? (refs.characterAssetId ? [refs.characterAssetId] : []);
+    setCharacters(
+      currentPromptCharacterScope.characterDocumentIds.map((characterDocumentId, index) => {
+        const assetId = savedBindings.get(characterDocumentId) ?? legacyAssets[index];
+        return { characterDocumentId, ...(assetId ? { imageAssetId: assetId } : {}) };
+      }),
+    );
+  }, [
+    currentPromptCharacterScope?.key,
+    currentPromptCharacterScope?.characterDocumentIds.join('|'),
+    refs.characterBindings,
+    refs.characterAssetId,
+    refs.characterAssetIds,
+  ]);
   const [referenceMessage, setReferenceMessage] = useState('');
+  const [repairPending, setRepairPending] = useState(false);
+  const [fillingMode, setFillingMode] = useState<'image' | 'video'>();
   const referenceSave = useRef<Promise<unknown>>(Promise.resolve());
   const [shotImageResults, setShotImageResults] = useState<{
     shotId: string;
@@ -246,10 +351,37 @@ function ShotWorkspaceContent({
     };
   }, [projectId, shotId, assets]);
   const setting = useSceneSettingImages(projectId, sceneDocumentIds, documents, revision);
-  const inheritedSceneAsset = setting.assets[0];
   const boundSceneAvailable = setting.available;
+  const sceneReferenceEntries = sceneDocumentIds.flatMap((sourceDocumentId) => {
+    const saved = sceneMaterials.find((binding) => binding.sourceDocumentId === sourceDocumentId);
+    const defaultAsset = setting.assetsByDocument[sourceDocumentId]?.[0];
+    const assetId = saved?.assetId ?? defaultAsset?.id;
+    return assetId ? [{ sourceDocumentId, assetId }] : [];
+  });
   const currentScope = useRef('');
-  currentScope.current = `${projectId}:${shotId}:${sceneDocumentIds.join('|')}:${boundSceneAvailable}:${JSON.stringify(characters)}:${dialogueAudioId}`;
+  const referenceEditRevision = useRef(0);
+  const bindingSnapshot = JSON.stringify(durableReferences(referenceBindings ?? {}));
+  const observedBindingSnapshot = useRef(bindingSnapshot);
+  const savedBindingSnapshot = useRef<string | undefined>(undefined);
+  if (observedBindingSnapshot.current !== bindingSnapshot) {
+    observedBindingSnapshot.current = bindingSnapshot;
+    // A save echoes this action's resolved defaults. Other binding changes invalidate it.
+    if (bindingSnapshot !== savedBindingSnapshot.current) referenceEditRevision.current += 1;
+  }
+  currentScope.current = JSON.stringify({
+    projectId,
+    shotId,
+    references: currentPromptCharacterScope,
+    boundSceneAvailable,
+    referenceEditRevision: referenceEditRevision.current,
+    prompt,
+    continuity: continuity?.binding && {
+      shotId: continuity.shotId,
+      rowVersion: continuity.rowVersion,
+      stale: continuity.stale,
+      binding: continuity.binding,
+    },
+  });
   useEffect(
     () => () => {
       currentScope.current = '';
@@ -274,16 +406,21 @@ function ShotWorkspaceContent({
   );
   const effectiveRefs = {
     ...refs,
-    sceneAssetId:
-      refs.sceneAssetId ??
-      (refs.ignoreSceneBinding ? undefined : (sceneMaterial?.assetId ?? inheritedSceneAsset?.id)),
-    sceneAssetIds:
-      refs.sceneAssetIds ??
-      (refs.ignoreSceneBinding
-        ? undefined
-        : sceneMaterials.length > 1
-          ? sceneMaterials.map((binding) => binding.assetId)
-          : undefined),
+    ...(continuity?.binding
+      ? {
+          firstFrameAssetId: continuity.binding.firstFrameAssetId,
+          continuityReferenceAssetIds: continuityReferenceImageIds(continuity.binding),
+        }
+      : {}),
+    sceneAssetId: refs.ignoreSceneBinding
+      ? undefined
+      : (refs.sceneAssetId ?? sceneReferenceEntries[0]?.assetId),
+    sceneAssetIds: refs.ignoreSceneBinding
+      ? undefined
+      : (refs.sceneAssetIds ??
+        (sceneReferenceEntries.length > 1
+          ? sceneReferenceEntries.map((binding) => binding.assetId)
+          : undefined)),
   };
 
   useEffect(() => {
@@ -300,22 +437,12 @@ function ShotWorkspaceContent({
     );
   }, [projectId, shotId, referenceBindings]);
 
-  const durableReferences = (next: ShotReferenceAssets): ShotReferenceBindingInfo => ({
-    ...(next.characterBindings?.length ? { characterBindings: next.characterBindings } : {}),
-    ...(next.sceneBindings?.length ? { sceneBindings: next.sceneBindings } : {}),
-    ...(next.characterAssetId ? { characterAssetId: next.characterAssetId } : {}),
-    ...(next.characterAssetIds?.length ? { characterAssetIds: next.characterAssetIds } : {}),
-    ...(next.sceneAssetId ? { sceneAssetId: next.sceneAssetId } : {}),
-    ...(next.sceneAssetIds?.length ? { sceneAssetIds: next.sceneAssetIds } : {}),
-    ...(next.firstFrameAssetId ? { firstFrameAssetId: next.firstFrameAssetId } : {}),
-    ...(next.ignoreSceneBinding ? { ignoreSceneBinding: true } : {}),
-  });
-
   const persist = (next: ShotReferenceAssets, saveLocal = true) => {
     setRefs(next);
     if (saveLocal && projectId) saveShotReferences(projectId, shotId, next);
     if (onSaveReferenceBindings) {
       const durable = durableReferences(next);
+      savedBindingSnapshot.current = JSON.stringify(durable);
       referenceSave.current = referenceSave.current
         .catch(() => undefined)
         .then(() => onSaveReferenceBindings(durable));
@@ -324,6 +451,7 @@ function ShotWorkspaceContent({
   };
 
   const persistFromControl = (next: ShotReferenceAssets) => {
+    referenceEditRevision.current += 1;
     void persist(next).catch((error: unknown) => {
       setReferenceMessage(error instanceof Error ? error.message : '镜头参考图保存失败。');
     });
@@ -331,14 +459,11 @@ function ShotWorkspaceContent({
 
   const assign = (slot: ShotReferenceSlot, assetId?: string) => {
     if (slot === 'firstFrame' && continuity?.binding) {
-      if (!assetId) {
-        setReferenceMessage('请先解除镜头衔接，再清除首帧。');
-        return;
-      }
       const scope = currentScope.current;
-      void callWorker('shot.continuity.firstFrame', {
+      void callWorker('shot.continuity.reference', {
         shotId,
         assetId,
+        role: 'first-frame',
         expectedRowVersion: continuity.rowVersion,
       })
         .then(() => {
@@ -352,15 +477,19 @@ function ShotWorkspaceContent({
     }
     const next = {
       ...refs,
-      characterBindings:
-        slot === 'character'
-          ? undefined
-          : refs.characterBindings,
+      characterBindings: slot === 'character' ? undefined : refs.characterBindings,
       sceneBindings:
         slot === 'scene'
           ? assetId && primarySceneDocumentId
-            ? [{ sourceDocumentId: primarySceneDocumentId, assetId }]
-            : undefined
+            ? [
+                ...(refs.sceneBindings ?? []).filter(
+                  (binding) => binding.sourceDocumentId !== primarySceneDocumentId,
+                ),
+                { sourceDocumentId: primarySceneDocumentId, assetId },
+              ]
+            : (refs.sceneBindings ?? []).filter(
+                (binding) => binding.sourceDocumentId !== primarySceneDocumentId,
+              )
           : refs.sceneBindings,
       characterAssetId: slot === 'character' ? assetId : refs.characterAssetId,
       characterAssetIds: slot === 'character' ? undefined : refs.characterAssetIds,
@@ -377,17 +506,11 @@ function ShotWorkspaceContent({
 
   const saveReferences = async () => {
     if (saving || !writable) return false;
-    if (
-      JSON.stringify(characters) === JSON.stringify(scene?.characterBindings ?? []) &&
-      dialogueAudioId === scene?.dialogueAudioId
-    )
-      return true;
-    if (!onSaveSceneReferences) return true;
     setSaving(true);
     const scope = currentScope.current;
     try {
-      const saved = await onSaveSceneReferences(characters, dialogueAudioId);
-      return Boolean(saved) && currentScope.current === scope;
+      await resolveBoundReferences();
+      return currentScope.current === scope;
     } catch (error) {
       if (currentScope.current === scope)
         setReferenceMessage(error instanceof Error ? error.message : '参考资料保存失败。');
@@ -397,95 +520,142 @@ function ShotWorkspaceContent({
     }
   };
 
-  const resolveBoundReferences = async (): Promise<ShotReferenceAssets> => {
-    const expectedScope = currentScope.current;
-    let next = { ...refs };
-    if (!next.sceneAssetId && !refs.ignoreSceneBinding && sceneMaterial)
-      next.sceneAssetId = sceneMaterial.assetId;
-    if (!next.sceneAssetIds?.length && !refs.ignoreSceneBinding && sceneMaterials.length > 1)
-      next.sceneAssetIds = sceneMaterials.map((binding) => binding.assetId);
-    if (onSaveReferenceBindings && !next.sceneBindings?.length && !refs.ignoreSceneBinding && sceneMaterials.length) {
-      const mapped = sceneMaterials.flatMap((binding) =>
-        binding.sourceDocumentId
-          ? [{ sourceDocumentId: binding.sourceDocumentId, assetId: binding.assetId }]
-          : [],
-      );
-      if (mapped.length) next.sceneBindings = mapped;
+  const repairBindings = async () => {
+    if (!onRepairBindings || repairPending || !writable || !prompt.trim()) return;
+    setRepairPending(true);
+    setReferenceMessage('');
+    try {
+      await onRepairBindings(stripProductionImageBindingPrompt(prompt));
+      setReferenceMessage('修复请求已发送到会话。');
+    } catch (error) {
+      setReferenceMessage(error instanceof Error ? error.message : '镜头绑定修复失败。');
+    } finally {
+      setRepairPending(false);
     }
-    if (sceneDocumentIds.length && !next.sceneAssetIds?.length && !refs.ignoreSceneBinding) {
-      if (!boundSceneAvailable) throw new Error('绑定场景资料不可用，请重新选择场次的场景。');
+  };
+
+  const resolveBoundReferences = async (
+    beforeSave?: (references: ShotReferenceAssets) => void,
+  ): Promise<ShotReferenceAssets> => {
+    const expectedScope = currentScope.current;
+    if (!currentPromptCharacterScope)
+      throw new Error('镜头引用关系尚未读取，请稍后重试或修复本镜绑定。');
+    const next = { ...effectiveRefs };
+    if (refs.ignoreSceneBinding || sceneDocumentIds.length === 0) {
+      delete next.sceneAssetId;
+      delete next.sceneAssetIds;
+      delete next.sceneBindings;
+    } else {
+      if (!boundSceneAvailable) throw new Error('本镜绑定的场景资料不可用，请修复绑定。');
+      const structured = new Map(
+        (next.sceneBindings ?? []).map((binding) => [binding.sourceDocumentId, binding.assetId]),
+      );
+      const legacyAssets = next.sceneAssetIds ?? (next.sceneAssetId ? [next.sceneAssetId] : []);
+      const missingIds = sceneDocumentIds.filter(
+        (id, index) =>
+          !structured.has(id) && !legacyAssets[index] && !setting.assetsByDocument[id]?.length,
+      );
       const groups = await Promise.all(
-        sceneDocumentIds.map((sourceDocumentId) =>
-          callWorker('asset.list', {
-            sourceDocumentId,
-            sort: 'created-desc',
-            limit: 200,
-          }),
+        missingIds.map((sourceDocumentId) =>
+          callWorker('asset.list', { sourceDocumentId, sort: 'created-desc', limit: 200 }),
         ),
       );
-      const sceneAssetEntries = groups
-        .map((items, index) => {
-          const asset = items.find(
+      const fetchedDefaults = new Map(
+        missingIds.flatMap((id, index) => {
+          const asset = groups[index]?.find(
             (item) => item.projectId === projectId && !item.deletedAt && !isVideoKind(item.kind),
           );
-          return asset ? { sourceDocumentId: sceneDocumentIds[index]!, asset } : undefined;
-        })
-        .filter(
-          (entry): entry is { sourceDocumentId: string; asset: AssetInfo } => Boolean(entry),
-        );
-      const sceneAssets = sceneAssetEntries.map((entry) => entry.asset);
-      if (sceneAssets.length)
-        next = {
-          ...next,
-          sceneAssetId: next.sceneAssetId ?? sceneAssets[0]?.id,
-          ...(onSaveReferenceBindings
-            ? {
-                sceneBindings: sceneAssetEntries.map(({ sourceDocumentId, asset }) => ({
-                  sourceDocumentId,
-                  assetId: asset.id,
-                })),
-              }
-            : {}),
-          ...(sceneAssets.length > 1
-            ? { sceneAssetIds: sceneAssets.map((asset) => asset.id) }
-            : {}),
-        };
+          return asset ? [[id, asset.id] as const] : [];
+        }),
+      );
+      const selected = sceneDocumentIds.flatMap((sourceDocumentId, index) => {
+        const assetId =
+          structured.get(sourceDocumentId) ??
+          legacyAssets[index] ??
+          setting.assetsByDocument[sourceDocumentId]?.[0]?.id ??
+          fetchedDefaults.get(sourceDocumentId);
+        return assetId ? [{ sourceDocumentId, assetId }] : [];
+      });
+      next.sceneBindings = selected;
+      if (selected.length) {
+        next.sceneAssetId = selected[0]!.assetId;
+        if (selected.length > 1) next.sceneAssetIds = selected.map((binding) => binding.assetId);
+        else delete next.sceneAssetIds;
+      } else {
+        delete next.sceneAssetId;
+        delete next.sceneAssetIds;
+      }
+      delete next.ignoreSceneBinding;
     }
-    if (characters.length && projectId) {
-      const production = await callWorker('production.read', {
-        target: { kind: 'shot', id: shotId },
-      }).catch(() => undefined);
-      if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
-      const characterIds = production?.authoringIR?.references?.characterDocumentIds;
-      const shotCharacters = characters.filter(
-        (character) =>
-          characterIds === undefined || characterIds.includes(character.characterDocumentId),
+    if (projectId && currentPromptCharacterScope.characterDocumentIds.length) {
+      const shotCharacters = currentPromptCharacterScope.characterDocumentIds.map(
+        (characterDocumentId) =>
+          characters.find((character) => character.characterDocumentId === characterDocumentId) ?? {
+            characterDocumentId,
+          },
       );
       const media = await readSceneMedia(projectId, sceneMediaParams(shotCharacters));
-      const ids = effectiveSceneCast(shotCharacters, media).flatMap((c) =>
-        c.imageAssetId ? [c.imageAssetId] : [],
+      if (currentScope.current !== expectedScope)
+        throw new Error('镜头或绑定已变化，请重新确认后再填表。');
+      const resolvedCharacters = effectiveSceneCast(shotCharacters, media);
+      const selections = resolvedCharacters.flatMap((character) =>
+        character.imageAssetId
+          ? [
+              {
+                characterDocumentId: character.characterDocumentId,
+                assetId: character.imageAssetId,
+              },
+            ]
+          : [],
       );
-      next.characterAssetIds = [...new Set(ids)];
-      if (onSaveReferenceBindings)
-        next.characterBindings = effectiveSceneCast(shotCharacters, media).flatMap((character) =>
-          character.imageAssetId
-            ? [{ characterDocumentId: character.characterDocumentId, assetId: character.imageAssetId }]
-            : [],
-        );
+      if (selections.length) {
+        next.characterBindings = selections;
+        next.characterAssetIds = [...new Set(selections.map((binding) => binding.assetId))];
+      } else {
+        delete next.characterBindings;
+        delete next.characterAssetIds;
+      }
+      delete next.characterAssetId;
     }
     if (currentScope.current !== expectedScope) throw new Error('镜头或场景已切换，请重新生成。');
-    // Automatic scene/cast defaults are saved to the durable binding record,
-    // but must not become a local override that blocks future scene changes.
+    beforeSave?.(next);
     await persist(next, false);
+    if (currentScope.current !== expectedScope)
+      throw new Error('镜头或绑定已变化，请重新确认后再填表。');
     return next;
   };
 
   const generate = async (mode: 'image' | 'video') => {
+    if (saving || !writable || fillingMode) return;
     const expectedScope = currentScope.current;
     setReferenceMessage('');
+    setFillingMode(mode);
     try {
-      if (!(await saveReferences())) return;
-      const resolved = await resolveBoundReferences();
+      if (continuity?.stale)
+        throw new Error(
+          continuity.reconfirmable
+            ? '镜头提示词已变化，请在镜头衔接中确认沿用现有选帧后再填充。'
+            : '剧情或衔接来源已变化，请先重新确认选帧。',
+        );
+      const withContinuity = (references: ShotReferenceAssets): ShotReferenceAssets => ({
+        ...references,
+        ...(continuity?.binding
+          ? {
+              continuityRowVersion: continuity.rowVersion,
+              continuityPrompt: mode === 'image' ? continuity.binding.imagePrompt : undefined,
+              ...(mode === 'image'
+                ? {
+                    firstFrameAssetId: undefined,
+                    continuityReferenceAssetIds: continuitySourceImageIds(continuity.binding),
+                  }
+                : {}),
+            }
+          : {}),
+      });
+      const resolved = await resolveBoundReferences((references) => {
+        if (currentScope.current === expectedScope)
+          onPrepareGenerate?.(mode, prompt, withContinuity(references));
+      });
       if (currentScope.current !== expectedScope) return;
       if (
         mode === 'video' &&
@@ -495,41 +665,118 @@ function ShotWorkspaceContent({
           ...(resolved.sceneAssetIds ?? []),
           resolved.sceneAssetId,
           resolved.firstFrameAssetId,
+          ...(resolved.continuityReferenceAssetIds ?? []),
         ].some(Boolean)
       )
         throw new Error('请先生成或选择参考图。');
-      const selected = {
-        ...resolved,
-        ...(continuity?.binding
-          ? {
-              continuityRowVersion: continuity.rowVersion,
-              continuityPrompt:
-                mode === 'image' ? continuity.binding.imagePrompt : continuity.binding.videoPrompt,
-              ...(mode === 'image'
-                ? {
-                    continuityReferenceAssetIds: continuity.binding.frames.map(
-                      (frame) => frame.assetId,
-                    ),
-                  }
-                : {}),
-            }
-          : {}),
-      };
-      if (mode === 'image') onGenerateImage(selected);
-      else onGenerateVideo(selected);
+      const selected = withContinuity(resolved);
+      const selectedReferences = createPromptImageReferences(
+        shotReferenceImageSelections(selected).map(({ assetId, role }) => ({
+          url: `project-asset://${assetId}`,
+          role,
+        })),
+      );
+      const remappedPrompt = remapPromptReferences(promptReferences, selectedReferences, {
+        prompt,
+      }).prompt;
+      const selectedPrompt = typeof remappedPrompt === 'string' ? remappedPrompt : prompt;
+      if (selectedPrompt !== prompt) onPromptChange(selectedPrompt);
+      onPrepareGenerate?.(mode, selectedPrompt, selected);
+      if (mode === 'image') onGenerateImage(selected, selectedPrompt);
+      else onGenerateVideo(selected, selectedPrompt);
     } catch (error) {
       if (currentScope.current === expectedScope)
         setReferenceMessage(error instanceof Error ? error.message : '参考图读取失败');
+    } finally {
+      setFillingMode(undefined);
     }
   };
 
-  const hasSelectedRefs = Boolean(
-    characters.some((c) => !c.imageDisabled) ||
-    refs.characterAssetId ||
-    effectiveRefs.sceneAssetId ||
-    effectiveRefs.sceneAssetIds?.length ||
-    refs.firstFrameAssetId,
+  const bindingScopeLoading = Boolean(projectId && !currentPromptCharacterScope);
+  const scopedCharacters = currentPromptCharacterScope ? characters : [];
+  const effectivePromptCharacters = effectiveSceneCast(
+    scopedCharacters,
+    castMedia.value ?? { characters: [], assets: [], voices: [] },
   );
+  const promptCharacterBindings = refs.characterBindings?.filter((binding) =>
+    currentPromptCharacterScope?.characterDocumentIds.includes(binding.characterDocumentId),
+  );
+  const promptCharacterAssetIds = promptCharacterBindings?.length
+    ? promptCharacterBindings.map((binding) => binding.assetId)
+    : effectivePromptCharacters.flatMap((character) =>
+        character.imageAssetId && !character.imageDisabled ? [character.imageAssetId] : [],
+      );
+  const promptImageSelections = shotReferenceImageSelections({
+    ...effectiveRefs,
+    ...(promptCharacterBindings ? { characterBindings: promptCharacterBindings } : {}),
+    characterAssetIds: promptCharacterAssetIds,
+    sceneAssetId: effectiveRefs.sceneAssetId,
+    sceneAssetIds: effectiveRefs.sceneAssetIds,
+  });
+  const hasSelectedRefs = promptImageSelections.length > 0;
+  const promptImageLabels = new Map<string, string>();
+  const setPromptImageLabel = (assetId: string, documentId?: string, fallback?: string) => {
+    if (!assetId) return;
+    const label = documents.find((document) => document.id === documentId)?.title ?? fallback;
+    if (label?.trim() && !promptImageLabels.has(assetId))
+      promptImageLabels.set(assetId, label.trim());
+  };
+  refs.characterBindings?.forEach((binding) =>
+    setPromptImageLabel(binding.assetId, binding.characterDocumentId),
+  );
+  refs.sceneBindings?.forEach((binding) =>
+    setPromptImageLabel(binding.assetId, binding.sourceDocumentId),
+  );
+  effectivePromptCharacters.forEach((character) =>
+    setPromptImageLabel(character.imageAssetId ?? '', character.characterDocumentId),
+  );
+  sceneMaterials.forEach((binding) =>
+    setPromptImageLabel(binding.assetId, binding.sourceDocumentId),
+  );
+  if (effectiveRefs.sceneAssetId)
+    setPromptImageLabel(
+      effectiveRefs.sceneAssetId,
+      refs.sceneBindings?.find((binding) => binding.assetId === effectiveRefs.sceneAssetId)
+        ?.sourceDocumentId ?? primarySceneDocumentId,
+      '当前场景',
+    );
+  if (refs.firstFrameAssetId) promptImageLabels.set(refs.firstFrameAssetId, '首帧');
+  refs.continuityReferenceAssetIds?.forEach((assetId) =>
+    setPromptImageLabel(assetId, undefined, '连续性参考'),
+  );
+  const promptBindingEntries: ProductionImageBindingPromptEntry[] = promptImageSelections.map(
+    ({ assetId, role }, index) => ({
+      imageIndex: index + 1,
+      role,
+      ...(promptImageLabels.get(assetId) ? { label: promptImageLabels.get(assetId) } : {}),
+    }),
+  );
+  const displayedPrompt = productionImageBindingPrompt(
+    prompt,
+    promptImageSelections.length,
+    promptBindingEntries,
+    (index) => `图片${index}`,
+  );
+  const handlePromptEdit = useCallback(
+    (value: string) => onPromptChange(stripProductionImageBindingPrompt(value)),
+    [onPromptChange],
+  );
+  const promptReferences = createPromptImageReferences(
+    promptImageSelections.map(({ assetId, role }) => ({ url: `project-asset://${assetId}`, role })),
+  );
+  const promptReferenceSnapshot = useRef(promptReferences);
+  useEffect(() => {
+    const previous = promptReferenceSnapshot.current;
+    const changed =
+      previous.length !== promptReferences.length ||
+      previous.some((item, index) => item.id !== promptReferences[index]?.id);
+    if (changed) {
+      const remapped = remapPromptReferences(previous, promptReferences, { prompt });
+      if (typeof remapped.prompt === 'string' && remapped.prompt !== prompt)
+        onPromptChange(remapped.prompt);
+    }
+    promptReferenceSnapshot.current = promptReferences;
+  }, [prompt, promptReferences, onPromptChange]);
 
   return (
     <div className="shot-workspace">
@@ -542,13 +789,16 @@ function ShotWorkspaceContent({
             {`镜头 ${shotPosition + 1} · ${shotStatus === 'draft' ? '草稿' : shotStatus === 'published' ? '已发布' : shotStatus === 'ready' ? '就绪' : shotStatus}`}
           </span>
         </div>
-        <textarea
-          className="markdown-editor shot-prompt-editor"
-          aria-label={'\u955c\u5934\u63d0\u793a\u8bcd'}
-          value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
+        <MarkdownEditor
+          className="shot-prompt-editor"
+          label="镜头提示词"
+          value={displayedPrompt}
+          onChange={handlePromptEdit}
           placeholder={'\u8f93\u5165\u672c\u955c\u753b\u9762\u63d0\u793a\u8bcd\u2026'}
+          autoPreviewOnBlur
           readOnly={!writable}
+          references={promptReferences}
+          projectId={projectId}
         />
         <div className="shot-prompt-actions">
           <button
@@ -563,29 +813,93 @@ function ShotWorkspaceContent({
           >
             <Save size={13} /> {'\u4fdd\u5b58\u63d0\u793a\u8bcd'}
           </button>
+          {onRepairBindings && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={!writable || repairPending || !prompt.trim() || Boolean(fillingMode)}
+              onClick={() => void repairBindings()}
+            >
+              <Wrench size={13} /> {repairPending ? '正在修复…' : '修复绑定'}
+            </button>
+          )}
           <button
             className="button primary"
             type="button"
-            disabled={!writable || !prompt.trim()}
+            disabled={
+              !writable || saving || bindingScopeLoading || Boolean(fillingMode) || !prompt.trim()
+            }
             onClick={() => {
               void generate('image');
             }}
           >
-            {'\u751f\u6210\u672c\u955c\u753b\u9762'}
+            填充本镜图片表单
           </button>
           <button
             className="button secondary"
             type="button"
-            disabled={!writable || (!hasSelectedRefs && !sceneDocumentIds.length)}
+            disabled={
+              !writable || saving || bindingScopeLoading || Boolean(fillingMode) || !hasSelectedRefs
+            }
             onClick={() => {
               void generate('video');
             }}
           >
-            {'\u7528\u53c2\u8003\u56fe\u751f\u6210\u89c6\u9891'}
+            填充本镜视频表单
           </button>
         </div>
+        {fillingMode && (
+          <p className="shot-reference-message" role="status" aria-live="polite">
+            {fillingMode === 'image'
+              ? '正在解析本镜绑定并填充画面表单…'
+              : '正在解析本镜绑定并填充视频表单…'}
+          </p>
+        )}
       </section>
       {referenceMessage && <p role="status">{referenceMessage}</p>}
+      <section className="shot-ir-reference-summary" aria-label="提示词资料引用">
+        <h3>提示词资料引用</h3>
+        {currentPromptCharacterScope ? (
+          <div className="shot-ir-reference-groups">
+            {promptDocumentGroups.map((group) => (
+              <div className="shot-ir-reference-group" key={group.key}>
+                <span className="shot-ir-reference-role">{group.label}</span>
+                <div className="shot-ir-reference-documents">
+                  {group.documentIds.length ? (
+                    group.documentIds.map((documentId) => {
+                      const document = documents.find((item) => item.id === documentId);
+                      return document ? (
+                        <span
+                          className="shot-ir-reference-document"
+                          key={documentId}
+                          title={`${document.title}\n${document.id}`}
+                        >
+                          {document.title}
+                        </span>
+                      ) : (
+                        <span
+                          className="shot-ir-reference-document is-unavailable"
+                          key={documentId}
+                          title={documentId}
+                          aria-label={`${group.label}资料不可用，文档 ID ${documentId}`}
+                        >
+                          资料不可用
+                        </span>
+                      );
+                    })
+                  ) : (
+                    <span className="shot-ir-reference-empty">未引用</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="shot-ir-reference-loading" role="status">
+            正在读取提示词引用
+          </p>
+        )}
+      </section>
       {characters.length > 0 && castMedia.error && (
         <p role="status">
           {castMedia.error}{' '}
@@ -603,6 +917,10 @@ function ShotWorkspaceContent({
           voices={castMedia.value?.voices ?? []}
           defaults={castMedia.value?.characters ?? []}
           mediaLoading={castMedia.loading}
+          heading="本镜角色绑定"
+          allowRosterChanges={false}
+          showVoiceReferences={false}
+          showDialogueSettings={false}
           sceneLabel={
             sceneDocumentIds.length
               ? sceneDocumentIds
@@ -610,19 +928,15 @@ function ShotWorkspaceContent({
                   .join('、')
               : undefined
           }
-          scopeNote={
-            scene
-              ? `沿用「${scene.title}」的角色与场景；修改角色绑定会同步到同场镜头。`
-              : '选择本镜使用的角色、场景与首帧。'
-          }
-          audios={audios}
-          dialogueAudioId={dialogueAudioId}
-          writable={writable && !saving}
-          onChange={setCharacters}
-          onDialogueChange={setDialogueAudioId}
-          onAudioImported={(audio) =>
-            setAudios((items) => [audio, ...items.filter((a) => a.id !== audio.id)])
-          }
+          scopeNote="角色由本镜提示词确认；此处只选择本镜使用的参考图。"
+          audios={[]}
+          writable={writable && !saving && !fillingMode}
+          onChange={(next) => {
+            referenceEditRevision.current += 1;
+            setCharacters(next);
+          }}
+          onDialogueChange={() => undefined}
+          onAudioImported={() => undefined}
           actions={
             <button
               className="button secondary"
@@ -641,6 +955,7 @@ function ShotWorkspaceContent({
               candidates={availableAssets}
               projectId={projectId}
               writable={writable && !saving}
+              busy={Boolean(fillingMode)}
               onSelect={(id) => assign('character', id)}
             />
           ) : null}
@@ -653,18 +968,23 @@ function ShotWorkspaceContent({
             images={setting.assets}
             candidates={availableAssets}
             writable={writable && !saving}
-            busy={sceneBindingBusy}
-            message={sceneBindingMessage || setting.error}
-            onBind={onBindSceneDocument}
+            busy={saving || Boolean(fillingMode)}
+            message={setting.error}
             onOpen={onOpenDocument}
             onSelectImage={(id) => assign('scene', id)}
             onDropAsset={(asset) => assign('scene', asset.id)}
             imageDisabled={refs.ignoreSceneBinding}
             onRestore={
               sceneDocumentIds.length &&
-              (refs.sceneAssetId || refs.sceneAssetIds?.length || refs.ignoreSceneBinding)
+              (refs.sceneAssetId ||
+                refs.sceneAssetIds?.length ||
+                refs.ignoreSceneBinding ||
+                refs.sceneBindings?.length)
                 ? () => {
                     const next = { ...refs };
+                    next.sceneBindings = (next.sceneBindings ?? []).filter(
+                      (binding) => binding.sourceDocumentId !== primarySceneDocumentId,
+                    );
                     delete next.sceneAssetId;
                     delete next.sceneAssetIds;
                     delete next.ignoreSceneBinding;
@@ -675,10 +995,11 @@ function ShotWorkspaceContent({
           />
           <ReferenceSlot
             label="首帧"
-            asset={availableAssets.find((a) => a.id === refs.firstFrameAssetId)}
+            asset={availableAssets.find((a) => a.id === effectiveRefs.firstFrameAssetId)}
             candidates={availableAssets}
             projectId={projectId}
             writable={writable && !saving}
+            busy={Boolean(fillingMode)}
             onSelect={(id) => assign('firstFrame', id)}
           />
         </SceneCastEditor>
@@ -702,6 +1023,7 @@ function ShotWorkspaceContent({
         >
           <summary>镜头衔接{continuity?.binding ? ' · 已绑定' : ''}</summary>
           <ShotContinuityPanel
+            key={`${projectId}:${shotId}`}
             projectId={projectId}
             shotId={shotId}
             writable={writable && !saving}
@@ -709,11 +1031,23 @@ function ShotWorkspaceContent({
             revision={continuityRefresh}
             assets={availableAssets}
             llm={llm}
+            onAskAgent={onAskContinuityAgent}
             onChange={(next) => {
               setContinuity(next);
               setRefs((current) => {
                 if (!next.binding && !continuity?.binding) return current;
-                const updated = { ...current, firstFrameAssetId: next.binding?.firstFrameAssetId };
+                const updated = {
+                  ...current,
+                  firstFrameAssetId: next.binding
+                    ? next.binding.firstFrameAssetId
+                    : continuity?.binding
+                      ? undefined
+                      : current.firstFrameAssetId,
+                  continuityReferenceAssetIds: next.binding
+                    ? continuityReferenceImageIds(next.binding)
+                    : [],
+                  continuityPrompt: undefined,
+                };
                 saveShotReferences(projectId, shotId, updated);
                 return updated;
               });
@@ -722,19 +1056,17 @@ function ShotWorkspaceContent({
               const selected = {
                 ...effectiveRefs,
                 continuityRowVersion: next.rowVersion,
-                continuityPrompt:
-                  mode === 'image' ? next.binding?.imagePrompt : next.binding?.videoPrompt,
-                firstFrameAssetId: next.binding?.firstFrameAssetId,
+                continuityPrompt: next.binding?.imagePrompt,
+                firstFrameAssetId: undefined,
                 ...(mode === 'image'
                   ? {
-                      continuityReferenceAssetIds: next.binding?.frames.map(
-                        (frame) => frame.assetId,
-                      ),
+                      continuityReferenceAssetIds: next.binding
+                        ? continuitySourceImageIds(next.binding)
+                        : [],
                     }
                   : {}),
               };
-              if (mode === 'image') onGenerateImage(selected);
-              else onGenerateVideo(selected);
+              onGenerateImage(selected, prompt);
             }}
           />
         </details>
@@ -753,12 +1085,12 @@ function ShotWorkspaceContent({
               readOnly={!writable || storyboardBusy}
             />
           </label>
-          <textarea
-            className="markdown-editor"
-            aria-label={'\u5206\u955c\u5185\u5bb9'}
+          <MarkdownEditor
+            label="分镜内容"
             value={storyboardContent}
-            onChange={(event) => onStoryboardContentChange(event.target.value)}
+            onChange={onStoryboardContentChange}
             placeholder={'# \u5206\u955c\n\n1. \u955c\u5934\u63cf\u8ff0\u2026'}
+            autoPreviewOnBlur
             readOnly={!writable || storyboardBusy}
           />
           <div className="toolbar-actions">
@@ -786,6 +1118,7 @@ function ReferenceSlot({
   asset,
   candidates,
   writable,
+  busy = false,
   projectId,
   onSelect,
 }: {
@@ -793,6 +1126,7 @@ function ReferenceSlot({
   asset?: AssetInfo;
   candidates: AssetInfo[];
   writable: boolean;
+  busy?: boolean;
   projectId?: string;
   onSelect: (assetId?: string) => void;
 }) {
@@ -800,14 +1134,14 @@ function ReferenceSlot({
     <ReferenceCard
       label={label}
       asset={asset}
-      writable={writable}
+      writable={writable && !busy}
       projectId={projectId}
       onDropAsset={(a) => onSelect(a.id)}
       selector={
         <select
           aria-label={label}
           value={asset?.id ?? ''}
-          disabled={!writable}
+          disabled={!writable || busy}
           onChange={(event) => onSelect(event.target.value || undefined)}
         >
           <option value="">未选择</option>

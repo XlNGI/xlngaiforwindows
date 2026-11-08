@@ -238,9 +238,9 @@ export function validateProviderConfiguration(
     return;
   }
 
-  if (profile.category !== 'llm') {
+  if (profile.category !== 'llm' && profile.category !== 'multi') {
     throw new ProviderRegistryValidationError(
-      'Custom providers currently support the LLM category only.',
+      'Custom OpenAI-compatible providers must use the LLM or multi-modal category.',
     );
   }
   if (!CUSTOM_PROTOCOLS.has(profile.protocol)) {
@@ -289,7 +289,7 @@ export function inferKnownModelCapabilities(
     capabilities.embeddings = true;
     return capabilities;
   }
-  if (normalized.startsWith('gpt-image-')) {
+  if (providerType === 'openai' && normalized.startsWith('gpt-image-')) {
     capabilities.imageGeneration = true;
     return capabilities;
   }
@@ -325,7 +325,9 @@ function inferUniCompApiCapabilities(modelId: string): ProviderModelCapabilities
 }
 
 export function hasAnyModelCapability(capabilities: ProviderModelCapabilities): boolean {
-  return Object.values(capabilities).some(Boolean);
+  return Object.entries(capabilities).some(
+    ([key, value]) => key !== 'contextLimits' && value === true,
+  );
 }
 
 /**

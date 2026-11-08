@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { executeAgentBusiness } from './agent-business-execution.js';
+import { savedProductionReceipts } from './agent-saved-production-receipts.js';
+import { taskCheckpoint } from './agent-task-checkpoints.js';
 import { AgentInputService } from './agent-input-service.js';
 import type Database from 'better-sqlite3';
 import type {
@@ -43,6 +46,7 @@ import type { ProductionTarget } from '@ai-video/contracts';
 import type { NovelBatchService } from './novel-batch-service.js';
 import { readProductionSkill } from './production-skill-service.js';
 import type { MediaReviewService } from './media-review-service.js';
+import type { ShotContinuityService } from './shot-continuity-service.js';
 
 export interface AgentAssetToolService {
   listAssets(params: AssetListParams): AssetInfo[];
@@ -117,6 +121,7 @@ export class AgentSystemToolService {
     private readonly novels?: AgentNovelToolService,
     private readonly batches?: Pick<NovelBatchService, 'submit' | 'get' | 'readSource'>,
     private readonly mediaReviews?: MediaReviewService,
+    private readonly continuity?: ShotContinuityService,
   ) {
     this.productionQueries = new AgentProductionQueryService(new ProductionService(projects));
   }
@@ -124,6 +129,7 @@ export class AgentSystemToolService {
   availableOperations(): SystemAgentToolOperation[] {
     return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
       (name) => {
+        if (name.startsWith('shot.continuity.')) return Boolean(this.continuity);
         if (name.startsWith('media.review.') || name === 'media.audio.read')
           return Boolean(this.mediaReviews);
         if (name.startsWith('novel.chapter.batch.')) return Boolean(this.batches);
@@ -136,11 +142,7 @@ export class AgentSystemToolService {
           name === 'novel.chapter.restore'
         )
           return !!this.novels;
-        if (
-          name === 'document.submit_draft' ||
-          name === 'novel.chapter.write_draft' ||
-          name === 'document.publish'
-        )
+        if (name === 'document.submit_draft' || name === 'novel.chapter.write_draft')
           return !!this.documents;
         if (name.startsWith('maintenance.')) return !!this.maintenance;
         if (name === 'media.task.get') return !!this.mediaTasks;
@@ -156,7 +158,66 @@ export class AgentSystemToolService {
   ): Record<string, unknown> {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
+    if (
+      identity.taskId &&
+      unifiedAgentToolRegistry.require(operation).executionLane !== 'parallel-readonly'
+    )
+      return this.projects.access(
+        true,
+        (db, project) =>
+          JSON.parse(
+            executeAgentBusiness(
+              db,
+              project.id,
+              identity.taskId!,
+              operation,
+              args,
+              (businessArgs) => this.executeUnlogged(operation, businessArgs, identity),
+            ),
+          ) as Record<string, unknown>,
+      );
+    return this.executeUnlogged(operation, args, identity);
+  }
+
+  private executeUnlogged(
+    operation: SystemAgentToolOperation,
+    args: Record<string, unknown>,
+    identity: AgentSystemToolIdentity,
+  ): Record<string, unknown> {
     switch (operation) {
+      case 'shot.continuity.read':
+        rejectUnknown(args, ['shotId', 'includeImages']);
+        if (args.includeImages !== undefined && typeof args.includeImages !== 'boolean')
+          throw new Error('includeImages must be boolean.');
+        if (!this.continuity) throw unavailable('Shot continuity');
+        return this.continuity.readForAgent(requiredString(args.shotId, 'shotId', 200));
+      case 'shot.continuity.save': {
+        rejectUnknown(args, ['shotId', 'expectedRowVersion', 'sourceToken', 'intent', 'prompt']);
+        if (!this.continuity) throw unavailable('Shot continuity');
+        const shotId = requiredString(args.shotId, 'shotId', 200);
+        const expected = requiredInteger(
+          args.expectedRowVersion,
+          'expectedRowVersion',
+          0,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const intent = requiredString(args.intent, 'intent', 4000);
+        const prompt = requiredString(args.prompt, 'prompt', 20000);
+        const saved = this.continuity.saveForAgent(
+          shotId,
+          expected,
+          requiredString(args.sourceToken, 'sourceToken', 64),
+          intent,
+          prompt,
+        );
+        return {
+          status: 'shot_reference_prompt_saved',
+          shotId,
+          rowVersion: saved.rowVersion,
+          intent,
+          prompt,
+        };
+      }
       case 'conversation.ask': {
         const form = new AgentInputService(this.projects).prepare(args, identity);
         return {
@@ -203,6 +264,10 @@ export class AgentSystemToolService {
         return readProductionSkill(args);
       case 'conversation.task.route':
         return this.routeConversationTask(args, identity);
+      case 'conversation.task.checkpoint':
+        return this.projects.access(false, (database, project) =>
+          taskCheckpoint(database, project.id, args, identity),
+        );
       case 'novel.chapter.batch.submit':
         if (!this.batches) throw unavailable('Chapter batches');
         return this.batches.submit(args, identity);
@@ -220,7 +285,16 @@ export class AgentSystemToolService {
           unknown
         >;
       case 'production.read':
-        rejectUnknown(args, ['target', 'view', 'offset', 'limit', 'expectedVersion', 'ifVersion']);
+        rejectUnknown(args, [
+          'target',
+          'view',
+          'offset',
+          'limit',
+          'recordOffset',
+          'recordLimit',
+          'expectedVersion',
+          'ifVersion',
+        ]);
         return this.productionQueries.read(
           args.target as ProductionTarget,
           args,
@@ -228,7 +302,16 @@ export class AgentSystemToolService {
           'authoring',
         );
       case 'scene.read': {
-        rejectUnknown(args, ['sceneId', 'view', 'offset', 'limit', 'expectedVersion', 'ifVersion']);
+        rejectUnknown(args, [
+          'sceneId',
+          'view',
+          'offset',
+          'limit',
+          'recordOffset',
+          'recordLimit',
+          'expectedVersion',
+          'ifVersion',
+        ]);
         const sceneId = requiredString(args.sceneId, 'sceneId', 200);
         const scene = this.content.listScenes().find((item) => item.id === sceneId);
         if (!scene) throw new Error('Scene was not found in the current project.');
@@ -344,7 +427,6 @@ export class AgentSystemToolService {
       case 'conversation.restore':
       case 'novel.chapter.archive':
       case 'novel.chapter.restore':
-      case 'document.publish':
       case 'asset.move_to_trash':
       case 'asset.restore':
       case 'asset.purge':
@@ -361,6 +443,34 @@ export class AgentSystemToolService {
           `Tool ${operation} must use the Worker confirmation workflow.`,
         );
     }
+  }
+
+  readContinuityImages(
+    shotId: string,
+    expectedRowVersion: number,
+    identity: AgentSystemToolIdentity & { generationId: string },
+    sourceToken: string,
+  ) {
+    this.assertIdentity(identity);
+    if (!this.continuity) throw unavailable('Shot continuity');
+    const selection = this.projects.access(
+      false,
+      (database) =>
+        database
+          .prepare(
+            'SELECT provider_profile_id,model_id FROM llm_generations WHERE id=? AND project_id=?',
+          )
+          .get(identity.generationId, identity.projectId) as
+          { provider_profile_id: string; model_id: string } | undefined,
+    );
+    if (
+      !selection ||
+      !this.settings
+        .listModels(selection.provider_profile_id)
+        .some((model) => model.id === selection.model_id && model.capabilities.vision)
+    )
+      throw new Error('请选择支持看图的会话模型来读取参考画面。');
+    return this.continuity.imagesForAgent(shotId, expectedRowVersion, sourceToken);
   }
 
   private reviewSummary(form: import('@ai-video/contracts').MediaReviewSummary) {
@@ -385,7 +495,22 @@ export class AgentSystemToolService {
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
   ): Record<string, unknown> {
-    rejectUnknown(args, ['decision', 'targetGenerationId', 'content', 'rationale']);
+    rejectUnknown(args, [
+      'decision',
+      'targetGenerationId',
+      'content',
+      'rationale',
+      'receiptOffset',
+      'receiptLimit',
+    ]);
+    const receiptOffset =
+      args.receiptOffset === undefined
+        ? 0
+        : requiredInteger(args.receiptOffset, 'receiptOffset', 0, Number.MAX_SAFE_INTEGER);
+    const receiptLimit =
+      args.receiptLimit === undefined
+        ? 20
+        : requiredInteger(args.receiptLimit, 'receiptLimit', 1, 20);
     const decision = requiredString(args.decision, 'decision', 32) as
       'independent' | 'follow_up' | 'supplement' | 'inspect';
     if (!new Set(['independent', 'follow_up', 'supplement', 'inspect']).has(decision))
@@ -480,6 +605,9 @@ export class AgentSystemToolService {
             targetRequest: splitConversationRequest(target.user_content).request.slice(0, 800),
             targetSummary: target.assistant_content.slice(0, 1600),
             summaryIsAssistantClaim: true,
+            savedProductionReceipts: savedProductionReceipts(database, project.id, {
+              generationId: target.id,
+            }),
             rationale,
           };
         }
@@ -505,6 +633,13 @@ export class AgentSystemToolService {
             targetRequest: splitConversationRequest(target.user_content).request.slice(0, 800),
             artifacts,
             outputs,
+            savedProductionReceipts: savedProductionReceipts(
+              database,
+              project.id,
+              { generationId: target.id },
+              receiptOffset,
+              receiptLimit,
+            ),
             dependencyEstablished: false,
             rationale,
           };
@@ -593,8 +728,6 @@ export class AgentSystemToolService {
       case 'novel.chapter.archive':
       case 'novel.chapter.restore':
         return this.previewNovelChapterLifecycle(operation, args);
-      case 'document.publish':
-        return this.previewDocumentPublication(args);
       case 'asset.move_to_trash':
       case 'asset.restore':
       case 'asset.purge':
@@ -665,41 +798,6 @@ export class AgentSystemToolService {
           status: operation === 'novel.chapter.archive' ? 'archived' : 'restored',
           chapter: toNovelChapterSummary(chapter),
           summary: preview.summary,
-        };
-      }
-      case 'document.publish': {
-        rejectUnknown(args, [
-          'documentId',
-          'documentVersionId',
-          'expectedDocumentRowVersion',
-          'expectedPublishedVersionId',
-        ]);
-        if (!this.documents) throw unavailable('Document publication');
-        const documentId = requiredString(args.documentId, 'documentId', 200);
-        const documentVersionId = requiredString(args.documentVersionId, 'documentVersionId', 200);
-        const expectedDocumentRowVersion = requiredInteger(
-          args.expectedDocumentRowVersion,
-          'expectedDocumentRowVersion',
-          0,
-          Number.MAX_SAFE_INTEGER,
-        );
-        const expectedPublishedVersionId = optionalString(
-          args.expectedPublishedVersionId,
-          'expectedPublishedVersionId',
-          200,
-        );
-        const published = this.documents.selfPublish({
-          documentId,
-          documentVersionId,
-          expectedDocumentRowVersion,
-          ...(expectedPublishedVersionId ? { expectedPublishedVersionId } : {}),
-        });
-        return {
-          version: 1,
-          status: 'published',
-          documentId,
-          documentVersionId: published.publication.documentVersionId,
-          publicationId: published.publication.id,
         };
       }
       case 'asset.move_to_trash': {
@@ -825,13 +923,59 @@ export class AgentSystemToolService {
   }
 
   private projectStructure(args: Record<string, unknown>): Record<string, unknown> {
-    rejectUnknown(args, ['includeArchived', 'detail']);
+    rejectUnknown(args, [
+      'includeArchived',
+      'detail',
+      'workspace',
+      'kind',
+      'parentId',
+      'query',
+      'offset',
+      'limit',
+      'expectedRevision',
+    ]);
     const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? false;
+    const workspace = optionalString(args.workspace, 'workspace', 30);
+    const kind = optionalString(args.kind, 'kind', 30);
+    if (
+      workspace &&
+      !['novel', 'documents', 'characters', 'shots', 'assets', 'tasks', 'settings'].includes(
+        workspace,
+      )
+    )
+      throw new Error('Invalid workspace.');
+    if (
+      kind &&
+      ![
+        'workspace',
+        'document',
+        'structure-node',
+        'novel-volume',
+        'scene',
+        'shot',
+        'asset',
+        'conversation',
+      ].includes(kind)
+    )
+      throw new Error('Invalid resource kind.');
+    if (args.detail !== undefined && args.detail !== 'compact' && args.detail !== 'full')
+      throw new Error('Invalid detail.');
+    const page = {
+      workspace,
+      kind,
+      parentId: optionalString(args.parentId, 'parentId', 200),
+      query: optionalString(args.query, 'query', 200),
+      offset: optionalInteger(args.offset, 'offset', 0, Number.MAX_SAFE_INTEGER),
+      limit: optionalInteger(args.limit, 'limit', 1, 20),
+      expectedRevision: optionalString(args.expectedRevision, 'expectedRevision', 64),
+    };
     if (!this.structureCompiler) throw unavailable('Project structure');
     return this.projects.access(false, (database, project) => ({
       version: 1,
       status: 'succeeded',
-      resourceMap: compileProjectResourceMap(database, project, includeArchived),
+      resourceMap: compileProjectResourceMap(database, project, includeArchived, page),
+      revisionUsage:
+        'Write expectedRevision uses resourceMap.revision only. structure.revision is a different snapshot marker, not a write token. Existing targets additionally require their current object CAS.',
       ...(args.detail === 'full'
         ? boundedStructurePreview(
             this.structureCompiler!.compileFromDatabase(database, project, {
@@ -1277,28 +1421,6 @@ export class AgentSystemToolService {
         chapterId: chapter.id,
         expectedRowVersion: chapter.rowVersion,
         ...(operation === 'novel.chapter.archive' ? { reason: 'user_archive' } : {}),
-      },
-    };
-  }
-
-  private previewDocumentPublication(
-    args: Record<string, unknown>,
-  ): AgentSystemToolConfirmationPreview {
-    rejectUnknown(args, ['documentId']);
-    if (!this.documents) throw unavailable('Document publication');
-    const documentId = requiredString(args.documentId, 'documentId', 200);
-    const document = this.documents.getDocument(documentId);
-    if (!document.currentVersion) throw new Error('Document has no current version to publish.');
-    return {
-      summary: `发布文档“${document.title}”的 v${document.currentVersion.version} 版本`,
-      affectedEntities: [{ type: 'document', id: document.id, label: document.title }],
-      executionArguments: {
-        documentId: document.id,
-        documentVersionId: document.currentVersion.id,
-        expectedDocumentRowVersion: document.rowVersion,
-        ...(document.publishedVersionId
-          ? { expectedPublishedVersionId: document.publishedVersionId }
-          : {}),
       },
     };
   }

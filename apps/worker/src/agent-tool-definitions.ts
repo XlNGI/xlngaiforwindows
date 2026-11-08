@@ -4,20 +4,56 @@ import type {
   AgentToolRiskLevel,
   LlmToolDefinition,
 } from '@ai-video/contracts';
-import { productionTargetSchema, productionTimingSchema } from '@ai-video/contracts';
+import {
+  DOCUMENT_KINDS,
+  productionTargetSchema,
+  productionTimingSchema,
+  SHOT_CAMERA_LIGHTING_REQUIREMENTS,
+  SHOT_TIMING_REQUIREMENTS,
+} from '@ai-video/contracts';
 import { PRODUCTION_AUTHORING_GUIDANCE } from './production-authoring-guidance.js';
+import {
+  taskCheckpointParameters,
+  TASK_REVIEW_PROPERTIES,
+} from './agent-task-checkpoint-schema.js';
+import { DELIVERABLE_TOOLS, REFERENCE_DELIVERABLE_TOOLS } from './agent-task-deliverables.js';
+import { TASK_CRITERIA_SCHEMA } from './agent-task-criteria.js';
 import { MEDIA_REVIEW_DRAFT_SCHEMA, AGENT_INPUT_DRAFT_SCHEMA } from '@ai-video/contracts';
 
 const PRODUCTION_QUERY_PROPERTIES = {
   view: { type: 'string', enum: ['structure', 'authoring', 'text', 'issues', 'media'] },
-  offset: { type: 'integer', minimum: 0 },
-  limit: { type: 'integer', minimum: 1, maximum: 4096 },
+  offset: {
+    type: 'integer',
+    minimum: 0,
+    description:
+      'UTF-16 character offset for text/authoring or explicit legacy JSON pages; never a record offset.',
+  },
+  limit: {
+    type: 'integer',
+    minimum: 1,
+    maximum: 4096,
+    description:
+      'UTF-16 characters per page, default 4096. For structure/media/issues prefer recordLimit.',
+  },
+  recordOffset: {
+    type: 'integer',
+    minimum: 0,
+    description:
+      'Whole-record offset for structure/media/issues. Follow recordPage.nextOffset with expectedVersion.',
+  },
+  recordLimit: {
+    type: 'integer',
+    minimum: 1,
+    maximum: 20,
+    description:
+      'Whole records per structure/media/issues page, default 20; also bounded by bytes. Do not mix with offset/limit.',
+  },
   expectedVersion: { type: 'string', minLength: 64, maxLength: 64 },
   ifVersion: { type: 'string', minLength: 64, maxLength: 64 },
 };
 
 const DOCUMENT_KIND_DESCRIPTION =
-  'Content category: character=person/character design, scene=location/environment, prop=independent object. Locations and characters are not props. No prop document is needed when the story needs no props.';
+  'Content category: outline=story outline, plan=short-drama script/episode overview or production plan, constraint=plot/story constraint, character=person/character design, scene=location/environment, prop=independent object. Locations and characters are not props. No prop document is needed when the story needs no props.';
 
 const productionAuthoringIRSchema = (kind: 'scene' | 'shot') => ({
   type: 'object',
@@ -42,7 +78,7 @@ const productionAuthoringIRSchema = (kind: 'scene' | 'shot') => ({
           description:
             kind === 'shot'
               ? 'Real character document IDs for everyone visible anywhere in this shot, including silent/background/distant or brief closing appearances. Keep this scope consistent with prompt. A mere mention or offscreen presence does not establish a visual reference. [] means no characters; omission on creation inherits scene cast, omission on revision preserves saved scope.'
-              : 'Real character document IDs for this scene cast, including characters without dialogue. [] clears cast; omission preserves existing bindings.',
+              : 'Scene-level media bindings are not used for ordinary production. Declare actual visible characters in each shot reference list; the scene page shows their union.',
           maxItems: 100,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 200 },
@@ -50,7 +86,9 @@ const productionAuthoringIRSchema = (kind: 'scene' | 'shot') => ({
         sceneDocumentIds: {
           type: 'array',
           description:
-            'Real scene document IDs for referenced locations/environments. These are setting documents, not story scene IDs or props. [] clears these references.',
+            kind === 'shot'
+              ? 'Complete list of real scene document IDs for locations/environments referenced by this shot. These are setting documents, not story scene IDs or props. [] means no location references.'
+              : "Scene-level media bindings are not used for ordinary production. Put each shot's complete location list in that shot's references; the scene page shows their union.",
           maxItems: 100,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 200 },
@@ -58,7 +96,9 @@ const productionAuthoringIRSchema = (kind: 'scene' | 'shot') => ({
         propDocumentIds: {
           type: 'array',
           description:
-            'Real prop document IDs for independent objects used in this scope. Excludes characters and locations/environments. [] is valid when no props are needed; do not create a prop to fill this list. Omission on revision preserves saved references.',
+            kind === 'shot'
+              ? 'Complete list of real prop document IDs for independent objects used in this shot. Excludes characters and locations/environments. [] means no props; do not create a prop to fill this list.'
+              : "Scene-level media bindings are not used for ordinary production. Put each shot's complete prop list in that shot's references; the scene page shows their union.",
           maxItems: 100,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 200 },
@@ -78,6 +118,7 @@ export type SystemAgentToolOperation =
   | 'media.review.read'
   | 'media.audio.read'
   | 'conversation.task.route'
+  | 'conversation.task.checkpoint'
   | 'production.read'
   | 'production.defaults.get'
   | 'document.submit_draft'
@@ -90,6 +131,8 @@ export type SystemAgentToolOperation =
   | 'scene.update_shot_prompts'
   | 'scene.structure.stage'
   | 'scene.read'
+  | 'shot.continuity.read'
+  | 'shot.continuity.save'
   | 'project.get_context'
   | 'project.structure.get'
   | 'project.integrity.check'
@@ -101,7 +144,6 @@ export type SystemAgentToolOperation =
   | 'conversation.rename'
   | 'conversation.archive'
   | 'conversation.restore'
-  | 'document.publish'
   | 'asset.search'
   | 'asset.get'
   | 'asset.update_alias'
@@ -189,7 +231,13 @@ const RESOURCE_LOCATOR_PROPERTIES = {
   documentId: { type: 'string', minLength: 1, maxLength: 200 },
   structureNodeId: { type: 'string', minLength: 1, maxLength: 200 },
   versionId: { type: 'string', minLength: 1, maxLength: 200 },
-  expectedRevision: { type: 'string', minLength: 1, maxLength: 200 },
+  expectedRevision: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 200,
+    description:
+      'Optional directory CAS: exact resourceMap.revision from project.structure.get, never structure.revision. Existing object writes also require their own current row/version CAS. A stale revision is a real conflict; read and decide before retrying.',
+  },
   expectedRowVersion: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
 } as const;
 
@@ -197,7 +245,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.create_draft',
     description:
-      'Create one reviewable Markdown document draft for the current project. Always set documentKind so the draft appears on the matching project-document page: outline=大纲, plan=计划, character=角色, scene=场景, prop=道具. Omit it only for private notes. Character/scene/prop reference documents belong here; actual 场次/镜头 must use novel.episode.submit_structure. For character prompts, write exactly one character or named group per call and title it with that name. If several characters are needed, call this tool repeatedly instead of combining them into one draft. For character, scene or prop source documents you may attach versioned contentIR={schemaVersion:1,kind,data}; keep data open-ended and include only information you chose from material you actually read.',
+      'Create one reviewable Markdown document draft for the current project. Always set documentKind so the draft appears on the matching project-document page: outline=大纲, plan=计划, constraint=约束, character=角色, scene=场景, prop=道具. Omit it only for private notes. Constraint documents define reusable plot/story rules and are separate from the current conversation requirements. Character/scene/prop reference documents belong here; actual 场次/镜头 must use novel.episode.submit_structure. For character, scene or prop image deliverables, contentMarkdown is the complete Agent-authored generation prompt: include every applicable current-session requirement in that text, not only in contentIR.data, notes or the assistant reply. For character prompts, write exactly one character or named group per call and title it with that name. If several characters are needed, call this tool repeatedly instead of combining them into one draft. For character, scene or prop source documents you may attach versioned contentIR={schemaVersion:1,kind,data}; keep data open-ended and include only information you chose from material you actually read.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -209,7 +257,16 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
         documentKind: {
           type: 'string',
           description: DOCUMENT_KIND_DESCRIPTION,
-          enum: ['outline', 'plan', 'character', 'scene', 'prop', 'storyboard', 'note'],
+          enum: [
+            'outline',
+            'plan',
+            'constraint',
+            'character',
+            'scene',
+            'prop',
+            'storyboard',
+            'note',
+          ],
         },
         ...RESOURCE_LOCATOR_PROPERTIES,
       },
@@ -228,7 +285,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.update_draft',
     description:
-      'Create a reviewable revision of the Worker-authorized document. For character, scene or prop documents, provide a matching versioned contentIR when updating structured content; the data object stays open-ended.',
+      'Create a reviewable revision of the Worker-authorized draft. Published documents are immutable and cannot be updated; the user must first cancel publication in the UI. For character, scene or prop image deliverables, contentMarkdown must be the complete revised Agent-authored generation prompt and must retain every applicable current-session requirement. Do not move generation requirements into contentIR.data, notes or the assistant reply. For character, scene or prop documents, provide a matching versioned contentIR when updating structured content; the data object stays open-ended.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -308,7 +365,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'novel.episode.submit_structure',
     description:
-      'Save a short-drama episode structure immediately as editable drafts without user confirmation. You choose useful project materials and tools. For new creative content, provide scene/shot authoringIR with the complete prompt and every real document ID to reference; locations/environments always use authoringIR.references.sceneDocumentIds (the full list), characters use characterDocumentIds, and props use propDocumentIds. data is open-ended. The application checks IR shape, project scope and reference types; follow every user requirement in the prompt. Total scenes and shots: at most 100. Existing scenes use sceneId and expectedRowVersion; binding-only changes may use compatibility fields without replacing the IR list. For unclear references return needs_clarification; never invent IDs. Large submissions can use scene.structure.stage.',
+      "Save a short-drama episode structure immediately as editable drafts without user confirmation. You choose useful project materials and tools. For each shot, author the complete prompt and all three complete reference lists with real IDs: locations/environments in that shot's authoringIR.references.sceneDocumentIds, characters in characterDocumentIds, and independent props in propDocumentIds; use [] when a role is empty. Confirm each object kind/title/ID and keep references consistent with the shot prompt. Scene-level materials are not bound; scene pages show the union of their shots. data is open-ended. The application checks IR shape, project scope and reference types; follow every user requirement in the prompt. For plans larger than 100 scene+shot items, split into unique persistent stage pages and complete all pages in this task; 100 is a per-page limit, not a task limit. Existing scenes use sceneId and expectedRowVersion; do not use compatibility scene fields to establish material bindings. For unclear references return needs_clarification; never invent IDs. Large submissions can use scene.structure.stage.",
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -337,7 +394,7 @@ export const DOCUMENT_AGENT_TOOLS: LlmToolDefinition[] = [
                 minLength: 1,
                 maxLength: 200,
                 description:
-                  'Legacy compatibility field for one reusable production scene document. For every location/environment used by this scene, put the complete list of real IDs in authoringIR.references.sceneDocumentIds; never use this field to replace or truncate that list.',
+                  "Legacy compatibility metadata only; do not use it to establish new media bindings. Put each shot's complete location/environment ID list in that shot's authoringIR.references.sceneDocumentIds.",
               },
               sceneId: {
                 type: 'string',
@@ -485,6 +542,40 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'shot.continuity.read',
+    description:
+      'Read shot continuity metadata and current reference-image workflow. Default metadata only: saved intent, prompt, confirmed frames and selected references. Set includeImages=true explicitly to inspect ordered pixels with a vision model; required before describing visible details or authoring an image prompt from visual evidence. A current binding and source checks still apply. Ask conversation.ask when the target moment or composition is unclear. No paid request.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['shotId'],
+      properties: {
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeImages: {
+          type: 'boolean',
+          default: false,
+          description: 'Explicitly attach confirmed reference pixels. Omit for metadata checks.',
+        },
+      },
+    },
+  },
+  {
+    name: 'shot.continuity.save',
+    description: `Save the user intent and complete editable STATIC reference-image prompt for an existing confirmed shot selection using its current rowVersion from shot.continuity.read. Use the actual visual inputs and user goal; preserve relevant visible state without inventing invisible geometry. A reference may show the start or a middle moment. Does not edit the shot VIDEO prompt, bind an image, or generate media. The user reviews/edits the saved prompt and fills the ordinary image form from the shot page. Re-read after conflicts; do not silently apply output based on an obsolete selection.\n${SHOT_CAMERA_LIGHTING_REQUIREMENTS}`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['shotId', 'expectedRowVersion', 'sourceToken', 'intent', 'prompt'],
+      properties: {
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+        sourceToken: { type: 'string', minLength: 64, maxLength: 64 },
+        intent: { type: 'string', minLength: 1, maxLength: 4000 },
+        prompt: { type: 'string', minLength: 1, maxLength: 20000 },
+      },
+    },
+  },
+  {
     name: 'conversation.ask',
     description:
       'The structured interface whenever you ask the user to choose a direction, answer a clarification, or provide supplemental input. This includes optional next steps after completing a task, such as continuing the next chapter or reviewing the saved chapter, even if expressed in one sentence and not blocking the completed work. Present related questions and choices as one interactive form instead of asking in ordinary assistant text. Keep completion reports and content summaries as normal text; finish without a form when no user choice is needed. Do not repeat the form questions or options in text after creating it. Declare single-choice, multiple-choice, or free-text questions; every question also accepts a custom written answer. No option is selected automatically. Use a stable key to avoid duplicate forms. The user submits answers as their next conversation message, and the ordinary Agent continues the task. Form JSON must be at most 32768 UTF-8 bytes. This tool returns only a receipt, never user answers or permission to execute an unselected next step.',
@@ -534,7 +625,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'production.skill.read',
     description:
-      'Read a reusable production skill declaration. chapters-to-script creates editable short-drama materials from selected chapters; script-to-media prepares all media review forms. Uses this same Agent and existing tools; no generation or authorization is performed by loading a skill.',
+      'Read a reusable production skill declaration. chapters-to-script creates only an editable script from selected chapters; script-to-media creates editable production documents, scenes/shots, prompts and bindings without media review forms or image/video/audio generation. Uses this same Agent and existing tools.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -545,7 +636,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.structure.stage',
     description:
-      'Persist resumable scene/shot drafts in small parts. Choose useful project resources and tools; put every applicable user requirement in each final authoringIR.prompt. References are optional and data is supplementary; the application validates and saves text without semantic rewriting. begin uses executionKey, episodeTitle and sceneShotCounts (total scenes+shots <=100). put_shots accepts at most four ordered shots at shotOffset. Completed scenes save atomically in manifest order; get returns progress and real IDs. Incomplete finalize reports progress; checkpoint may end a task as partial when staged or saved content exists. Manifest entries are immutable; later revisions use CAS. Stages are conversation-scoped and retry-safe.',
+      'Persist resumable scene/shot drafts in small parts. Choose useful project resources and tools; put every applicable user requirement in each final authoringIR.prompt. References are optional and data is supplementary; the application validates and saves text without semantic rewriting. Each begin creates one page with executionKey, episodeTitle and sceneShotCounts (at most 20 scenes and 100 combined scene+shot items). For larger work, create successive pages with distinct stable executionKeys and finish every page in this task. put_shots accepts at most four ordered shots at shotOffset. Completed scenes save atomically in manifest order; get returns progress and real IDs. Incomplete finalize and checkpoint only persist/report progress; they never complete an unfinished task. Manifest entries are immutable; later revisions use CAS. Stages are conversation-scoped and retry-safe.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -570,6 +661,13 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
           maxLength: 128,
           description: 'Omit with get to list resumable stages in this conversation.',
         },
+        pageOffset: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Offset for paginating the resumable stages returned by get without stageId.',
+        },
+        pageSize: { type: 'integer', minimum: 1, maximum: 100 },
         expectedRowVersion: {
           type: 'integer',
           minimum: 0,
@@ -589,7 +687,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
               minLength: 1,
               maxLength: 200,
               description:
-                'Legacy compatibility field only. Keep the complete reusable location list in authoringIR.references.sceneDocumentIds.',
+                "Legacy compatibility metadata only; do not use it to establish new media bindings. Put each shot's complete location/environment ID list in that shot's authoringIR.references.sceneDocumentIds.",
             },
             characterDocumentIds: {
               type: 'array',
@@ -635,6 +733,159 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
   {
+    name: 'conversation.task.checkpoint',
+    description:
+      'review: use the current Worker reviewId after readiness succeeds. List only assessed reviewScope IDs in reviewedTargetIds; omitted targets remain pending. Compare saved plans with actual shots and assess open issueIds; report only concrete content defects with targetId, category, description and exact referenceId/quote evidence. Worker owns versions and readiness. Close issues explicitly via resolutions: resolved after the affected target changes and is read, or withdrawn for an evidence-backed false positive without unnecessary content edits. Unaffected targets retain review coverage. state: read persisted requirements, decisions, pending work, saved artifacts and evidence (20 records per stateOffset page). result: read immutable full working data using resultId, resultOffset, resultLimit and expectedHash; concatenate pages before JSON parsing. decision: preserve an exact user-confirmed requirement excerpt with sourceRequirementId; never promote assistant notes to a user decision. plan: register requested document/shot deliverables using stable key, toolName, minimumCount and documentKind per kind. Declare intent=create/reuse/revise/verify and origin=user_requirement/model_inference. User obligations cite persisted sourceRequirementIds and stay protected; model assumptions can be corrected on the same key with revisionReason. Use real targetIds for existing work and dependsOn for prerequisites; requireReferences=true for bindings. Structure tools count scenes, never shots. Worker checks current targets, reads, applicable writes and review coverage. Editing tools use IDs and CAS, not creation outputId. Discussion/queries need no plan. partial: report a concrete blocker in reason and end unfinished. save: hand off within this SAME task before history squeezes output; remainingWork preserves ALL outstanding targets/IDs/cursor, workingNotes preserves decisions, source locators, errors and continuity. Do not copy source bodies. A checkpoint alone proves no business save or completion. Worker-accepted contract revisions, new review coverage and issue closures are decision progress; only committed business receipts prove saves. read: restore current or targetGenerationId checkpoint in this conversation. receiptOffset pages saves; evidenceOffset selects one audit row, evidenceContentOffset pages raw resultJson in UTF-16 units. Use one page type per call; concatenate all resultJson pages before parsing. Reuse current evidence, reread stale state before editing; never replay completed writes or ambiguous paid submissions.',
+    parameters: taskCheckpointParameters({
+      operation: {
+        type: 'string',
+        enum: ['save', 'read', 'plan', 'partial', 'result', 'state', 'decision', 'review'],
+      },
+      ...TASK_REVIEW_PROPERTIES,
+      sourceRequirementId: { type: 'string', minLength: 1, maxLength: 256 },
+      decision: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 2000,
+        description:
+          'An exact excerpt from a persisted user requirement. Assistant assumptions cannot be recorded as confirmed decisions.',
+      },
+      stateOffset: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'Page persisted task state collections, 20 records at a time, with operation=state. Includes historical evidence versions labelled by status.',
+      },
+      resultId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description:
+          'Read complete persisted working data by resultId; use operation=result and follow nextOffset. The full JSON is immutable; concatenate pages before parsing. Do not repeat the original business operation.',
+      },
+      resultView: {
+        type: 'string',
+        enum: ['content', 'arguments'],
+        description:
+          'Default content. Use arguments to recover complete original tool parameters, including rejected drafts; expectedHash applies to the selected view.',
+      },
+      resultOffset: { type: 'integer', minimum: 0 },
+      resultLimit: { type: 'integer', minimum: 1, maximum: 16384 },
+      expectedHash: { type: 'string', minLength: 64, maxLength: 64 },
+      deliverables: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 50,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['key', 'toolName', 'minimumCount'],
+          properties: {
+            key: { type: 'string', minLength: 1, maxLength: 128 },
+            intent: {
+              type: 'string',
+              enum: ['create', 'reuse', 'revise', 'verify'],
+              description:
+                'create saves new outputs; reuse/verify validates existing targetIds after current complete reads; revise requires a real change plus readback. Never rewrite correct existing work just to obtain a receipt.',
+            },
+            origin: {
+              type: 'string',
+              enum: ['user_requirement', 'model_inference'],
+              description:
+                'User obligations require sourceRequirementIds and remain protected. Model assumptions can be corrected on the same key with revisionReason. Legacy declarations remain protected.',
+            },
+            sourceRequirementIds: {
+              type: 'array',
+              maxItems: 1000,
+              uniqueItems: true,
+              items: { type: 'string', minLength: 1, maxLength: 256 },
+              description: 'Persisted task requirement IDs establishing a user obligation.',
+            },
+            dependsOn: {
+              type: 'array',
+              maxItems: 50,
+              uniqueItems: true,
+              items: { type: 'string', minLength: 1, maxLength: 128 },
+              description:
+                'Prerequisite deliverable keys. Changes invalidate dependent quality coverage.',
+            },
+            description: { type: 'string', maxLength: 1000 },
+            toolName: {
+              type: 'string',
+              enum: [...DELIVERABLE_TOOLS],
+            },
+            documentKind: {
+              type: 'string',
+              enum: [...DOCUMENT_KINDS],
+              description: 'Only for document.submit_draft. Scripts/episode overviews use plan.',
+            },
+            minimumCount: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                'Count OUTPUTS: structure tools count scenes (not shots); prompt/timing updates count shots; document tools count documents. Do not freeze a guessed shot count as a scene requirement.',
+            },
+            revisionReason: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 2000,
+              description:
+                'Correct a model assumption on its stable key with a concrete source-based reason. User obligations and legacy exact requirements remain protected. This never changes the original task requirements or proves completion.',
+            },
+            requiredTexts: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 200,
+              uniqueItems: true,
+              description:
+                'Exact substrings copied from the user request or source text, such as every original dialogue line. Do not prepend invented speaker labels, quotes or formatting; check speakers separately. Checked across saved Markdown/shot prompts, not supplemental metadata.',
+              items: { type: 'string', minLength: 1, maxLength: 2000 },
+            },
+            criteria: TASK_CRITERIA_SCHEMA,
+            targetIds: {
+              type: 'array',
+              description:
+                'Existing OUTPUT document/shot/scene IDs, never input source IDs. Structure tools count saved scenes. Omit for new outputs.',
+              minItems: 1,
+              maxItems: 1000,
+              uniqueItems: true,
+              items: { type: 'string', minLength: 1, maxLength: 128 },
+            },
+            requireReferences: {
+              type: 'boolean',
+              description:
+                'For shot prompt updates or scene structure creation; verifies saved per-shot references.',
+            },
+          },
+          allOf: [
+            {
+              if: { required: ['documentKind'] },
+              then: { properties: { toolName: { const: 'document.submit_draft' } } },
+            },
+            {
+              if: { required: ['requireReferences'] },
+              then: { properties: { toolName: { enum: [...REFERENCE_DELIVERABLE_TOOLS] } } },
+            },
+          ],
+        },
+      },
+      reason: { type: 'string', minLength: 1, maxLength: 2000 },
+      blockedByCallId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 256,
+        description:
+          'For a genuine non-retryable blocker only: identify its failed call from this same task. Missing text or unloaded schemas are repair work; load tools and continue.',
+      },
+      remainingWork: { type: 'string', minLength: 1, maxLength: 6000 },
+      workingNotes: { type: 'string', minLength: 1, maxLength: 6000 },
+      targetGenerationId: { type: 'string', minLength: 1, maxLength: 128 },
+      evidenceOffset: { type: 'integer', minimum: 0 },
+      evidenceContentOffset: { type: 'integer', minimum: 0 },
+      receiptOffset: { type: 'integer', minimum: 0 },
+    }),
+  },
+  {
     name: 'conversation.task.route',
     description:
       'Decide how the current user request relates to recent or active conversation tasks. Use this before substantive work when the system prompt lists them. Choose independent for a standalone request, follow_up to continue a completed task, or supplement to add a focused instruction to an active task. Never infer this from a UI selector; decide from the user message and task summaries. The Worker validates the target generation, project/session and readiness. If there are no relevant tasks, continue independently without calling this tool.',
@@ -645,6 +896,17 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         decision: { type: 'string', enum: ['independent', 'follow_up', 'supplement', 'inspect'] },
         targetGenerationId: { type: 'string', minLength: 1, maxLength: 128 },
+        receiptOffset: {
+          type: 'integer',
+          minimum: 0,
+          description: 'inspect: follow savedProductionReceipts.nextOffset.',
+        },
+        receiptLimit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description: 'inspect: successful audit rows per receipt page, default 20.',
+        },
         content: { type: 'string', minLength: 1, maxLength: 10000 },
         rationale: { type: 'string', minLength: 1, maxLength: 1000 },
       },
@@ -659,7 +921,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'production.read',
     description:
-      'Read saved production content on demand. view=authoring returns the IR; view=text returns its prompt; structure lists scene/shot IDs and stored bindings without bodies; issues reads readiness checks. For a scene/shot, view=media resolves current saved media bindings through the same production resolver: document IDs/names/types, selectedAsset and availability, manual/auto/disabled/none selectionSource, defaultAssetId, bounded candidateAssets, and input order before model adaptation or unsaved form edits. Candidate assets are not selected inputs. Empty stored materialBindings does not prove no default media exists. No image pixels are read. Use asset.get for generation provenance. Media is a read-only projection, never add asset IDs to IR document references. Large values are paged with nextOffset/expectedVersion until complete. ifVersion returns unchanged when dependencies match. No content is automatically injected.',
+      'Read one existing shot directly with target={kind:shot,id:actualShotId}; returns sceneId, shotId and current rowVersion. view=authoring returns the IR; view=text returns its prompt; structure lists scene/shot IDs and stored bindings without bodies; issues reads readiness checks. For a scene/shot, view=media resolves current saved media bindings through the same production resolver: document IDs/names/types, selectedAsset and availability, manual/auto/disabled/none selectionSource, defaultAssetId, bounded candidateAssets, and input order before model adaptation or unsaved form edits. Candidate assets are not selected inputs. Empty stored materialBindings does not prove no default media exists. No image pixels are read. Use asset.get for generation provenance. Media is a read-only projection, never add asset IDs to IR document references. structure/media/issues default to whole-record pages: follow recordPage.nextOffset as recordOffset with expectedVersion; record paths reconstruct arrays in recordPage.context. text/authoring use UTF-16 character pages: follow contentPage.nextOffset as offset with expectedVersion. ifVersion returns unchanged when dependencies match. No content is automatically injected.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -670,7 +932,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.read',
     description:
-      'Read an existing scene by actual ID. Default view=structure returns bindings, ordered shot IDs/rowVersions, content formats and saved timing without prompt bodies. view=media resolves actual saved media selections, manual/auto/disabled/none sources, availability, bounded candidates and pre-model input order using the production resolver; this excludes unsaved form edits and reads no image pixels. Candidate images are not selected inputs; empty materialBindings does not prove missing default images. Use asset.get for generation provenance. For prompt revisions use scene.update_shot_prompts after reading the relevant shot IR/text. For timing-only edits use scene.update_shot_timings; no full IR reads or resubmissions are required. Read relevant shot text only if needed to estimate duration. Use view=authoring for the shared scene IR, view=text for its prompt, view=issues for readiness issues. Long results return contentPage: continue nextOffset with expectedVersion until complete; parse assembled JSON. ifVersion returns unchanged when dependencies match. Never infer relationships from titles.',
+      'Read an existing scene by actual ID. Default view=structure returns bindings, ordered shot IDs/rowVersions, content formats and saved timing without prompt bodies. view=media resolves actual saved media selections, manual/auto/disabled/none sources, availability, bounded candidates and pre-model input order using the production resolver; this excludes unsaved form edits and reads no image pixels. Candidate images are not selected inputs; empty materialBindings does not prove missing default images. Use asset.get for generation provenance. For prompt revisions use scene.update_shot_prompts after reading the relevant shot IR/text. For timing-only edits use scene.update_shot_timings; no full IR reads or resubmissions are required. Read relevant shot text only if needed to estimate duration. Use view=authoring for the shared scene IR, view=text for its prompt, view=issues for readiness issues. Metadata views use recordPage: follow nextOffset as recordOffset with expectedVersion and reconstruct whole records by path in context. For one shot prompt read production.read target={kind:shot,id:shotId}; no scene-wide media scan is needed. text/authoring use character contentPage: follow nextOffset as offset with expectedVersion. ifVersion returns unchanged when dependencies match. Never infer relationships from titles.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -684,7 +946,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.update_shot_prompts',
     description:
-      'Atomically revise 1–30 EXISTING shot prompts using real shotId and current expectedRowVersion. Read the current IR/text first and provide the complete revised authoringIR.prompt including every applicable user requirement. Omitted references, timing and data preserve saved values; omitted reference lists preserve their scope and explicit [] clears that scope. Preserves shot IDs, order, titles, status, parent scenes and manual media overrides. Creates no shots and makes no paid request. A user request to revise prompts authorizes this local draft write. On conflict reread and retry.',
+      'Atomically revise 1–30 EXISTING shot prompts using real shotId and current expectedRowVersion. Use production.read target={kind:shot,id:shotId} for the current IR/text and CAS; provide the complete revised authoringIR.prompt including every applicable user requirement. Omitted references, timing and data preserve saved values; omitted reference lists preserve their scope and explicit [] clears that scope. Preserves shot IDs, order, titles, status, parent scenes and manual media overrides. Creates no shots and makes no paid request. A user request to revise prompts authorizes this local draft write. On conflict reread and retry.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -710,8 +972,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   },
   {
     name: 'scene.update_shot_timings',
-    description:
-      'Atomically update only timing for 1–100 existing shots across scenes using actual shot IDs and current expectedRowVersion from scene.read. Supply estimatedDurationSeconds (>0, <=3600) and a short rationale for each shot. Preserves prompt text, references, open data, bindings, shot order and IDs; creates no shots. The application maps saved timing to scene timelines and media duration. For a new or revised video prompt, derive timing from the authored action, dialogue, pauses, camera movement and pacing unless the user, existing draft, or model hard limit fixes it; this timing-only tool applies the resulting explicit values to an existing shot. Do not invent having saved a write. A user request to set shot timing authorizes this reversible draft edit without another confirmation. On version conflict reread affected scenes and retry.',
+    description: `Atomically replace only timing for 1–100 existing shots using actual shot IDs and current expectedRowVersion from scene.read. Supply estimatedDurationSeconds (>0, <=3600), rationale and beats for new estimates. Legacy calls may omit beats; omission clears previous beats to avoid stale intervals. Preserves prompt, references, open data, bindings, order and IDs. If prompt text contains conflicting timestamps, use scene.update_shot_prompts to synchronize it. This tool creates no shots or paid requests. A user timing request authorizes this reversible edit without further confirmation. On version conflict reread and retry.\n${SHOT_TIMING_REQUIREMENTS}`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -738,7 +999,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'scene.submit_structure',
     description:
-      'Save editable scene/shot drafts directly in 场次与镜头. Put every applicable user requirement in each final authoringIR.prompt; add the complete real document reference lists in authoringIR.references, especially all locations/environments in sceneDocumentIds, plus timing and supplementary data. The application validates IR shape, project scope, reference kinds, row versions and write order; it does not infer relations from names or rewrite prompts. Return resolution:needs_clarification for ambiguous required IDs. Existing scenes use sceneId and expectedRowVersion; omit authoringIR only for binding-only edits. Send shots:[] for existing scenes; use scene.update_shot_prompts to revise shots, scene.update_shot_timings for timing, or scene.structure.stage to append shots. Entries in shots create NEW shots only for new scenes. Saved drafts are immediately editable. Total scenes and shots: at most 100; stage large submissions.',
+      'Save editable scene/shot drafts directly in 场次与镜头 using resourceId=workspace:shots, including the first scene in an empty project. No episode resource ID or domain activation is required; episodeTitle is a label. Put every applicable user requirement in each final prompt. Material references are shot-scoped: every shot authoringIR.references must have complete characterDocumentIds, sceneDocumentIds and propDocumentIds lists; use [] when empty, confirm each real document ID/kind/title, and keep them consistent with the prompt. Scene pages show the union of shot references; do not create scene-level material bindings. Add timing and supplementary data as appropriate. The application validates IR shape, project scope, reference kinds, row versions and write order; it does not infer relations from names or rewrite prompts. Return resolution:needs_clarification for ambiguous required IDs. Existing scenes use sceneId and expectedRowVersion; omit authoringIR only for prompt-preserving binding-only legacy edits. Send shots:[] for existing scenes; use scene.update_shot_prompts to revise shots, scene.update_shot_timings for timing, or scene.structure.stage to append shots. Entries in shots create NEW shots only for new scenes. Saved drafts are immediately editable. Plans over 100 scene+shot items require multiple persistent stage pages, all completed in this task.',
     parameters: {
       ...DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
         .parameters,
@@ -746,7 +1007,11 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       properties: {
         ...(DOCUMENT_AGENT_TOOLS.find((tool) => tool.name === 'novel.episode.submit_structure')!
           .parameters.properties as Record<string, unknown>),
-        resourceId: RESOURCE_LOCATOR_PROPERTIES.resourceId,
+        resourceId: {
+          type: 'string',
+          const: 'workspace:shots',
+          description: 'The scene/shot workspace from resourceMap. No episode ID is required.',
+        },
         expectedRevision: RESOURCE_LOCATOR_PROPERTIES.expectedRevision,
         resolution: { type: 'string', enum: ['resolved', 'needs_clarification'] },
         feedback: { type: 'string', maxLength: 4000 },
@@ -763,7 +1028,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'document.submit_draft',
     description:
-      'Save one complete document draft in an independent review task. First call project.structure.get or project.get_context and echo resourceId from resourceMap. For a new novel outline or novel setting, choose the 小说 page workspace:novel and supply bindingRole (work-outline, character-bible, world-bible, timeline or style-guide); documentKind alone does not choose a page. Short-drama outlines/plans/notes use workspace:documents; character, scene-setting and prop references use workspace:characters. For those reference documents you may provide contentIR={schemaVersion:1,kind,data}; choose useful structured fields from sources you actually read and keep data open-ended. It is stored with this immutable document version and is not auto-injected into context. Existing documents use the actual document or structure-node resourceId, documentId, expectedDocumentRowVersion and baseVersionId. Novel chapter bodies must use novel.chapter.write_draft. Call sequentially for multiple documents. Successful saving requires no extra user confirmation.',
+      'Save one complete document draft in an independent review task. First call project.structure.get or project.get_context and echo resourceId from resourceMap. NEW documents omit documentId, expectedDocumentRowVersion and baseVersionId entirely, including null; source version IDs belong in the authored provenance, never in output-target CAS. For a new novel outline or novel setting, choose the 小说 page workspace:novel and supply bindingRole (work-outline, character-bible, world-bible, timeline or style-guide); documentKind alone does not choose a page. Short-drama outlines/plans/constraint documents/notes use workspace:documents; character, scene-setting and prop references use workspace:characters. Constraint documents define reusable plot/story rules and are separate from the current conversation requirements. For those reference documents you may provide contentIR={schemaVersion:1,kind,data}; choose useful structured fields from sources you actually read and keep data open-ended. It is stored with this immutable document version and is not auto-injected into context. EXISTING documents require the actual document or structure-node resourceId, documentId, expectedDocumentRowVersion and baseVersionId of that output target; omit bindingRole. Novel chapter bodies must use novel.chapter.write_draft. Call sequentially for multiple documents. Successful saving requires no extra user confirmation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -772,11 +1037,15 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
         ...RESOURCE_LOCATOR_PROPERTIES,
         title: { type: 'string', minLength: 1, maxLength: 200 },
         contentMarkdown: { type: 'string', minLength: 1, maxLength: 1000000 },
-        contentIR: { type: 'object', description: 'Optional open, versioned ProjectContentIR.' },
+        contentIR: {
+          type: 'object',
+          description:
+            'Only for character, scene or prop documents. Plans/scripts keep all authored structure in contentMarkdown; omit contentIR.',
+        },
         documentKind: {
           type: 'string',
           description: DOCUMENT_KIND_DESCRIPTION,
-          enum: ['outline', 'plan', 'character', 'scene', 'prop', 'storyboard', 'note'],
+          enum: [...DOCUMENT_KINDS],
         },
         documentId: { type: 'string', minLength: 1, maxLength: 200 },
         expectedDocumentRowVersion: { type: 'integer', minimum: 0 },
@@ -786,6 +1055,22 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
           enum: ['work-outline', 'character-bible', 'world-bible', 'timeline', 'style-guide'],
         },
       },
+      if: { required: ['documentId'] },
+      then: {
+        required: ['expectedDocumentRowVersion', 'baseVersionId'],
+        not: { required: ['bindingRole'] },
+      },
+      else: {
+        not: {
+          anyOf: [{ required: ['expectedDocumentRowVersion'] }, { required: ['baseVersionId'] }],
+        },
+      },
+      allOf: [
+        {
+          if: { required: ['contentIR'] },
+          then: { properties: { documentKind: { enum: ['character', 'scene', 'prop'] } } },
+        },
+      ],
     },
   },
   {
@@ -909,16 +1194,42 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'project.structure.get',
     description:
-      'Resolve the current project structure before choosing a resource tool. Returns bounded resource locators for the novel, chapters and volumes, project documents, character and scene prompts, scenes and shots, assets, conversations, and safe settings entry points. It includes document structure nodes, document IDs, row versions, and a project revision. This is read-only; use library.search/read for正文 and the authorized domain tool for changes.',
+      'Paged metadata. Filter by kind/workspace/query/parentId. Shots: kind=shot,parentId=scene:<id>. Continue with nextOffset and expectedRevision. Bodies: library.read.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
+        workspace: {
+          type: 'string',
+          enum: ['novel', 'documents', 'characters', 'shots', 'assets', 'tasks', 'settings'],
+        },
+        kind: {
+          type: 'string',
+          enum: [
+            'workspace',
+            'document',
+            'structure-node',
+            'novel-volume',
+            'scene',
+            'shot',
+            'asset',
+            'conversation',
+          ],
+        },
+        parentId: { type: 'string' },
+        query: { type: 'string' },
+        offset: { type: 'integer', minimum: 0 },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description: 'Records per page, default 20; also bounded by 8000 bytes.',
+        },
+        expectedRevision: { type: 'string' },
         detail: {
           type: 'string',
           enum: ['compact', 'full'],
-          description:
-            'Default compact returns the resource index once. full adds the expanded structure.',
+          description: 'Default compact.',
         },
         includeArchived: { type: 'boolean' },
       },
@@ -1066,17 +1377,6 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['conversationId'],
       properties: { conversationId: { type: 'string', minLength: 1, maxLength: 200 } },
-    },
-  },
-  {
-    name: 'document.publish',
-    description:
-      'Publish the current reviewable version of a current-project document after explicit confirmation.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['documentId'],
-      properties: { documentId: { type: 'string', minLength: 1, maxLength: 200 } },
     },
   },
   {
@@ -1372,7 +1672,7 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['prompt'],
       properties: {
-        prompt: { type: 'string', minLength: 1, maxLength: 5_000 },
+        prompt: { type: 'string', minLength: 1, maxLength: 20_000 },
         sourceDocumentId: { type: 'string', minLength: 1, maxLength: 200 },
         inputAssetIds: {
           type: 'array',
@@ -1401,7 +1701,7 @@ export const MEDIA_AGENT_TOOLS: LlmToolDefinition[] = [
       additionalProperties: false,
       required: ['prompt'],
       properties: {
-        prompt: { type: 'string', minLength: 1, maxLength: 5_000 },
+        prompt: { type: 'string', minLength: 1, maxLength: 20_000 },
         inputAssetIds: {
           type: 'array',
           maxItems: 7,
@@ -1459,7 +1759,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'library.search',
     description:
-      'Search the current project library for facts, character bibles, novel drafts, and guidelines. Default searchMode="content" searches text. Use searchMode="structure" to browse the deterministic document tree without body text: query="*" lists nodes, query text matches node titles/paths, structurePath filters an exact path prefix, and offset/nextOffset paginate large trees. Use the returned sourceHandle with library.read (readMode="source" for the corresponding document/chapter). By default searches authoritative documents, novel chapters, memories, and constraints. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
+      'Search the current project library for facts, character bibles, novel drafts, and guidelines. Default searchMode="content" searches text. Use searchMode="structure" to browse the deterministic document tree without body text: query="*" lists nodes, query text matches node titles/paths, structurePath filters an exact path prefix, and offset/nextOffset paginate large trees. Use the returned sourceHandle with library.read (readMode="source" for the corresponding document/chapter). By default searches authoritative documents, novel chapters, memories, and constraints. Plot constraint documents use sourceTypes=["document"] and kind="constraint"; production constraint records use sourceTypes=["constraint"]. Conversation chat history is excluded by default unless sourceTypes includes conversation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1503,7 +1803,13 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
             'any',
           ],
         },
-        kind: { type: 'string', minLength: 1, maxLength: 64 },
+        kind: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 64,
+          description:
+            'Optional exact document/source kind filter; constraint means a plot constraint document when sourceTypes includes document.',
+        },
         scopeType: { type: 'string', enum: ['project', 'scene', 'shot'] },
         scopeId: { type: 'string', minLength: 1, maxLength: 200 },
         structurePath: {
@@ -1524,7 +1830,7 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
     parameters: {
       type: 'object',
       additionalProperties: false,
-      required: ['sourceHandle'],
+      oneOf: [{ required: ['sourceHandle'] }, { required: ['artifact'] }],
       properties: {
         sourceHandle: {
           type: 'string',
@@ -1532,6 +1838,17 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
           maxLength: 128,
           description:
             'Use only a sourceHandle returned by library.search in this task. Document IDs, version IDs and resourceIds are not handles.',
+        },
+        artifact: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['documentId', 'expectedVersionId'],
+          properties: {
+            documentId: { type: 'string', minLength: 1 },
+            expectedVersionId: { type: 'string', minLength: 1 },
+          },
+          description:
+            'Direct readback of a saved task document or registered target at its exact current version. Survives restart; no search round needed. Other sources still require search. Multiple independent reads may share one response. Follow nextOffset for complete content.',
         },
         maxChars: { type: 'integer', minimum: 1, maximum: 20_000 },
         readMode: { type: 'string', enum: ['chunk', 'source'] },
@@ -1541,6 +1858,34 @@ export const LIBRARY_AGENT_TOOLS: LlmToolDefinition[] = [
     },
   },
 ];
+
+for (const tool of SYSTEM_AGENT_TOOLS) {
+  if (
+    ['document.submit_draft', 'scene.submit_structure', 'scene.structure.stage'].includes(tool.name)
+  ) {
+    tool.parameters.properties = {
+      ...(tool.parameters.properties as Record<string, unknown>),
+      outputId: {
+        type: 'string',
+        description:
+          'Worker-issued outputId from checkpoint operation=plan. Required for independent additional outputs; do not invent IDs.',
+      },
+      outputKey: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description:
+          'Stable key from your registered checkpoint plan; preferred over copying outputId. Resolves only inside this task and compatible creation tool. Reuse the same outputIndex on retries. Not valid for editing existing objects.',
+      },
+      outputIndex: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'Stable zero-based output slot within the registered quantity. Reuse it on retries.',
+      },
+    };
+  }
+}
 
 export const ALL_AGENT_TOOL_DEFINITIONS = [
   ...DOCUMENT_AGENT_TOOLS,
@@ -1560,8 +1905,11 @@ export type RegisteredAgentToolPolicy = {
 };
 
 export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
+  'shot.continuity.read': readPolicy(),
+  'shot.continuity.save': writePolicy(),
   'conversation.ask': writePolicy(),
   'conversation.task.route': writePolicy(),
+  'conversation.task.checkpoint': writePolicy(),
   'adapter.schema.get': readPolicy(),
   'adapter.schema.propose': writePolicy(),
   'adapter.schema.audit.list': readPolicy(),
@@ -1615,7 +1963,6 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'conversation.rename': writePolicy(),
   'conversation.archive': confirmedPolicy(),
   'conversation.restore': confirmedPolicy(),
-  'document.publish': confirmedPolicy(),
   'asset.search': readPolicy(),
   'asset.get': readPolicy(),
   'asset.update_alias': writePolicy(),

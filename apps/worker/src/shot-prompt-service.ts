@@ -1,10 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { validateProductionAuthoringIR, type ProductionShotAuthoringIR } from '@ai-video/contracts';
 import { createRepositories } from '@ai-video/persistence';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
 import { validateProductionIRReferences } from './project-ir-validation.js';
+import {
+  isScriptToMediaTask,
+  requireScriptToMediaShotReferences,
+} from './production-skill-validation.js';
 
 function record(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -63,16 +67,6 @@ export class ShotPromptService {
       const previousUpdatedAt = project.updatedAt;
       try {
         return db.transaction(() => {
-          const requestHash = createHash('sha256').update(canonical(shots)).digest('hex');
-          const executionKey = identity.taskId
-            ? `shot-prompts:${identity.projectSessionId}:${identity.taskId}:${requestHash}`
-            : `shot-prompts:${randomUUID()}`;
-          const previous = db
-            .prepare(
-              'SELECT result_json FROM agent_write_receipts WHERE project_id=? AND execution_key=?',
-            )
-            .get(project.id, executionKey) as { result_json: string } | undefined;
-          if (previous) return JSON.parse(previous.result_json) as Record<string, unknown>;
           const repositories = createRepositories(db);
           // Validate the entire batch before any write, including merged optional fields.
           const candidates = shots.map((entry) => {
@@ -105,6 +99,8 @@ export class ShotPromptService {
               },
               'shot',
             ) as ProductionShotAuthoringIR;
+            if (isScriptToMediaTask(db, identity.taskId))
+              requireScriptToMediaShotReferences(authoringIR, `shot ${entry.shotId}`);
             validateProductionIRReferences(db, project.id, authoringIR);
             return {
               shot,
@@ -114,18 +110,6 @@ export class ShotPromptService {
             };
           });
           const executionId = randomUUID();
-          const now = new Date().toISOString();
-          db.prepare(
-            'INSERT INTO agent_write_receipts(id,project_id,execution_key,request_hash,request_json,result_json,created_at) VALUES(?,?,?,?,?,?,?)',
-          ).run(
-            executionId,
-            project.id,
-            executionKey,
-            requestHash,
-            JSON.stringify(args),
-            '{}',
-            now,
-          );
           const content = new ContentService(this.projects);
           const savedShots = candidates.map(({ shot, authoringIR, changed }) => {
             const saved = changed
@@ -154,10 +138,6 @@ export class ShotPromptService {
             shots: savedShots,
             paidRequests: 0,
           };
-          db.prepare('UPDATE agent_write_receipts SET result_json=? WHERE id=?').run(
-            JSON.stringify(result),
-            executionId,
-          );
           return result;
         })();
       } catch (error) {

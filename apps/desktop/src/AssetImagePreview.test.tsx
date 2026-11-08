@@ -13,6 +13,25 @@ afterEach(() => {
   selectWorkerScope(undefined);
 });
 
+it('uses the original image for frame inspection and expansion without a thumbnail round trip', async () => {
+  vi.mocked(callWorker).mockResolvedValue({
+    assetId: 'frame',
+    path: 'D:/full-resolution-frame.png',
+    contentType: 'image/png',
+  });
+  render(
+    <AssetImagePreview projectId="one" assetId="frame" alt="已确认画面" resolution="original" />,
+  );
+  expect(await screen.findByRole('img')).toHaveAttribute('src', '/worker-media/frame');
+  fireEvent.click(screen.getByRole('button', { name: '放大查看已确认画面' }));
+  expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute(
+    'src',
+    '/worker-media/frame',
+  );
+  expect(callWorker).toHaveBeenCalledTimes(1);
+  expect(callWorker).toHaveBeenCalledWith('asset.mediaSource', { assetId: 'frame' });
+});
+
 it('loads only a visible thumbnail, merges duplicate requests and fetches the full image on expansion', async () => {
   let visible: IntersectionObserverCallback = () => undefined;
   vi.stubGlobal(

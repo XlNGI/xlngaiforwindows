@@ -6,6 +6,8 @@ import {
   IPC_PROTOCOL_VERSION,
   SIDECAR_ENVELOPE_MAX_BYTES,
   type AssetMediaSourceInfo,
+  type WorkerRequest,
+  type WorkerResponse,
 } from '@ai-video/contracts';
 import {
   authorizeDevHttpMediaRequest,
@@ -22,14 +24,41 @@ import {
   parseRequest,
   recordQueueWait,
   recordWorkerError,
+  beginWorkerShutdown,
+  shutdownWorker,
 } from './handler.js';
 import { JsonLineWriter, NativeProviderBridge } from './native-provider-bridge.js';
-import { RequestScheduler } from './request-scheduler.js';
+import { RequestScheduler, WorkerStoppingError } from './request-scheduler.js';
 import { writeWorkerResponse } from './worker-response-writer.js';
 
 const requestScheduler = new RequestScheduler({
   onQueueWait: (method, waitMs) => recordQueueWait(method, waitMs),
 });
+
+async function dispatchRequest(parsed: WorkerRequest | WorkerResponse): Promise<WorkerResponse> {
+  if ('ok' in parsed) return parsed;
+  const bound = bindWorkerRequest(parsed);
+  try {
+    return await requestScheduler.run(parsed.method, bound.run, bound.queueKey);
+  } catch (error) {
+    if (!(error instanceof WorkerStoppingError)) throw error;
+    return {
+      id: parsed.id,
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      ok: false,
+      error: {
+        code: 'INVALID_STATE',
+        message: error.message,
+        retryable: true,
+        requestId: parsed.id,
+        details: { reason: 'worker_stopping', executed: false },
+      },
+    };
+  } finally {
+    // Queued work may be rejected without invoking bound.run's own finally.
+    bound.release();
+  }
+}
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
   return typeof value === 'string' ? value : undefined;
@@ -80,6 +109,37 @@ function startStdio(): void {
     );
   };
   const input = createInterface({ input: process.stdin, terminal: false });
+  let stopping: Promise<void> | undefined;
+  const stop = (reason: 'host_shutdown' | 'host_disconnect', id?: string): Promise<void> => {
+    if (stopping) return stopping;
+    requestScheduler.closeAdmission();
+    stopping = (async () => {
+      beginWorkerShutdown(reason);
+      bridge.close({
+        code: 'INTERRUPTED',
+        message: 'Worker is stopping for recovery.',
+        retryable: true,
+      });
+      await requestScheduler.drain();
+      await shutdownWorker(reason);
+      if (id)
+        await writer.write({
+          id,
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          ok: true,
+          result: { stopped: true, reason },
+        });
+      input.close();
+      process.exit(0);
+    })().catch((error) => {
+      recordWorkerError('worker.shutdown', error);
+      process.exit(1);
+    });
+    return stopping;
+  };
+  input.once('close', () => void stop('host_disconnect'));
+  process.once('SIGINT', () => void stop('host_shutdown'));
+  process.once('SIGTERM', () => void stop('host_shutdown'));
   input.on('line', (line) => {
     void (async () => {
       if (Buffer.byteLength(line, 'utf8') > SIDECAR_ENVELOPE_MAX_BYTES) {
@@ -101,18 +161,30 @@ function startStdio(): void {
         return;
       }
       try {
+        if (
+          value &&
+          typeof value === 'object' &&
+          'kind' in value &&
+          value.kind === 'host.control'
+        ) {
+          const control = value as Record<string, unknown>;
+          if (
+            control.version === 1 &&
+            control.method === 'worker.shutdown' &&
+            control.reason === 'host_shutdown' &&
+            typeof control.id === 'string'
+          )
+            await stop('host_shutdown', control.id);
+          return;
+        }
+        // Host replies must remain routable while admitted operations drain.
         if (bridge.handleEnvelope(value)) return;
       } catch (error) {
         recordWorkerError('ipc.host-envelope', error);
         return;
       }
       const parsed = parseRequest(value);
-      const bound = 'ok' in parsed ? undefined : bindWorkerRequest(parsed);
-      writeResponse(
-        'ok' in parsed
-          ? parsed
-          : await requestScheduler.run(parsed.method, bound!.run, bound!.queueKey),
-      );
+      writeResponse(await dispatchRequest(parsed));
     })().catch((error) => {
       recordWorkerError('ipc.request', error);
       writeResponse(parseRequest(null));
@@ -226,11 +298,7 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
           return;
         }
         const parsed = parseRequest(value);
-        const bound = 'ok' in parsed ? undefined : bindWorkerRequest(parsed);
-        const result =
-          'ok' in parsed
-            ? parsed
-            : await requestScheduler.run(parsed.method, bound!.run, bound!.queueKey);
+        const result = await dispatchRequest(parsed);
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(result));
       })().catch((error) => {
@@ -260,9 +328,24 @@ function startHttp(port: number, secureDevelopmentMode: boolean): void {
       developmentTokenPath = undefined;
     }
   };
+  let closing = false;
   const close = (): void => {
+    if (closing) return;
+    closing = true;
     cleanupDevelopmentToken();
-    server.close(() => process.exit(0));
+    requestScheduler.closeAdmission();
+    beginWorkerShutdown('host_shutdown');
+    server.close();
+    void requestScheduler
+      .drain()
+      .then(() => shutdownWorker('host_shutdown'))
+      .then(
+        () => process.exit(0),
+        (error: unknown) => {
+          recordWorkerError('worker.shutdown', error);
+          process.exit(1);
+        },
+      );
   };
   process.once('exit', cleanupDevelopmentToken);
   process.on('SIGINT', close);

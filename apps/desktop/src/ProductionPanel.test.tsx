@@ -477,6 +477,11 @@ describe('ProductionPanel', () => {
     await waitFor(() => expect(prompt).toHaveValue('镜头01：观察线索'));
     expect(screen.getByText('查看完整场次方案')).toBeInTheDocument();
     expect(screen.getByLabelText(/时长/)).toHaveValue(8);
+    fireEvent.change(screen.getByLabelText(/时长/), { target: { value: '12' } });
+    expect(screen.getByText(/当前模型请求 12 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/请求余量 4 秒/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/时长/), { target: { value: '8' } });
+    expect(screen.queryByText(/请求余量/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
       expect(
@@ -735,6 +740,247 @@ describe('ProductionPanel', () => {
     expect(screen.queryByText(/适配器解析失败/)).not.toBeInTheDocument();
   });
 
+  it('declares shot image bindings in the visible prompt and the prepared request', async () => {
+    const boundImageAdapter: AdapterDescriptor = {
+      ...descriptor,
+      key: 'REFERENCE_TO_IMAGE:vidu:viduq2:bound-test',
+      capability: 'REFERENCE_TO_IMAGE',
+      capabilityLabel: '参考生图',
+      parameterSchema: {
+        ...descriptor.parameterSchema,
+        properties: {
+          ...descriptor.parameterSchema.properties,
+          images: {
+            type: 'array',
+            title: '参考图片',
+            items: { type: 'string', format: 'uri' },
+          },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+          { key: 'images', control: 'url-list', group: 'basic', order: 20 },
+        ],
+      },
+    };
+    mockWorker((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          ...catalog,
+          capabilities: [{ key: 'REFERENCE_TO_IMAGE', label: '参考生图' }],
+          adapters: [boundImageAdapter],
+        });
+      if (method === 'adapter.resolve') return Promise.resolve(boundImageAdapter);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.task.cancel') return Promise.resolve({});
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const defaultCallWorker = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method === 'production.compile')
+        return Promise.resolve({
+          target: { kind: 'shot' as const, id: 'shot' },
+          rowVersion: 1,
+          parameters: {
+            prompt: '雨夜里林澈回头',
+            images: ['project-asset://character-asset', 'project-asset://scene-asset'],
+          },
+          issues: [],
+        });
+      return defaultCallWorker(method as never, params);
+    }) as typeof callWorker);
+
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        capability="REFERENCE_TO_IMAGE"
+        seedPrompt="雨夜里林澈回头"
+        seedImageBindings={[
+          { assetId: 'character-asset', role: 'character', label: '林澈' },
+          { assetId: 'scene-asset', role: 'scene', label: '旧码头' },
+        ]}
+        onRequestSubmissionApproval={() => Promise.resolve(false)}
+      />,
+    );
+
+    const prompt = await screen.findByRole('textbox', { name: /画面提示词/ });
+    await waitFor(() => {
+      expect(prompt).toHaveTextContent('【输入图片说明】');
+      expect(prompt).toHaveTextContent('角色「林澈」的角色参考图');
+      expect(prompt).toHaveTextContent('场景「旧码头」的场景参考图');
+    });
+    expect(prompt.querySelectorAll('.prompt-reference-chip')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('image.generate.prepare', expect.anything()),
+    );
+    const preparedCall: unknown = vi
+      .mocked(callWorker)
+      .mock.calls.find(([method]) => method === 'image.generate.prepare')?.[1];
+    const asRecord = (value: unknown): Record<string, unknown> =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+    const parameters = asRecord(asRecord(preparedCall).parameters);
+    expect(parameters.images).toEqual([
+      'project-asset://character-asset',
+      'project-asset://scene-asset',
+    ]);
+    expect(parameters.prompt).toEqual(expect.any(String));
+    if (typeof parameters.prompt === 'string')
+      expect(parameters.prompt).toMatch(
+        /图(?:片)?\s*1为角色「林澈」的角色参考图。[\s\S]*图(?:片)?\s*2为场景「旧码头」的场景参考图。/u,
+      );
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.confirmSubmission',
+      expect.anything(),
+    );
+  });
+
+  it('submits the edited reference-image form without restoring fill-time image descriptions', async () => {
+    const referenceAdapter: AdapterDescriptor = {
+      ...descriptor,
+      key: 'REFERENCE_TO_IMAGE:vidu:viduq2:edited-form',
+      capability: 'REFERENCE_TO_IMAGE',
+      capabilityLabel: '参考生图',
+      parameterSchema: {
+        ...descriptor.parameterSchema,
+        properties: {
+          ...descriptor.parameterSchema.properties,
+          images: {
+            type: 'array',
+            title: '参考图片',
+            minItems: 1,
+            items: { type: 'string', format: 'uri' },
+          },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+          { key: 'images', control: 'url-list', group: 'basic', order: 20 },
+        ],
+      },
+    };
+    mockWorker((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          ...catalog,
+          capabilities: [{ key: 'REFERENCE_TO_IMAGE', label: '参考生图' }],
+          adapters: [referenceAdapter],
+        });
+      if (method === 'adapter.resolve') return Promise.resolve(referenceAdapter);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.task.cancel') return Promise.resolve({});
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const defaultCallWorker = vi.mocked(callWorker).getMockImplementation()!;
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
+      if (method === 'production.compile')
+        return Promise.resolve({
+          target: { kind: 'shot' as const, id: 'shot' },
+          rowVersion: 1,
+          source: {
+            mode: 'form',
+            token: 'a'.repeat(64),
+            target: { kind: 'shot' as const, id: 'shot' },
+            inputImages: [
+              { assetId: 'character-asset', role: 'character' as const },
+              { assetId: 'scene-asset', role: 'scene' as const },
+            ],
+          },
+          parameters: {
+            prompt: '填充时的画面',
+            images: ['project-asset://character-asset', 'project-asset://scene-asset'],
+          },
+          issues: [],
+        });
+      return defaultCallWorker(method as never, params);
+    }) as typeof callWorker);
+
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        capability="REFERENCE_TO_IMAGE"
+        seedImageBindings={[
+          { assetId: 'character-asset', role: 'character', label: '林澈' },
+          { assetId: 'scene-asset', role: 'scene', label: '旧码头' },
+        ]}
+        onRequestSubmissionApproval={() => Promise.resolve(false)}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: /画面提示词/ })).toHaveTextContent(
+        '【输入图片说明】',
+      ),
+    );
+    fireEvent.click(screen.getAllByRole('button', { name: '清除此图片输入' })[0]!);
+    fireEvent.click(screen.getByRole('button', { name: '清除此图片输入' }));
+    const prompt = screen.getByRole<HTMLTextAreaElement>('textbox', { name: /画面提示词/ });
+    fireEvent.change(prompt, { target: { value: '用户最终编辑的画面' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /参考图片/ }), {
+      target: { value: 'project-asset://character-asset' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('image.generate.prepare', expect.anything()),
+    );
+    const prepared = vi
+      .mocked(callWorker)
+      .mock.calls.find(([method]) => method === 'image.generate.prepare')?.[1];
+    expect(prepared).toMatchObject({
+      parameters: {
+        prompt: '用户最终编辑的画面',
+        images: ['project-asset://character-asset'],
+      },
+      productionSource: {
+        inputImages: [
+          { assetId: 'character-asset', role: 'character' },
+          { assetId: 'scene-asset', role: 'scene' },
+        ],
+      },
+    });
+  });
+
+  it('keeps the requested capability when the current catalog has no compatible adapter', async () => {
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'asset.list' || method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const props = {
+      projectId: 'project',
+      shotId: 'shot',
+      writable: true,
+      capability: 'START_END_TO_VIDEO' as const,
+    };
+    const view = render(<ProductionPanel {...props} />);
+
+    expect(await screen.findByText('首帧与尾帧')).toBeInTheDocument();
+    view.rerender(<ProductionPanel {...props} capability="REFERENCE_TO_IMAGE" />);
+
+    expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
+    expect(screen.queryByText('首帧与尾帧')).not.toBeInTheDocument();
+  });
+
   it('seeds the image prompt and asset kind from a character document', async () => {
     render(
       <ProductionPanel
@@ -890,6 +1136,44 @@ describe('ProductionPanel', () => {
     expect(screen.getByRole('option', { name: '普通素材' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
     expect(screen.queryByLabelText('自动保存到本地素材库')).not.toBeInTheDocument();
+  });
+
+  it('renders and submits schema parameters omitted from an explicit UI layout', async () => {
+    const incomplete = {
+      ...descriptor,
+      uiSchema: {
+        fields: descriptor.uiSchema.fields.filter((field) => field.key !== 'seed'),
+      },
+    };
+    mockWorker((method) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({ ...catalog, adapters: [incomplete] });
+      if (method === 'adapter.resolve') return Promise.resolve(incomplete);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'generation.draft.save')
+        return Promise.resolve({ updatedAt: '2026-08-01T00:00:00.000Z' });
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel shotId="shot" writable />);
+    await screen.findByLabelText(/画面提示词/);
+    fireEvent.click(screen.getByText('更多设置'));
+    fireEvent.click(screen.getByText('专业参数'));
+    const seed = await screen.findByLabelText('随机种子');
+    fireEvent.change(seed, { target: { value: '123' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('generation.draft.save', {
+        shotId: 'shot',
+        adapterKey: descriptor.key,
+        providerProfileId: providerProfile.id,
+        modelId: 'viduq2',
+        parameters: { resolution: '1080p', seed: 123 },
+      }),
+    );
   });
 
   it('merges current schema defaults into an older saved draft', async () => {
@@ -1121,6 +1405,156 @@ describe('ProductionPanel', () => {
     );
     expect(await screen.findByLabelText(/画面提示词/)).toBeInTheDocument();
     expect(screen.queryByText('模型详情')).not.toBeInTheDocument();
+  });
+
+  it('selects New API custom image models through the generic OpenAI Images adapter', async () => {
+    const newApiProfile: ProviderProfileInfo = {
+      ...providerProfile,
+      id: '11111111-1111-4111-8111-111111111115',
+      name: 'New API',
+      category: 'multi',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://newapi.example/v1',
+    };
+    const newApiDescriptor: AdapterDescriptor = {
+      ...descriptor,
+      key: 'TEXT_TO_IMAGE:custom:openai-images:v1',
+      provider: 'custom',
+      providerLabel: '自定义 OpenAI 兼容',
+      model: 'openai-images',
+      modelLabel: 'OpenAI Images API',
+      apiVersion: 'v1',
+      endpoint: 'https://api.openai.com/v1/images/generations',
+      credentialProvider: 'custom',
+    };
+    const newApiModel: ProviderModelInfo = {
+      ...providerModels[0]!,
+      id: '31111111-1111-4111-8111-111111111115',
+      providerProfileId: newApiProfile.id,
+      remoteModelId: 'gpt-image-2',
+      displayName: 'gpt-image-2',
+      capabilities: {
+        ...providerModels[0]!.capabilities,
+        imageGeneration: true,
+        imageEditing: true,
+      },
+    };
+    const mixedCatalog: AdapterCatalogResult = {
+      ...catalog,
+      providers: [...catalog.providers, { key: 'custom', label: '自定义 OpenAI 兼容' }],
+      adapters: [descriptor, newApiDescriptor],
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog') return Promise.resolve(mixedCatalog);
+      if (method === 'provider.profile.list') {
+        return Promise.resolve([providerProfile, newApiProfile]);
+      }
+      if (method === 'provider.model.list') {
+        return Promise.resolve(
+          (params as { profileId: string }).profileId === newApiProfile.id
+            ? [newApiModel]
+            : providerModels,
+        );
+      }
+      if (method === 'adapter.resolve') return Promise.resolve(newApiDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel capability="TEXT_TO_IMAGE" shotId="shot" writable />);
+    const profileSelect = await screen.findByLabelText('供应商连接');
+    expect(
+      await screen.findByRole('option', { name: 'New API · 自定义 OpenAI 兼容' }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(profileSelect, { target: { value: newApiProfile.id } });
+    expect(await screen.findByRole('option', { name: 'gpt-image-2' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
+        capability: 'TEXT_TO_IMAGE',
+        provider: 'custom',
+        model: 'openai-images',
+        apiVersion: 'v1',
+      }),
+    );
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('generation.draft.get', {
+        shotId: 'shot',
+        adapterKey: newApiDescriptor.key,
+        providerProfileId: newApiProfile.id,
+        modelId: 'gpt-image-2',
+      }),
+    );
+  });
+
+  it('offers New API custom video models through the generic asynchronous video adapter', async () => {
+    const newApiProfile: ProviderProfileInfo = {
+      ...providerProfile,
+      id: '11111111-1111-4111-8111-111111111116',
+      name: 'New API Video',
+      category: 'multi',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://newapi.example/v1',
+    };
+    const videoAdapter: AdapterDescriptor = {
+      ...descriptor,
+      key: 'TEXT_TO_VIDEO:custom:openai-compatible-video:v1',
+      capability: 'TEXT_TO_VIDEO',
+      capabilityLabel: '文生视频',
+      provider: 'custom',
+      providerLabel: '自定义 OpenAI 兼容',
+      model: 'openai-compatible-video',
+      modelLabel: 'OpenAI 兼容视频 API',
+      apiVersion: 'v1',
+      endpoint: 'https://api.openai.com/v1/videos',
+      credentialProvider: 'custom',
+    };
+    const videoModel: ProviderModelInfo = {
+      ...providerModels[0]!,
+      id: '31111111-1111-4111-8111-111111111116',
+      providerProfileId: newApiProfile.id,
+      remoteModelId: 'vendor-video-model',
+      displayName: 'vendor-video-model',
+      capabilities: { ...providerModels[0]!.capabilities, videoGeneration: true },
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'adapter.catalog')
+        return Promise.resolve({
+          ...catalog,
+          providers: [...catalog.providers, { key: 'custom', label: '自定义 OpenAI 兼容' }],
+          adapters: [videoAdapter],
+        });
+      if (method === 'provider.profile.list') return Promise.resolve([newApiProfile]);
+      if (method === 'provider.model.list') {
+        return Promise.resolve(
+          (params as { profileId: string }).profileId === newApiProfile.id ? [videoModel] : [],
+        );
+      }
+      if (method === 'adapter.resolve') return Promise.resolve(videoAdapter);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+
+    render(<ProductionPanel capability="TEXT_TO_VIDEO" shotId="shot" writable />);
+
+    expect(
+      await screen.findByRole('option', { name: 'New API Video · 自定义 OpenAI 兼容' }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: 'vendor-video-model' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
+        capability: 'TEXT_TO_VIDEO',
+        provider: 'custom',
+        model: 'openai-compatible-video',
+        apiVersion: 'v1',
+      }),
+    );
   });
 
   it('refreshes provider connections after settings changes without remounting', async () => {

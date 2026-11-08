@@ -55,6 +55,29 @@ export function isWanMediaAdapter(
   );
 }
 
+/** Structured canonical video inputs need recursive materialization on every bound channel. */
+export function isStructuredVideoAdapter(
+  adapter: { provider: string; contractId?: string; contractRevision?: number } | undefined,
+): boolean {
+  return Boolean(
+    adapter &&
+    officialVideoAudioContracts.some(
+      (contract) =>
+        contract.contractId === adapter.contractId &&
+        contract.contractRevision === adapter.contractRevision &&
+        contract.capabilities.videoGeneration &&
+        contract.status === 'enabled',
+    ) &&
+    mediaModelBindings.some(
+      (binding) =>
+        binding.providerType === adapter.provider &&
+        binding.contractId === adapter.contractId &&
+        binding.contractRevision === adapter.contractRevision &&
+        binding.status === 'enabled',
+    ),
+  );
+}
+
 export function adapterBindsCatalogModel(
   adapter: {
     provider: string;
@@ -71,6 +94,17 @@ export function adapterBindsCatalogModel(
   },
 ): boolean {
   if (adapter.provider !== selection.providerType) return false;
+  if (adapter.model === 'openai-images' && selection.providerType === 'openai') {
+    return (
+      adapter.apiVersion === 'v1' && selection.remoteModelId.toLowerCase().startsWith('gpt-image-')
+    );
+  }
+  if (adapter.model === 'openai-images' && selection.providerType === 'custom') {
+    return adapter.apiVersion === 'v1';
+  }
+  if (adapter.model === 'openai-compatible-video' && selection.providerType === 'custom') {
+    return adapter.apiVersion === 'v1';
+  }
   if (/^contract-\d+$/u.test(adapter.apiVersion ?? '')) {
     if (selection.contractStatus && selection.contractStatus !== 'enabled') return false;
     const binding = currentMediaModelBinding(selection.providerType, selection.remoteModelId);

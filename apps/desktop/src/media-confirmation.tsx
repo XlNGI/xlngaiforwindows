@@ -20,7 +20,11 @@ export function MediaSubmissionConfirmationCard({
 }) {
   return (
     <div className="agent-confirmation" role="alert">
-      <strong>需要确认：提交{confirmation.kind === 'image' ? '图片' : '视频'}生成任务</strong>
+      <strong>
+        需要确认：提交
+        {confirmation.kind === 'image' ? '图片' : confirmation.kind === 'audio' ? '音频' : '视频'}
+        生成任务
+      </strong>
       <span>
         {confirmation.providerName} / {confirmation.modelName}
       </span>

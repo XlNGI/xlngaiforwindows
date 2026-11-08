@@ -451,6 +451,9 @@ export interface AgentTaskDocumentVersionRecord {
 export type DocumentWorkflowAuditAction =
   | 'draft_saved'
   | 'draft_restored'
+  | 'document_archived'
+  | 'document_unarchived'
+  | 'unpublished'
   | 'review_submitted'
   | 'review_changes_requested'
   | 'review_rejected'
@@ -478,6 +481,7 @@ export interface DocumentWorkflowAuditRecord {
 export interface SceneRecord {
   id: string;
   projectId: string;
+  archivedAt?: string;
   title: string;
   sceneDocumentId?: string;
   videoPrompt?: string;
@@ -493,6 +497,7 @@ export interface SceneRecord {
 export interface ShotRecord {
   id: string;
   sceneId: string;
+  archivedAt?: string;
   title: string;
   position: number;
   status: string;
@@ -546,6 +551,7 @@ export interface LlmGenerationRecord {
   executionMode: LlmExecutionMode;
   retryOfGenerationId?: string;
   idempotencyKey?: string;
+  requestFingerprint?: string;
   providerProfileId?: string;
   modelId?: string;
   errorCode?: string;
@@ -947,14 +953,14 @@ export interface ContextSnapshotRepository {
 export interface SceneRepository {
   save(record: SceneRecord): void;
   get(id: string): SceneRecord | undefined;
-  listByProject(projectId: string): SceneRecord[];
+  listByProject(projectId: string, includeArchived?: boolean): SceneRecord[];
 }
 
 export interface ShotRepository {
   save(record: ShotRecord): void;
   get(id: string): ShotRecord | undefined;
   findByDocumentId(documentId: string): ShotRecord | undefined;
-  listByScene(sceneId: string): ShotRecord[];
+  listByScene(sceneId: string, includeArchived?: boolean): ShotRecord[];
 }
 
 export interface ConversationPageOptions {
@@ -996,7 +1002,11 @@ export interface ChatMessageRepository {
   save(record: ChatMessageRecord): void;
   get(id: string): ChatMessageRecord | undefined;
   listPage(conversationId: string, limit: number, before?: string): ChatMessageRecord[];
-  failStreamingByProject(projectId: string, failureMessage: string): number;
+  failStreamingByProject(
+    projectId: string,
+    failureMessage: string,
+    excludedGenerationIds?: string[],
+  ): number;
 }
 
 export interface LlmGenerationAttemptRepository {
@@ -1004,7 +1014,12 @@ export interface LlmGenerationAttemptRepository {
   get(id: string): LlmGenerationAttemptRecord | undefined;
   getByAssistantMessage(assistantMessageId: string): LlmGenerationAttemptRecord | undefined;
   listByProject(projectId: string): LlmGenerationAttemptRecord[];
-  failActiveByProject(projectId: string, completedAt: string, errorMessage: string): number;
+  failActiveByProject(
+    projectId: string,
+    completedAt: string,
+    errorMessage: string,
+    excludedGenerationIds?: string[],
+  ): number;
 }
 
 export interface LlmGenerationRepository {
@@ -1012,7 +1027,12 @@ export interface LlmGenerationRepository {
   get(id: string): LlmGenerationRecord | undefined;
   getByIdempotencyKey(projectId: string, idempotencyKey: string): LlmGenerationRecord | undefined;
   update(record: LlmGenerationRecord, expectedVersion: number): boolean;
-  failActiveByProject(projectId: string, updatedAt: string, errorMessage: string): number;
+  failActiveByProject(
+    projectId: string,
+    updatedAt: string,
+    errorMessage: string,
+    excludedGenerationIds?: string[],
+  ): number;
 }
 
 export interface MemoryRepository {

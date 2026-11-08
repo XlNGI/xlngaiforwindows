@@ -43,6 +43,78 @@ export type ConversationTimelineItem =
   | { kind: 'form'; id: string; createdAt: string; form: MediaReviewSummary }
   | { kind: 'question'; id: string; createdAt: string; form: AgentInputForm };
 
+export interface ConversationProcessGroup {
+  messageId: string;
+  itemIds: string[];
+  label: string;
+}
+
+/** Collapse recorded progress only when a completed turn has a final visible reply. */
+export function conversationProcessGroups(
+  items: ConversationTimelineItem[],
+  tasks: Map<string, AgentTaskDetail>,
+): ConversationProcessGroup[] {
+  const groups: ConversationProcessGroup[] = [];
+  for (const [messageId, detail] of tasks) {
+    if (detail.task.status !== 'completed' || detail.task.completionState === 'partial') continue;
+    if (
+      items.some(
+        (item) =>
+          item.kind === 'question' &&
+          item.form.taskId === detail.task.id &&
+          item.form.status === 'pending',
+      )
+    )
+      continue;
+    const stages = items.filter(
+      (item) =>
+        (item.kind === 'message' && item.message.id === messageId) ||
+        (item.kind === 'tools' && item.messageId === messageId),
+    );
+    const final = stages
+      .slice()
+      .reverse()
+      .find((item) => item.kind === 'message' && item.content.trim());
+    if (
+      final?.kind !== 'message' ||
+      final.message.status !== 'complete' ||
+      final.streaming ||
+      stages.some((item) => item.kind === 'tools' && item.live) ||
+      stages
+        .slice(final ? stages.indexOf(final) + 1 : 0)
+        .some(
+          (item) =>
+            item.kind === 'tools' &&
+            item.detail.events.some((event) => event.eventType.startsWith('agent.tool.')),
+        )
+    )
+      continue;
+    const itemIds = stages.filter((item) => item !== final).map((item) => item.id);
+    if (itemIds.length === 0) continue;
+    const task = detail.task;
+    const completed = detail.events.find((event) => event.eventType === 'agent.task.completed');
+    const start = Date.parse(task.startedAt ?? task.createdAt);
+    const end = Date.parse(task.completedAt ?? completed?.createdAt ?? task.updatedAt);
+    const elapsed = end - start;
+    let label = '执行过程';
+    if (Number.isFinite(elapsed) && elapsed >= 0) {
+      const seconds = Math.floor(elapsed / 1000);
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const duration = [
+        hours ? `${hours}小时` : '',
+        minutes ? `${minutes}分钟` : '',
+        seconds % 60 ? `${seconds % 60}秒` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      label = `用时 ${duration || '不足1秒'}`;
+    }
+    groups.push({ messageId, itemIds, label });
+  }
+  return groups;
+}
+
 /** Keep stored event order within a turn, and actual creation order between turns. */
 export function conversationTimeline(
   messages: ChatMessageInfo[],
@@ -50,7 +122,16 @@ export function conversationTimeline(
   liveMessageId?: string,
   forms: MediaReviewSummary[] = [],
 ): ConversationTimelineItem[] {
-  const items: ConversationTimelineItem[] = [];
+  const items: Array<{ item: ConversationTimelineItem; orderAt: string }> = [];
+  const appendTurn = (blocks: ConversationTimelineItem[]) => {
+    let orderAt = '';
+    for (const item of blocks) {
+      // Event sequence is authoritative within a turn. Separate callbacks can
+      // stamp a receipt slightly earlier than the event that preceded it.
+      if (item.createdAt > orderAt) orderAt = item.createdAt;
+      items.push({ item, orderAt });
+    }
+  };
   const questionIds = new Set<string>();
   const questions = (events: AgentTaskDetail['events']): ConversationTimelineItem[] =>
     events.flatMap((event) => {
@@ -70,7 +151,12 @@ export function conversationTimeline(
     const live = message.id === liveMessageId;
     const events = detail?.events.slice().sort((a, b) => a.sequence - b.sequence) ?? [];
     const boundaries = events.filter((event) => event.messageBoundary?.messageId === message.id);
-    if (!detail || boundaries.length === 0) {
+    const errorOnly =
+      detail?.task.status === 'failed' &&
+      message.status === 'failed' &&
+      Boolean(detail.task.errorMessage) &&
+      message.content.trim() === detail.task.errorMessage?.trim();
+    if (!detail || boundaries.length === 0 || errorOnly) {
       // Existing history has no text boundaries. Preserve it without inventing stages.
       const text: ConversationTimelineItem = {
         kind: 'message',
@@ -91,10 +177,12 @@ export function conversationTimeline(
         live,
         staged: false,
       };
-      if (tools && !live) items.push(tools);
-      items.push(text);
-      if (tools && live) items.push(tools);
-      items.push(...questions(events));
+      const blocks: ConversationTimelineItem[] = [];
+      if (tools && !live) blocks.push(tools);
+      if (!errorOnly) blocks.push(text);
+      if (tools && live) blocks.push(tools);
+      blocks.push(...questions(events));
+      appendTurn(blocks);
       continue;
     }
     const blocks: ConversationTimelineItem[] = [];
@@ -170,15 +258,29 @@ export function conversationTimeline(
           ),
       );
     if (lastTools?.kind === 'tools') lastTools.detail.librarySources = detail.librarySources;
-    items.push(...blocks);
+    // Older tasks sometimes saved their only explanatory text after asking.
+    // Keep that introduction above its form, without inspecting the wording or
+    // changing the recorded order of any other tool or assistant stage.
+    const firstText = blocks.findIndex((block) => block.kind === 'message');
+    if (firstText >= 0) {
+      const precedingQuestions = blocks
+        .slice(0, firstText)
+        .filter((block) => block.kind === 'question');
+      for (const question of precedingQuestions) blocks.splice(blocks.indexOf(question), 1);
+      blocks.splice(
+        blocks.findIndex((block) => block.kind === 'message') + 1,
+        0,
+        ...precedingQuestions,
+      );
+    }
+    appendTurn(blocks);
   }
-  items.push(
-    ...forms.map((form): ConversationTimelineItem => ({
-      kind: 'form',
-      id: `form:${form.id}`,
-      createdAt: form.createdAt,
-      form,
-    })),
-  );
-  return items.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  for (const form of forms)
+    items.push({
+      item: { kind: 'form', id: `form:${form.id}`, createdAt: form.createdAt, form },
+      orderAt: form.createdAt,
+    });
+  return items
+    .sort((left, right) => left.orderAt.localeCompare(right.orderAt))
+    .map(({ item }) => item);
 }

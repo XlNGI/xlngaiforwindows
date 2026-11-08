@@ -88,6 +88,25 @@ async function setup() {
 }
 
 describe('PartialArtifactService', () => {
+  it('captures the current attempt by generation when cancellation retains unfinished text', async () => {
+    const { project, prepared, partials } = await setup();
+    const captured = partials.captureInterruptedByGeneration(
+      prepared.stream.generationId,
+      '取消前正文',
+    );
+    expect(captured).toMatchObject({ status: 'recoverable' });
+    expect(
+      project.access(false, (db) =>
+        db
+          .prepare('SELECT generation_id,attempt_id FROM agent_partial_artifacts WHERE id=?')
+          .get(captured!.id),
+      ),
+    ).toEqual({
+      generation_id: prepared.stream.generationId,
+      attempt_id: prepared.stream.attemptId,
+    });
+  });
+
   it('recovers persisted novel text before restart terminalization and remains idempotent', async () => {
     const { generations, prepared, partials } = await setup();
     const content = 'Worker 重启前已经持久化的章节正文。';

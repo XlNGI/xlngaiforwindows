@@ -32,6 +32,7 @@ struct ProviderEndpoint {
 struct RemoteModel {
     id: String,
     display_name: Option<String>,
+    context_limits: Option<serde_json::Value>,
 }
 
 struct ProviderTestOutcome {
@@ -79,6 +80,9 @@ impl ProviderTestOutcome {
                         let mut value = serde_json::json!({ "id": model.id });
                         if let Some(display_name) = model.display_name {
                             value["displayName"] = serde_json::Value::String(display_name);
+                        }
+                        if let Some(limits) = model.context_limits {
+                            value["contextLimits"] = limits;
                         }
                         value
                     })
@@ -373,6 +377,7 @@ fn classify_dubbing_response(
     ProviderTestOutcome::ready(Some(vec![RemoteModel {
         id: "sync-3".into(),
         display_name: Some("Sync 3".into()),
+        context_limits: None,
     }]))
 }
 
@@ -475,6 +480,7 @@ fn parse_models(body: &serde_json::Value, provider_type: &str) -> Result<Vec<Rem
             RemoteModel {
                 id: id.to_string(),
                 display_name,
+                context_limits: parse_context_limits(item),
             },
         );
     }
@@ -482,6 +488,54 @@ fn parse_models(body: &serde_json::Value, provider_type: &str) -> Result<Vec<Rem
         return Err("Provider runtime profile is missing a provider type.".to_string());
     }
     Ok(models.into_values().collect())
+}
+
+/// Only explicit, numeric capability metadata is authoritative. Never infer
+/// limits from a model name or confuse max output with the context window.
+fn parse_context_limits(item: &serde_json::Value) -> Option<serde_json::Value> {
+    let positive = |paths: &[&str]| {
+        paths.iter().find_map(|path| {
+            item.pointer(path)
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991)
+        })
+    };
+    let window = positive(&[
+        "/context_window",
+        "/context_length",
+        "/contextWindow",
+        "/contextLimits/contextWindow",
+        "/capabilities/contextLimits/contextWindow",
+    ])?;
+    let mut limits = serde_json::json!({"contextWindow":window,"capabilitySource":"provider"});
+    for (key, paths) in [
+        (
+            "maxInputTokens",
+            &[
+                "/max_input_tokens",
+                "/maxInputTokens",
+                "/contextLimits/maxInputTokens",
+                "/capabilities/contextLimits/maxInputTokens",
+            ][..],
+        ),
+        (
+            "maxOutputTokens",
+            &[
+                "/max_output_tokens",
+                "/maxOutputTokens",
+                "/contextLimits/maxOutputTokens",
+                "/capabilities/contextLimits/maxOutputTokens",
+            ][..],
+        ),
+    ] {
+        if let Some(n) = positive(paths) {
+            if n > window {
+                return None;
+            }
+            limits[key] = serde_json::json!(n);
+        }
+    }
+    Some(limits)
 }
 
 fn parse_https_base_url(value: &str) -> Result<ProviderEndpoint, String> {
@@ -598,6 +652,67 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "gpt-5");
         assert!(parse_models(&json!({ "data": [{ "id": "" }] }), "openai").is_err());
+    }
+
+    #[test]
+    fn preserves_explicit_provider_context_capabilities_without_inference() {
+        let models = parse_models(&json!({"data":[
+            {"id":"large","context_length":1000000,"max_input_tokens":900000,"max_output_tokens":32768},
+            {"id":"unknown-1m","max_tokens":1000000},
+            {"id":"invalid","context_window":64000,"max_output_tokens":128000},
+            {"id":"small","contextLimits":{"contextWindow":128000,"maxOutputTokens":8192}}
+        ]}), "relay").unwrap();
+        let limits = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap()
+                .context_limits
+                .clone()
+        };
+        assert_eq!(
+            limits("large").unwrap(),
+            json!({"contextWindow":1000000,"maxInputTokens":900000,"maxOutputTokens":32768,"capabilitySource":"provider"})
+        );
+        assert!(limits("unknown-1m").is_none());
+        assert!(limits("invalid").is_none());
+        assert_eq!(limits("small").unwrap()["contextWindow"], 128000);
+        let params = super::ProviderTestOutcome::ready(Some(models)).into_worker_params("profile");
+        assert_eq!(
+            params["models"][1]["contextLimits"]["maxInputTokens"],
+            900000
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires isolated real-provider acceptance settings and OS credentials"]
+    fn real_context_capability_discovery() {
+        let directory =
+            std::path::PathBuf::from(std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").unwrap());
+        let profile = std::env::var("AI_VIDEO_CONTEXT_E2E_PROFILE").unwrap();
+        let model = std::env::var("AI_VIDEO_CONTEXT_E2E_MODEL").unwrap();
+        assert!(directory.is_absolute() && directory.join("task-fixture.json").is_file());
+        let state = super::WorkerState::new(directory.clone()).unwrap();
+        super::ensure_credential_subject(&profile, &state).unwrap();
+        let response = state.request(&json!({"id":"capability-begin","protocolVersion":1,"method":"provider.connection.begin","params":{"profileId":profile}})).unwrap();
+        let runtime: super::RuntimeProviderProfile =
+            serde_json::from_value(super::worker_result(response).unwrap()).unwrap();
+        let outcome = super::test_connection(runtime, super::credential_read(&profile).unwrap());
+        let models = state.request(&json!({"id":"capability-models","protocolVersion":1,"method":"provider.model.list","params":{"profileId":profile}})).unwrap();
+        let models = super::worker_result(models).unwrap();
+        let remote_id = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == model)
+            .unwrap()["remoteModelId"]
+            .clone();
+        let params = outcome.into_worker_params(&profile);
+        let selected = params["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["id"] == remote_id));
+        std::fs::write(directory.join("capability-discovery.json"), serde_json::to_vec_pretty(&json!({"status":params["status"],"errorCode":params["errorCode"],"selectedModel":selected})).unwrap()).unwrap();
+        assert_eq!(params["status"], "ready");
     }
 
     #[test]

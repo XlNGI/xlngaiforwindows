@@ -34,6 +34,7 @@ it('declares questions as a core system tool and returns a persisted form receip
   const workflow = new DocumentWorkflowService(project);
   const { task } = workflow.createDocumentDraftFromMessage({ messageId: assistant.id });
   expect(service.availableOperations()).toContain('conversation.ask');
+  expect(service.availableOperations()).not.toContain('document.publish');
   const receipt = service.execute(
     'conversation.ask',
     {

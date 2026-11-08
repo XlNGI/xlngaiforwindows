@@ -1,6 +1,16 @@
 import { spawn } from 'node:child_process';
 import { constants, existsSync, statSync } from 'node:fs';
-import { copyFile, lstat, mkdtemp, readFile, realpath, rm, stat, unlink } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { assertStorageCapacity, type StorageStats } from './storage-capacity.js';
 
@@ -211,6 +221,7 @@ export class FfmpegRuntime {
     signal?: AbortSignal,
     timeoutMs = this.options.timeoutMs ?? 120000,
     checkOutput?: () => void,
+    consumeStdout?: (chunk: string) => void,
   ): Promise<string> {
     if (signal?.aborted) return Promise.reject(new Error('Media operation cancelled.'));
     try {
@@ -255,6 +266,14 @@ export class FfmpegRuntime {
         signal?.removeEventListener('abort', abort);
       };
       processChild.stdout.on('data', (chunk: Buffer) => {
+        if (consumeStdout) {
+          try {
+            consumeStdout(chunk.toString('utf8'));
+          } catch (error) {
+            stop(error instanceof Error ? error.message : 'Media validation failed.');
+          }
+          return;
+        }
         outputBytes += chunk.length;
         if (outputBytes > MAX_OUTPUT_BYTES) stop('Media tool output exceeded its limit.');
         else stdout += chunk.toString('utf8');
@@ -415,7 +434,7 @@ export class FfmpegRuntime {
     output: string,
     args: string[],
     signal: AbortSignal | undefined,
-    validate: (result: MediaProbe) => void,
+    validate: (result: MediaProbe, stagedOutput: string) => void | Promise<void>,
     durationMs: number,
   ): Promise<MediaProbe> {
     const parent = await this.outputDirectory(output);
@@ -444,7 +463,7 @@ export class FfmpegRuntime {
       );
       checkOutput();
       const result = await this.validate(stagedOutput, signal);
-      validate(result);
+      await validate(result, stagedOutput);
       if (signal?.aborted) throw new Error('Media operation cancelled.');
       assertStorageCapacity(parent, statSync(stagedOutput).size, this.options.storageProbe);
       await copyFile(stagedOutput, output, constants.COPYFILE_EXCL);
@@ -553,7 +572,7 @@ export class FfmpegRuntime {
     );
   }
 
-  /** Decode at a manually selected time. Preview is bounded JPEG; adopted output is full-size PNG. */
+  /** Decode at a manually selected time. Adoption always preserves full-size PNG pixels. */
   async extractFrame(
     input: string,
     output: string,
@@ -572,6 +591,14 @@ export class FfmpegRuntime {
       throw new Error('请选择视频时长内的有效画面时间点。');
     if (extname(output).toLowerCase() !== (preview ? '.jpg' : '.png'))
       throw new Error('Frame output extension does not match its encoding.');
+    if (preview) {
+      await this.jpegPreview(
+        [...LOCAL_INPUT_OPTIONS, '-ss', seconds(timeMs), '-i', source, '-map', '0:v:0'],
+        output,
+        signal,
+      );
+      return probe;
+    }
     const parent = await this.outputDirectory(output);
     const tools = await this.tools();
     assertStorageCapacity(parent, 0, this.options.storageProbe);
@@ -582,8 +609,7 @@ export class FfmpegRuntime {
       assertStorageCapacity(cwd, 0, this.options.storageProbe);
       if (
         existsSync(staged) &&
-        statSync(staged).size >
-          Math.min(this.options.maxOutputBytes ?? Infinity, preview ? 512 * 1024 : 25 * 1024 * 1024)
+        statSync(staged).size > Math.min(this.options.maxOutputBytes ?? Infinity, 25 * 1024 * 1024)
       )
         throw new Error('抽帧图片超过大小限制。');
     };
@@ -606,14 +632,8 @@ export class FfmpegRuntime {
           '-frames:v',
           '1',
           '-an',
-          ...(preview
-            ? [
-                '-vf',
-                "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease",
-                '-q:v',
-                '4',
-              ]
-            : ['-pix_fmt', 'rgb24']),
+          '-pix_fmt',
+          'rgb24',
           '-threads',
           '1',
           '-update',
@@ -628,11 +648,7 @@ export class FfmpegRuntime {
       checkOutput();
       if (!existsSync(staged)) throw new Error('所选时间点没有可解码画面，请向前选择一帧。');
       const bytes = await readFile(staged);
-      if (
-        !(preview
-          ? bytes[0] === 0xff && bytes[1] === 0xd8
-          : bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')))
-      )
+      if (!bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')))
         throw new Error('未能从所选时间点解码出完整图片，请向前选择一帧。');
       if (signal?.aborted) throw new Error('Media operation cancelled.');
       assertStorageCapacity(parent, bytes.length, this.options.storageProbe);
@@ -648,14 +664,50 @@ export class FfmpegRuntime {
     }
   }
 
-  /** Small multimodal transport copy; never replaces the user's full reference image. */
-  async previewImage(input: string, output: string, signal?: AbortSignal): Promise<void> {
+  /** High-quality transport copy; never replaces the user's full reference image. */
+  async previewImage(
+    input: string,
+    output: string,
+    signal?: AbortSignal,
+    options?: { maxDimension?: number; maxBytes?: number },
+  ): Promise<void> {
     const source = await localFile(input);
     if (
       !['.png', '.jpg', '.jpeg', '.webp'].includes(extname(source).toLowerCase()) ||
       extname(output).toLowerCase() !== '.jpg'
     )
       throw new Error('Image preview requires a local PNG, JPEG or WebP image.');
+    await this.jpegPreview(
+      [
+        '-protocol_whitelist',
+        'file',
+        '-format_whitelist',
+        'image2,png_pipe,jpeg_pipe,webp_pipe',
+        '-i',
+        source,
+      ],
+      output,
+      signal,
+      options,
+    );
+  }
+
+  /** Keep HD detail and chroma; reduce dimensions only when the transport budget requires it. */
+  private async jpegPreview(
+    inputOptions: string[],
+    output: string,
+    signal?: AbortSignal,
+    { maxDimension = 2560, maxBytes = 1024 * 1024 } = {},
+  ): Promise<void> {
+    if (
+      !Number.isSafeInteger(maxDimension) ||
+      maxDimension < 128 ||
+      maxDimension > 4096 ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1024 ||
+      maxBytes > 1024 * 1024
+    )
+      throw new Error('Invalid image preview budget.');
     const parent = await this.outputDirectory(output);
     const tools = await this.tools();
     assertStorageCapacity(parent, 0, this.options.storageProbe);
@@ -664,50 +716,261 @@ export class FfmpegRuntime {
     let ownsOutput = false;
     const check = () => {
       assertStorageCapacity(directory, 0, this.options.storageProbe);
-      if (existsSync(staged) && statSync(staged).size > 512 * 1024)
+      if (
+        existsSync(staged) &&
+        statSync(staged).size > Math.min(this.options.maxOutputBytes ?? Infinity, 25 * 1024 * 1024)
+      )
         throw new Error('图片预览超过大小限制。');
     };
     try {
-      await this.run(
-        tools.ffmpegPath,
-        [
-          '-v',
-          'error',
-          '-nostdin',
-          '-n',
-          '-protocol_whitelist',
-          'file',
-          '-format_whitelist',
-          'image2,png_pipe,jpeg_pipe,webp_pipe',
-          '-i',
-          source,
-          '-frames:v',
-          '1',
-          '-vf',
-          "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease",
-          '-q:v',
-          '4',
-          '-threads',
-          '1',
-          '-update',
-          '1',
-          staged,
-        ],
-        directory,
-        signal,
-        30000,
-        check,
-      );
-      check();
-      const bytes = await readFile(staged);
-      if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('图片预览解码失败。');
-      if (signal?.aborted) throw new Error('Media operation cancelled.');
-      await copyFile(staged, output, constants.COPYFILE_EXCL);
-      ownsOutput = true;
-      if (signal?.aborted) throw new Error('Media operation cancelled.');
+      for (let edge = maxDimension; ; edge = Math.max(128, Math.floor((edge * 0.75) / 2) * 2)) {
+        await this.run(
+          tools.ffmpegPath,
+          [
+            '-v',
+            'error',
+            '-nostdin',
+            '-y',
+            ...inputOptions,
+            '-frames:v',
+            '1',
+            '-an',
+            '-vf',
+            `format=rgb24,scale=w='min(${edge},iw)':h='min(${edge},ih)':force_original_aspect_ratio=decrease:flags=lanczos`,
+            '-pix_fmt',
+            'yuvj444p',
+            '-q:v',
+            '2',
+            '-threads',
+            '1',
+            '-update',
+            '1',
+            staged,
+          ],
+          directory,
+          signal,
+          this.options.timeoutMs ?? 30000,
+          check,
+        );
+        check();
+        const bytes = await readFile(staged);
+        if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('图片预览解码失败。');
+        if (bytes.length > maxBytes) {
+          if (edge === 128) throw new Error('图片预览超过发送大小限制。');
+          await unlink(staged);
+          continue;
+        }
+        if (signal?.aborted) throw new Error('Media operation cancelled.');
+        assertStorageCapacity(parent, bytes.length, this.options.storageProbe);
+        await copyFile(staged, output, constants.COPYFILE_EXCL);
+        ownsOutput = true;
+        if (signal?.aborted) throw new Error('Media operation cancelled.');
+        break;
+      }
     } catch (error) {
       if (ownsOutput) await unlink(output).catch(() => undefined);
       throw error;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /** Stream packet timings so a long sequence does not require a large probe document. */
+  private async validateRoughCutFrames(path: string, expectedFrames: number, signal?: AbortSignal) {
+    const tools = await this.tools();
+    const seen = new Uint8Array(expectedFrames);
+    let count = 0;
+    let pending = '';
+    const packet = (line: string) => {
+      if (!line.trim()) return;
+      const fields: Record<string, string | undefined> = {};
+      for (const field of line.trim().split('|')) {
+        const [key, value] = field.split('=');
+        if (key) fields[key] = value;
+      }
+      const pts = Number(fields.pts_time);
+      const duration = Number(fields.duration_time);
+      const index = Math.round(pts * 30);
+      if (
+        !Number.isFinite(pts) ||
+        !Number.isFinite(duration) ||
+        index < 0 ||
+        index >= expectedFrames ||
+        Math.abs(pts * 30 - index) > 0.0001 ||
+        Math.abs(duration - 1 / 30) > 0.0000011 ||
+        seen[index]
+      )
+        throw new Error('粗剪视频帧时间戳不连续。');
+      seen[index] = 1;
+      count++;
+    };
+    await this.run(
+      tools.ffprobePath,
+      [
+        '-v',
+        'error',
+        ...LOCAL_INPUT_OPTIONS,
+        '-select_streams',
+        'v:0',
+        '-show_packets',
+        '-show_entries',
+        'packet=pts_time,duration_time',
+        '-of',
+        'compact=p=0',
+        path,
+      ],
+      dirname(path),
+      signal,
+      this.options.timeoutMs ?? 120000,
+      undefined,
+      (chunk) => {
+        pending += chunk;
+        let newline: number;
+        while ((newline = pending.indexOf('\n')) >= 0) {
+          packet(pending.slice(0, newline));
+          pending = pending.slice(newline + 1);
+        }
+        if (pending.length > 4096) throw new Error('粗剪帧校验输出无效。');
+      },
+    );
+    packet(pending);
+    if (count !== expectedFrames) throw new Error('粗剪视频帧数不完整。');
+  }
+
+  async composeRoughCut(
+    clips: {
+      path: string;
+      inMs: number;
+      outMs: number;
+      muted: boolean;
+      fit: 'contain' | 'cover';
+    }[],
+    output: string,
+    width: number,
+    height: number,
+    signal?: AbortSignal,
+    progress?: (completed: number) => void,
+  ): Promise<MediaProbe> {
+    if (
+      !clips.length ||
+      clips.length > 200 ||
+      ![width, height].every((n) => Number.isInteger(n) && n >= 2 && n <= 4096 && n % 2 === 0)
+    )
+      throw new Error('粗剪需要 1–200 个片段和有效的输出尺寸。');
+    const parent = await this.outputDirectory(output);
+    const directory = await mkdtemp(join(parent, '.rough-cut-'));
+    const paths: string[] = [];
+    let durationMs = 0;
+    let totalFrames = 0;
+    try {
+      for (const [index, clip] of clips.entries()) {
+        signal?.throwIfAborted();
+        const path = await localFile(clip.path);
+        const probe = await this.probe(path, signal);
+        checkRange(clip.inMs, clip.outMs, probe.durationMs);
+        if (!probe.hasVideo) throw new Error('粗剪片段没有视频流。');
+        const frames = Math.max(1, Math.round(((clip.outMs - clip.inMs) * 30) / 1000));
+        const length = (frames / 30) * 1000;
+        totalFrames += frames;
+        durationMs += length;
+        if (durationMs > MAX_DURATION_MS) throw new Error('粗剪总时长不能超过两小时。');
+        const silent = clip.muted || !probe.hasAudio;
+        // PCM intermediates have no AAC encoder delay or per-segment padding.
+        const staged = join(directory, `clip-${index}.mov`);
+        const fit =
+          clip.fit === 'cover'
+            ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+            : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+        await this.processOutput(
+          staged,
+          [
+            '-threads',
+            '1',
+            '-filter_threads',
+            '1',
+            '-ss',
+            seconds(clip.inMs),
+            ...LOCAL_INPUT_OPTIONS,
+            '-i',
+            path,
+            ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'] : []),
+            '-map',
+            '0:v:0',
+            '-map',
+            silent ? '1:a:0' : '0:a:0',
+            '-vf',
+            `trim=duration=${seconds(clip.outMs - clip.inMs)},setpts=PTS-STARTPTS,${fit},setsar=1,fps=30:start_time=0,tpad=stop_mode=clone:stop_duration=${seconds(length)},trim=end_frame=${frames},setpts=N/(30*TB)`,
+            '-af',
+            `aresample=48000:first_pts=0,apad,atrim=end_sample=${frames * 1600},asetpts=N/SR/TB`,
+            '-t',
+            seconds(length),
+            ...(await this.videoEncoder()),
+            '-c:a',
+            'pcm_s16le',
+            '-ar',
+            '48000',
+            '-ac',
+            '2',
+            '-video_track_timescale',
+            '30000',
+            '-movflags',
+            '+faststart',
+          ],
+          signal,
+          async (result, stagedOutput) => {
+            if (!result.hasVideo || !result.hasAudio || Math.abs(result.durationMs - length) > 100)
+              throw new Error('粗剪片段渲染不完整。');
+            await this.validateRoughCutFrames(stagedOutput, frames, signal);
+          },
+          length,
+        );
+        paths.push(staged);
+        progress?.(index + 1);
+      }
+      const manifest = join(directory, 'concat.txt');
+      await writeFile(manifest, paths.map((path) => `file '${basename(path)}'`).join('\n'), 'utf8');
+      return await this.processOutput(
+        output,
+        [
+          '-protocol_whitelist',
+          'file',
+          '-f',
+          'concat',
+          '-safe',
+          '1',
+          '-i',
+          manifest,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a:0',
+          '-c:v',
+          'copy',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k',
+          '-af',
+          `aresample=48000:first_pts=0,apad,atrim=end_sample=${totalFrames * 1600},asetpts=N/SR/TB`,
+          '-t',
+          seconds(durationMs),
+          '-video_track_timescale',
+          '30000',
+          '-movflags',
+          '+faststart',
+        ],
+        signal,
+        async (result, stagedOutput) => {
+          if (
+            !result.hasVideo ||
+            !result.hasAudio ||
+            Math.abs(result.durationMs - durationMs) > 150
+          )
+            throw new Error('粗剪导出时长或音视频流校验失败。');
+          await this.validateRoughCutFrames(stagedOutput, totalFrames, signal);
+        },
+        durationMs,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

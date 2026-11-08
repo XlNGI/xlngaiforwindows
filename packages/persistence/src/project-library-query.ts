@@ -33,6 +33,7 @@ export const LIBRARY_KIND_LABELS: Record<string, string> = {
   scene: '场景设定',
   outline: '大纲',
   plan: '计划',
+  constraint: '剧情约束',
   storyboard: '分镜',
   note: '笔记',
   image: '图片',
@@ -43,6 +44,7 @@ export const LIBRARY_KIND_LABELS: Record<string, string> = {
 const KIND_HINT_PATTERNS: Array<{ pattern: RegExp; kind: string; sourceType?: string }> = [
   { pattern: /角色设定|人物设定|角色卡|人物卡/, kind: 'character' },
   { pattern: /场景设定|场景卡/, kind: 'scene' },
+  { pattern: /剧情约束|约束文档|写作约束|创作约束|故事规则|情节规则/, kind: 'constraint' },
   { pattern: /大纲/, kind: 'outline' },
   { pattern: /计划/, kind: 'plan' },
   { pattern: /分镜/, kind: 'storyboard', sourceType: 'storyboard' },
@@ -52,13 +54,14 @@ const KIND_HINT_PATTERNS: Array<{ pattern: RegExp; kind: string; sourceType?: st
 const SOURCE_TYPE_HINT_PATTERNS: Array<{ pattern: RegExp; sourceType: string }> = [
   { pattern: /章节|小说/, sourceType: 'novel-chapter' },
   { pattern: /记忆/, sourceType: 'memory' },
-  { pattern: /约束/, sourceType: 'constraint' },
+  { pattern: /生产约束|制作约束/, sourceType: 'constraint' },
   { pattern: /素材/, sourceType: 'asset' },
   { pattern: /场次/, sourceType: 'scene' },
   { pattern: /镜头/, sourceType: 'shot' },
 ];
 
-const IDENTITY_KIND_SUFFIX = /的?(角色设定|人物设定|场景设定|角色卡|人物卡|大纲|计划|分镜|笔记)$/u;
+const IDENTITY_KIND_SUFFIX =
+  /的?(角色设定|人物设定|场景设定|角色卡|人物卡|剧情约束|约束文档|大纲|计划|分镜|笔记)$/u;
 
 export function analyzeLibraryQuery(query: string): LibraryQueryAnalysis {
   const raw = query.trim();

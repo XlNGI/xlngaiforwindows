@@ -110,6 +110,33 @@ const dialogue = {
   channels: 1,
   createdAt: 'now',
 };
+function uniCompWanAdapter(contractId = 'cn.qwen.wan3-0-video'): AdapterDescriptor {
+  const contract = officialVideoAudioContracts.find(
+    (value) => value.contractId === contractId && value.contractRevision === 3,
+  )!;
+  const schema = structuredClone(
+    contract.parameterSchema,
+  ) as unknown as AdapterDescriptor['parameterSchema'];
+  schema.$schema = 'https://json-schema.org/draft/2020-12/schema';
+  schema.properties.prompt!.title = '提示词';
+  schema.properties.media!.title = '参考素材';
+  schema.properties.audio!.title = '生成音频';
+  return {
+    ...adapter,
+    key: `REFERENCE_TO_VIDEO:unicompapi:${contractId}:contract-3`,
+    provider: 'unicompapi',
+    contractId,
+    model: contractId,
+    parameterSchema: schema,
+    uiSchema: {
+      fields: [
+        { key: 'prompt', control: 'textarea', group: 'basic', order: -1 },
+        { key: 'media', control: 'structured', group: 'basic', order: 0 },
+        { key: 'audio', control: 'toggle', group: 'basic', order: 1 },
+      ],
+    },
+  };
+}
 function mock(
   sceneValue: SceneInfo,
   descriptor = adapter,
@@ -150,7 +177,12 @@ function mock(
           providerProfileId: 'profile',
           remoteModelId: descriptor.contractId?.includes('wan2-7')
             ? 'wan2.7-i2v-2026-04-25'
-            : 'wan3.0-video',
+            : descriptor.contractId?.startsWith('cn.bytedance.')
+              ? officialVideoAudioContracts.find((c) => c.contractId === descriptor.contractId)!
+                  .officialModelName
+              : descriptor.contractId === 'cn.qwen.wan3-0-video-prime'
+                ? 'wan3.0-video-prime'
+                : 'wan3.0-video',
           displayName: 'Wan 3.0',
           contractId: descriptor.contractId,
           contractStatus: 'enabled',
@@ -218,6 +250,78 @@ function mock(
 }
 
 describe('scene production bindings', () => {
+  it.each(['cn.bytedance.seedance2-0.video', 'cn.bytedance.seedance2-5.video'])(
+    'submits structured public references for UniComp %s and waits for cost approval',
+    async (contractId) => {
+      const contract = officialVideoAudioContracts.find(
+        (c) => c.contractId === contractId && c.contractRevision === 2,
+      )!;
+      const descriptor: AdapterDescriptor = {
+        ...adapter,
+        provider: 'unicompapi',
+        providerLabel: 'UniCompAPI',
+        key: `REFERENCE_TO_VIDEO:unicompapi:${contractId}:contract-2`,
+        contractId,
+        contractRevision: 2,
+        model: contractId,
+        apiVersion: 'contract-2',
+        parameterSchema: {
+          ...(structuredClone(
+            contract.parameterSchema,
+          ) as unknown as AdapterDescriptor['parameterSchema']),
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+        },
+        uiSchema: {
+          fields: [
+            { key: 'content', control: 'structured', group: 'basic', order: 0 },
+            { key: 'generate_audio', control: 'toggle', group: 'basic', order: 1 },
+          ],
+        },
+      };
+      descriptor.parameterSchema.properties.content!.title = '参考素材';
+      descriptor.parameterSchema.properties.generate_audio!.title = '生成音频';
+      mock({ ...scene, characterBindings: [] }, descriptor);
+      render(
+        <ProductionPanel
+          capability="REFERENCE_TO_VIDEO"
+          projectId="project"
+          sceneId="scene"
+          writable
+        />,
+      );
+      expect(await screen.findByText(/“生成音频”控制成片是否带声音/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+      fireEvent.change(screen.getByLabelText('参考素材 1类型'), { target: { value: '3' } });
+      fireEvent.change(screen.getByRole('textbox', { name: '媒体地址' }), {
+        target: { value: 'https://example.com/voice.wav' },
+      });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith('video.generate.prepare', expect.anything()),
+      );
+      const prepared = vi
+        .mocked(callWorker)
+        .mock.calls.find(
+          ([method]) => method === 'video.generate.prepare',
+        )?.[1] as VideoGenerationPrepareParams;
+      expect(prepared.modelId).toBe(contract.officialModelName);
+      expect(prepared.parameters.content).toEqual([
+        {
+          type: 'audio_url',
+          audio_url: { url: 'https://example.com/voice.wav' },
+          role: 'reference_audio',
+        },
+      ]);
+      expect(await screen.findByRole('button', { name: '批准' })).toBeInTheDocument();
+      expect(callWorker).not.toHaveBeenCalledWith(
+        'media.generation.confirmSubmission',
+        expect.anything(),
+      );
+    },
+  );
   it('shows authoring uncertainties without a blocking issue and submits the editable form', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
@@ -460,28 +564,7 @@ describe('scene production bindings', () => {
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
   });
   it('lets a UniComp Wan user enter a public audio reference separately from the audio switch', async () => {
-    const contract = officialVideoAudioContracts.find(
-      (value) => value.contractId === 'cn.qwen.wan3-0-video' && value.contractRevision === 3,
-    )!;
-    const schema = structuredClone(
-      contract.parameterSchema,
-    ) as unknown as AdapterDescriptor['parameterSchema'];
-    schema.$schema = 'https://json-schema.org/draft/2020-12/schema';
-    schema.properties.media!.title = '参考素材';
-    schema.properties.audio!.title = '生成音频';
-    const descriptor: AdapterDescriptor = {
-      ...adapter,
-      key: 'REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3',
-      provider: 'unicompapi',
-      parameterSchema: schema,
-      uiSchema: {
-        fields: [
-          { key: 'media', control: 'structured', group: 'basic', order: 0 },
-          { key: 'audio', control: 'toggle', group: 'basic', order: 1 },
-        ],
-      },
-    };
-    mock({ ...scene, characterBindings: [] }, descriptor);
+    mock({ ...scene, characterBindings: [] }, uniCompWanAdapter());
     render(<ProductionPanel projectId="project" sceneId="scene" writable />);
     expect(await screen.findByText(/“生成音频”控制成片是否带声音/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
@@ -498,7 +581,65 @@ describe('scene production bindings', () => {
     expect(screen.queryByText('角色声音参考')).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
   });
-  it('keeps stale and unrelated character facts advisory and submits the final prompt unchanged', async () => {
+  it.each(['cn.qwen.wan3-0-video', 'cn.qwen.wan3-0-video-prime'])(
+    'explains the local upload limit and lets the form use a public audio URL for %s',
+    async (contractId) => {
+      mock(scene, uniCompWanAdapter(contractId));
+      render(
+        <ProductionPanel
+          capability="REFERENCE_TO_VIDEO"
+          projectId="project"
+          sceneId="scene"
+          writable
+        />,
+      );
+      const localVoice = await screen.findByRole('checkbox', { name: /林澈/ });
+      await waitFor(() => expect(localVoice).toBeChecked());
+      expect(screen.getByText(/取消勾选只影响本次表单，不修改场次声音绑定/)).toHaveTextContent(
+        '当前模型支持音频参考，但当前连接未接入本地角色声音上传',
+      );
+      expect(screen.getByRole('textbox', { name: '提示词' })).not.toHaveTextContent(
+        '【输入音频说明】',
+      );
+      fireEvent.click(screen.getByRole('button', { name: '添加参考素材' }));
+      fireEvent.change(screen.getByLabelText('参考素材 1类型'), { target: { value: '4' } });
+      fireEvent.change(screen.getByRole('textbox', { name: '媒体地址' }), {
+        target: { value: 'https://example.com/voice.wav' },
+      });
+      await replacePromptText(
+        screen.getByRole('textbox', { name: '提示词' }),
+        '角色「林澈」使用音频1的音色说：你好。',
+      );
+      fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+      expect(await screen.findByText(/取消本次角色声音选择后/)).toBeVisible();
+      expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
+      fireEvent.click(localVoice);
+      await waitFor(() => expect(localVoice).not.toBeChecked());
+      fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
+      await waitFor(() =>
+        expect(callWorker).toHaveBeenCalledWith('video.generate.prepare', expect.anything()),
+      );
+      const prepared = vi
+        .mocked(callWorker)
+        .mock.calls.find(
+          ([method]) => method === 'video.generate.prepare',
+        )?.[1] as VideoGenerationPrepareParams;
+      expect(prepared.modelId).toBe(
+        contractId.endsWith('prime') ? 'wan3.0-video-prime' : 'wan3.0-video',
+      );
+      expect(prepared.parameters.prompt).toBe('角色「林澈」使用音频1的音色说：你好。');
+      expect(prepared.parameters.media).toEqual([
+        { type: 'reference_audio', url: 'https://example.com/voice.wav' },
+      ]);
+      expect(await screen.findByRole('button', { name: '批准' })).toBeInTheDocument();
+      expect(callWorker).not.toHaveBeenCalledWith('scene.save', expect.anything());
+      expect(callWorker).not.toHaveBeenCalledWith(
+        'media.generation.confirmSubmission',
+        expect.anything(),
+      );
+    },
+  );
+  it('keeps stale IR facts advisory and submits the edited prompt unchanged', async () => {
     mock(scene);
     const fallback = vi.mocked(callWorker).getMockImplementation()!;
     vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
@@ -576,7 +717,12 @@ describe('scene production bindings', () => {
       target: { kind: 'shot', id: 'shot' },
     });
     expect(prepared.parameters.prompt).toBe('江晚继续打铁，老瞎子走入门外雾中');
-    expect(JSON.stringify(prepared.parameters)).not.toContain('沈孤鸿');
+    expect(prepared.parameters.media).toEqual([
+      { type: 'reference_image', url: 'project-asset://unused-image' },
+    ]);
+    expect(JSON.stringify(prepared.parameters)).not.toContain('林澈');
+    expect(JSON.stringify(prepared.parameters)).not.toContain('沈孤鸿状态');
+    expect(JSON.stringify(prepared.parameters)).not.toContain('江晚外观');
     expect(
       vi
         .mocked(callWorker)
@@ -672,6 +818,9 @@ describe('scene production bindings', () => {
       );
       const checkbox = await screen.findByRole('checkbox', { name: /林澈/ });
       await waitFor(() => expect(checkbox).toHaveProperty('checked', !disabled));
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
+      );
       fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
       await waitFor(() =>
         expect(
@@ -826,7 +975,7 @@ describe('scene production bindings', () => {
       vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
     ).toBe(false);
   });
-  it('preselects a bound voice without any character image and includes the pinned version before payment', async () => {
+  it('keeps the voice-to-image binding after a manual prompt edit and includes the pinned version before payment', async () => {
     mock(scene);
     render(
       <ProductionPanel
@@ -835,10 +984,40 @@ describe('scene production bindings', () => {
         projectId="project"
         sceneId="scene"
         seedPrompt="林澈说你好"
+        seedReferenceBindings={[
+          {
+            id: 'actor-image-binding',
+            role: 'character',
+            label: '林澈',
+            assetId: 'actor-image',
+            sourceDocumentId: 'actor',
+            source: 'auto',
+          },
+        ]}
         writable
       />,
     );
     expect(await screen.findByRole('checkbox', { name: /林澈/ })).toBeChecked();
+    const prompt = screen.getByRole('textbox', { name: /提示词/ });
+    await replacePromptText(prompt, '林澈在雨中说你好，人物造型保持一致。');
+    await waitFor(() => {
+      expect(prompt).toHaveTextContent('【输入音频说明】（本段传入1段角色音色参考）：');
+      expect(prompt).toHaveTextContent(/图片\s*1中的角色「林澈」仅使用音频\s*1的音色。/u);
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /林澈/ }));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).not.toBeChecked());
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: /提示词/ })).not.toHaveTextContent(
+        '【输入音频说明】',
+      ),
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: /林澈/ }));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).toBeChecked());
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: /提示词/ })).toHaveTextContent(
+        /图片\s*1中的角色「林澈」仅使用音频\s*1的音色。/u,
+      ),
+    );
     await waitFor(() => expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
     await waitFor(() =>
@@ -852,7 +1031,10 @@ describe('scene production bindings', () => {
         ([method]) => method === 'video.generate.prepare',
       )?.[1] as VideoGenerationPrepareParams;
     expect(prepared.sceneId).toBe('scene');
+    expect(prepared.parameters.prompt).toContain('林澈在雨中说你好，人物造型保持一致。');
+    expect(prepared.parameters.prompt).toContain('图 1中的角色「林澈」仅使用音频1的音色。');
     expect(prepared.parameters.media).toEqual([
+      { type: 'reference_image', url: 'project-asset://actor-image' },
       { type: 'reference_audio', url: 'character-voice://actor/voice-v1' },
     ]);
     expect(await screen.findByRole('button', { name: '批准' })).toBeInTheDocument();
@@ -941,9 +1123,8 @@ describe('scene production bindings', () => {
       await waitFor(() =>
         expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
       );
-      expect(await screen.findByRole('checkbox', { name: /林澈/ })).toHaveProperty(
-        'checked',
-        enabled,
+      await waitFor(() =>
+        expect(screen.getByRole('checkbox', { name: /林澈/ })).toHaveProperty('checked', enabled),
       );
       fireEvent.click(screen.getByRole('button', { name: '提交视频任务' }));
       await waitFor(() =>

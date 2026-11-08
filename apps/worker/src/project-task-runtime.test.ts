@@ -301,6 +301,49 @@ describe('ProjectTaskRuntime', () => {
     expect(videos.get(job.id)).toMatchObject({ status: 'polling', providerTaskId: 'provider-1' });
   });
 
+  it('resumes custom OpenAI-compatible video polling against the frozen Base URL', async () => {
+    const { projectsService, videos, request, runtime } = await setup();
+    const adapterKey = 'TEXT_TO_VIDEO:custom:openai-compatible-video:v1';
+    const profileId = '11111111-1111-4111-8111-111111111111';
+    const job = videos.prepare({
+      adapterKey,
+      parameters: { prompt: 'A slow camera move', duration: 8 },
+      providerRegion: 'global',
+      providerProfileId: profileId,
+      modelId: 'video-model',
+      mediaModelSelection: {
+        providerProfileId: profileId,
+        providerType: 'custom',
+        providerBaseUrl: 'https://video.example/gateway/v1',
+        providerBaseUrlCategory: 'custom-openai-compatible',
+        providerRegion: 'global',
+        modelId: 'video-model',
+        remoteModelId: 'vendor-video-model',
+        adapterKey,
+        adapterSchemaVersion: 1,
+        adapterSchemaSource: 'official-adapter',
+      },
+    });
+    const attached = videos.attachTask({ jobId: job.id, providerTaskId: 'video-task-123' });
+    const rootPath = projectsService.current()!.rootPath;
+    projectsService.close();
+    projectsService.open(rootPath);
+    request.mockResolvedValue(runningPoll());
+
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(request).toHaveBeenCalledWith(
+      'provider.media.poll',
+      expect.objectContaining({
+        baseUrl: 'https://video.example/gateway/v1',
+        adapterKey,
+        providerTaskId: attached.providerTaskId,
+      }),
+      600_000,
+    );
+  });
+
   it.each([false, true])(
     'commits one asset from a Native UniCompAPI file and remains idempotent (scheduled=%s)',
     async (scheduled) => {

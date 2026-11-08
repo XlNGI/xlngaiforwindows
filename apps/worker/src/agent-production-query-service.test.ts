@@ -124,6 +124,76 @@ it('invalidates child IR, reference versions and provider defaults while preserv
   expect(f.production.read(target).authoringIR).toEqual(f.ir);
 });
 
+it('keeps an unchanged shot page valid after sibling edits while invalidating actual dependencies', async () => {
+  const f = await setup();
+  const makeShot = (title: string) =>
+    f.content.saveShot({
+      sceneId: f.scene.id,
+      title,
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: title.repeat(400),
+        references: { sceneDocumentIds: [f.setting.id] },
+      },
+    });
+  const first = makeShot('第一镜');
+  const second = makeShot('第二镜');
+  const target = { kind: 'shot' as const, id: second.id };
+  const sceneTarget = { kind: 'scene' as const, id: f.scene.id };
+  const page = f.query.read(target, { limit: 512 }, f.identity, 'authoring');
+  const sceneVersion = f.production.queryVersion(sceneTarget);
+  f.content.saveShot({
+    shotId: first.id,
+    sceneId: first.sceneId,
+    title: first.title,
+    expectedRowVersion: first.rowVersion,
+    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '第一镜修订' },
+  });
+  expect(f.production.queryVersion(sceneTarget)).not.toBe(sceneVersion);
+  expect(f.production.queryVersion(target)).toBe(page.version);
+  expect(() =>
+    f.query.read(
+      target,
+      { offset: page.contentPage!.nextOffset, expectedVersion: page.version, limit: 512 },
+      f.identity,
+      'authoring',
+    ),
+  ).not.toThrow();
+  f.content.saveShot({
+    shotId: second.id,
+    sceneId: second.sceneId,
+    title: second.title,
+    expectedRowVersion: second.rowVersion,
+    authoringIR: { ...second.authoringIR!, prompt: '第二镜自身修订' },
+  });
+  const ownVersion = f.production.queryVersion(target);
+  expect(ownVersion).not.toBe(page.version);
+  expect(() =>
+    f.query.read(target, { expectedVersion: page.version }, f.identity, 'authoring'),
+  ).toThrow('版本已变化');
+  f.content.saveDocument({
+    documentId: f.setting.id,
+    kind: 'scene',
+    title: f.setting.title,
+    contentMarkdown: '当前镜引用的资料发生变化',
+  });
+  const referenceVersion = f.production.queryVersion(target);
+  expect(referenceVersion).not.toBe(ownVersion);
+  f.content.saveScene({
+    sceneId: f.scene.id,
+    title: '父场次修订',
+    expectedRowVersion: f.scene.rowVersion,
+  });
+  const parentVersion = f.production.queryVersion(target);
+  expect(parentVersion).not.toBe(referenceVersion);
+  f.production.saveDefaults({
+    expectedRowVersion: 0,
+    settings: { generation: { watermark: false } },
+  });
+  expect(f.production.queryVersion(target)).not.toBe(parentVersion);
+});
+
 it('isolates cached snapshots across conversations and evicts older entries', async () => {
   const f = await setup();
   const read = vi.spyOn(f.production, 'readForAgent');
@@ -141,4 +211,88 @@ it('isolates cached snapshots across conversations and evicts older entries', as
   ).toBe('unchanged');
   f.query.read(target, { view: 'text' }, { ...f.identity, conversationId: 'another' }, 'authoring');
   expect(read).toHaveBeenCalledTimes(27);
+});
+
+it('reads one shot with its scene and CAS and pages whole structure records with version checks', async () => {
+  const f = await setup();
+  const shots = Array.from({ length: 25 }, (_, i) =>
+    f.content.saveShot({
+      sceneId: f.scene.id,
+      title: `镜头${i + 1}`,
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: `动作${i}`,
+        references: { sceneDocumentIds: [f.setting.id] },
+      },
+    }),
+  );
+  const single = f.query.read({ kind: 'shot', id: shots[6]!.id }, {}, f.identity, 'authoring');
+  expect(single).toMatchObject({
+    shotId: shots[6]!.id,
+    sceneId: f.scene.id,
+    rowVersion: shots[6]!.rowVersion,
+    authoring: { prompt: '动作6' },
+    view: 'authoring',
+  });
+  const target = { kind: 'scene' as const, id: f.scene.id };
+  const first = f.query.read(target, { recordLimit: 10 }, f.identity, 'structure');
+  expect(first.contentPage).toBeUndefined();
+  expect(first.recordPage).toMatchObject({
+    offset: 0,
+    nextOffset: 10,
+    totalRecords: 25,
+    unit: 'records',
+  });
+  const collected = [...first.recordPage!.records];
+  let page = first;
+  while (page.recordPage?.nextOffset !== undefined) {
+    page = f.query.read(
+      target,
+      { recordOffset: page.recordPage.nextOffset, recordLimit: 10, expectedVersion: first.version },
+      f.identity,
+      'structure',
+    );
+    collected.push(...page.recordPage!.records);
+  }
+  expect(collected.map((record) => (record.value as { id: string }).id)).toEqual(
+    shots.map((shot) => shot.id),
+  );
+  expect(() => f.query.read(target, { recordOffset: 10 }, f.identity, 'structure')).toThrow(
+    'expectedVersion',
+  );
+  expect(() => f.query.read(target, { recordLimit: 21 }, f.identity, 'structure')).toThrow('1–20');
+  const tailOnly = new AgentProductionQueryService(f.production);
+  tailOnly.read(
+    target,
+    { recordOffset: 20, expectedVersion: first.version },
+    f.identity,
+    'structure',
+  );
+  expect(tailOnly.read(target, { ifVersion: first.version }, f.identity, 'structure').status).toBe(
+    'read',
+  );
+  const media = f.query.read(target, { view: 'media', recordLimit: 1 }, f.identity, 'structure');
+  expect(media.recordPage?.records[0]).toMatchObject({
+    path: ['bindings', 0],
+    value: { documentId: f.setting.id },
+  });
+  expect(media.contentPage).toBeUndefined();
+  expect(() =>
+    f.query.read(target, { view: 'media', recordLimit: 1, limit: 100 }, f.identity, 'structure'),
+  ).toThrow('不能与字符');
+  f.content.saveShot({
+    shotId: shots[0]!.id,
+    sceneId: f.scene.id,
+    title: '已修改',
+    expectedRowVersion: shots[0]!.rowVersion,
+  });
+  expect(() =>
+    f.query.read(
+      target,
+      { recordOffset: 10, expectedVersion: first.version },
+      f.identity,
+      'structure',
+    ),
+  ).toThrow('版本已变化');
 });

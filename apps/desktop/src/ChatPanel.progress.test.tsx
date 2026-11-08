@@ -90,6 +90,63 @@ function props(
 }
 
 describe('ChatPanel conversation progress', () => {
+  it.each([false, true])(
+    'hides stale completion feedback while a restored task is running (concurrent: %s)',
+    (allowConcurrentTasks) => {
+      const state = props({
+        agentTask: task('first', 'user1'),
+        statusMessage: '生成完成',
+        allowConcurrentTasks,
+      });
+      const view = render(<ChatPanel {...state} />);
+      expect(screen.getByText('正在调用工具')).toBeInTheDocument();
+      expect(screen.queryByText('生成完成')).not.toBeInTheDocument();
+
+      view.rerender(<ChatPanel {...state} statusMessage="生成状态读取失败" />);
+      expect(screen.getByText('生成状态读取失败')).toBeInTheDocument();
+
+      const completed = task('first', 'user1');
+      completed.task.status = 'completed';
+      view.rerender(<ChatPanel {...state} agentTask={completed} />);
+      expect(screen.queryByText('生成完成')).not.toBeInTheDocument();
+    },
+  );
+
+  it('attaches cancelled, partial and read-only outcomes to their own replies, never a global completion', () => {
+    const stopped = task('stopped', 'u1');
+    stopped.task.status = 'cancelled';
+    const partial = task('partial', 'u2');
+    partial.task.status = 'completed';
+    partial.task.completionState = 'partial';
+    partial.task.outcome = 'read-only';
+    partial.task.errorMessage = '缺少可写目标';
+    const answered = task('answered', 'u3');
+    answered.task.status = 'completed';
+    answered.task.outcome = 'read-only';
+    render(
+      <ChatPanel
+        {...props({
+          messages: [
+            message('u1', 'user'),
+            message('a1', 'assistant', 'u1'),
+            message('u2', 'user'),
+            message('a2', 'assistant', 'u2'),
+            message('u3', 'user'),
+            message('a3', 'assistant', 'u3'),
+          ],
+          agentTasks: [stopped, partial, answered],
+          statusMessage: '生成完成',
+        })}
+      />,
+    );
+    expect(screen.getByText('a1').closest('article')).toHaveTextContent('任务已停止');
+    expect(screen.getByText('a2').closest('article')).toHaveTextContent('未完成 · 未执行保存');
+    expect(screen.getByText('a2').closest('article')).toHaveTextContent('缺少可写目标');
+    expect(screen.getByText('a3').closest('article')).toHaveTextContent('回复结束');
+    expect(screen.getByText('a1').closest('article')).not.toHaveTextContent('回复结束');
+    expect(screen.queryByText('生成完成')).not.toBeInTheDocument();
+  });
+
   it('blocks a second send when a running task was restored without a generation snapshot', () => {
     const state = props({ agentTask: task('first', 'user1') });
     render(<ChatPanel {...state} />);

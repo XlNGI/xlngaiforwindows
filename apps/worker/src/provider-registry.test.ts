@@ -146,6 +146,15 @@ describe('provider registry', () => {
         baseUrl: 'https://relay.example/v1',
       }),
     ).toThrow('must use OpenAI Responses');
+    expect(() =>
+      validateProviderConfiguration({
+        category: 'multi',
+        providerType: 'relay',
+        accessType: 'custom',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://relay.example/v1',
+      }),
+    ).not.toThrow();
   });
 
   it('does not grant capabilities to unknown remote models', () => {
@@ -153,6 +162,15 @@ describe('provider registry', () => {
     expect(hasAnyModelCapability(unknown)).toBe(false);
     expect(inferKnownModelCapabilities('openai', 'gpt-5').reasoning).toBe(true);
     expect(inferKnownModelCapabilities('openai', 'text-embedding-3-large').embeddings).toBe(true);
+  });
+
+  it('recognizes OpenAI GPT Image models without treating them as chat models', () => {
+    expect(inferKnownModelCapabilities('openai', 'gpt-image-1')).toMatchObject({
+      imageGeneration: true,
+      imageEditing: false,
+      text: false,
+    });
+    expect(inferKnownModelCapabilities('custom', 'gpt-image-1').imageGeneration).toBe(false);
   });
 
   it('keeps UniCompAPI first-insert hints tiny and does not catalog unknown IDs', () => {

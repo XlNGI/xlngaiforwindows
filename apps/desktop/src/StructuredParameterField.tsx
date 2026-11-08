@@ -6,6 +6,7 @@ import { Check, ChevronDown, ChevronUp, ImagePlus, Plus, Trash2 } from 'lucide-r
 import { ParameterHelp } from './ParameterHelp';
 import { imageAssetId, ParameterImagePreview } from './ParameterImagePreview';
 import { isLocalImageDataUrl } from './local-image-input';
+import { StructuredAssetDrop } from './assets/StructuredAssetDrop';
 
 type Schema = Record<string, unknown>;
 export const parameterScalarText = (value: unknown): string =>
@@ -38,9 +39,21 @@ function initial(schema: Schema): AdapterParameterValue {
   if (variant.type === 'object')
     return Object.fromEntries(
       Object.entries(object(variant.properties))
-        .filter(([, child]) => object(child).const !== undefined)
-        .map(([key, child]) => [key, object(child).const as AdapterParameterValue]),
+        .filter(([, child]) => {
+          const property = object(child);
+          return (
+            property.const !== undefined ||
+            (Array.isArray(property.enum) && property.enum.length === 1)
+          );
+        })
+        .map(([key, child]) => {
+          const property = object(child);
+          const enumValues = Array.isArray(property.enum) ? property.enum : [];
+          return [key, (property.const ?? enumValues[0]) as AdapterParameterValue];
+        }),
     );
+  if (Array.isArray(variant.enum) && variant.enum.length === 1)
+    return variant.enum[0] as AdapterParameterValue;
   return variant.type === 'array' ? [] : '';
 }
 
@@ -110,65 +123,75 @@ function StructuredImageObject({
       [key]: key === 'url' ? next : { ...object(value[key]), url: next },
     } as Record<string, AdapterParameterValue>);
   return (
-    <div className="parameter-field structured-image-object" role="group" aria-label={label}>
-      {selector}
-      {previewableImage(url) && !editing ? (
-        <div className="local-image-value">
-          <ParameterImagePreview value={url} label={label} projectId={projectId} />
+    <StructuredAssetDrop
+      schema={schema}
+      value={value as AdapterParameterValue}
+      projectId={projectId}
+      onChange={(next) => {
+        setEditing(false);
+        onChange(next);
+      }}
+    >
+      <div className="parameter-field structured-image-object" role="group" aria-label={label}>
+        {selector}
+        {previewableImage(url) && !editing ? (
+          <div className="local-image-value">
+            <ParameterImagePreview value={url} label={label} projectId={projectId} />
+          </div>
+        ) : (
+          <div className="parameter-field structured-image-editor">
+            <label htmlFor={`${path}-image-url`}>媒体地址</label>
+            <input
+              id={`${path}-image-url`}
+              value={url}
+              placeholder="输入图片地址"
+              onChange={(event) => updateUrl(event.target.value)}
+            />
+          </div>
+        )}
+        {Object.entries(properties)
+          .filter(([name, child]) => name !== key && object(child).const === undefined)
+          .map(([name, child]) => (
+            <StructuredParameterField
+              key={name}
+              schema={object(child)}
+              value={value[name] as AdapterParameterValue | undefined}
+              label={parameterScalarText(object(child).title ?? names[name] ?? name)}
+              path={`${path}.${name}`}
+              depth={depth + 1}
+              projectId={projectId}
+              references={references}
+              onChange={(next) => {
+                const output = { ...value } as Record<string, AdapterParameterValue>;
+                if (next === undefined) delete output[name];
+                else output[name] = next;
+                onChange(output);
+              }}
+            />
+          ))}
+        <div className="url-row-actions">
+          <button
+            type="button"
+            className="icon-button subtle"
+            title={editing ? '完成图片输入' : '更换图片'}
+            aria-label={`${editing ? '完成图片输入' : '更换图片'}：${label}`}
+            disabled={editing && !previewableImage(url)}
+            onClick={() => setEditing(!editing)}
+          >
+            {editing ? <Check size={14} /> : <ImagePlus size={14} />}
+          </button>
+          {actions}
         </div>
-      ) : (
-        <div className="parameter-field structured-image-editor">
-          <label htmlFor={`${path}-image-url`}>媒体地址</label>
-          <input
-            id={`${path}-image-url`}
-            value={url}
-            placeholder="输入图片地址"
-            onChange={(event) => updateUrl(event.target.value)}
+        {editing && (
+          <ParameterHelp
+            description={
+              typeof sourceSchema.description === 'string' ? sourceSchema.description : undefined
+            }
+            label={label}
           />
-        </div>
-      )}
-      {Object.entries(properties)
-        .filter(([name, child]) => name !== key && object(child).const === undefined)
-        .map(([name, child]) => (
-          <StructuredParameterField
-            key={name}
-            schema={object(child)}
-            value={value[name] as AdapterParameterValue | undefined}
-            label={parameterScalarText(object(child).title ?? names[name] ?? name)}
-            path={`${path}.${name}`}
-            depth={depth + 1}
-            projectId={projectId}
-            references={references}
-            onChange={(next) => {
-              const output = { ...value } as Record<string, AdapterParameterValue>;
-              if (next === undefined) delete output[name];
-              else output[name] = next;
-              onChange(output);
-            }}
-          />
-        ))}
-      <div className="url-row-actions">
-        <button
-          type="button"
-          className="icon-button subtle"
-          title={editing ? '完成图片输入' : '更换图片'}
-          aria-label={`${editing ? '完成图片输入' : '更换图片'}：${label}`}
-          disabled={editing && !previewableImage(url)}
-          onClick={() => setEditing(!editing)}
-        >
-          {editing ? <Check size={14} /> : <ImagePlus size={14} />}
-        </button>
-        {actions}
+        )}
       </div>
-      {editing && (
-        <ParameterHelp
-          description={
-            typeof sourceSchema.description === 'string' ? sourceSchema.description : undefined
-          }
-          label={label}
-        />
-      )}
-    </div>
+    </StructuredAssetDrop>
   );
 }
 
@@ -240,114 +263,120 @@ export function StructuredParameterField({
     );
   if (active.type === 'object' || variants.length)
     return (
-      <fieldset className="parameter-field structured-parameter-object">
-        <legend>{label}</legend>
-        {selector}
-        {Object.entries(object(active.properties))
-          .filter(([, child]) => object(child).const === undefined)
-          .map(([key, child]) => (
-            <StructuredParameterField
-              key={key}
-              schema={object(child)}
-              value={current[key] as AdapterParameterValue | undefined}
-              label={parameterScalarText(object(child).title ?? names[key] ?? key)}
-              path={`${path}.${key}`}
-              depth={depth + 1}
-              projectId={projectId}
-              references={references}
-              multiline={['text', 'prompt'].includes(key)}
-              onChange={(next) => {
-                const output = { ...current } as Record<string, AdapterParameterValue>;
-                if (next === undefined) delete output[key];
-                else output[key] = next;
-                onChange(output);
-              }}
-            />
-          ))}
-        {actions && <div className="structured-item-actions">{actions}</div>}
-      </fieldset>
+      <StructuredAssetDrop schema={active} value={value} projectId={projectId} onChange={onChange}>
+        <fieldset className="parameter-field structured-parameter-object">
+          <legend>{label}</legend>
+          {selector}
+          {Object.entries(object(active.properties))
+            .filter(([, child]) => object(child).const === undefined)
+            .map(([key, child]) => (
+              <StructuredParameterField
+                key={key}
+                schema={object(child)}
+                value={current[key] as AdapterParameterValue | undefined}
+                label={parameterScalarText(object(child).title ?? names[key] ?? key)}
+                path={`${path}.${key}`}
+                depth={depth + 1}
+                projectId={projectId}
+                references={references}
+                multiline={['text', 'prompt'].includes(key)}
+                onChange={(next) => {
+                  const output = { ...current } as Record<string, AdapterParameterValue>;
+                  if (next === undefined) delete output[key];
+                  else output[key] = next;
+                  onChange(output);
+                }}
+              />
+            ))}
+          {actions && <div className="structured-item-actions">{actions}</div>}
+        </fieldset>
+      </StructuredAssetDrop>
     );
   if (active.type === 'array') {
     const items = Array.isArray(value) ? value : [];
     const itemSchema = object(active.items);
     return (
-      <section className="parameter-field structured-parameter-array" aria-label={label}>
-        <div className="parameter-field-heading">
-          <span className="parameter-label">{label}</span>
-          <button
-            type="button"
-            className="button secondary url-list-add"
-            disabled={items.length >= (typeof active.maxItems === 'number' ? active.maxItems : 64)}
-            onClick={() => onChange([...items, initial(itemSchema)])}
-          >
-            <Plus size={14} />
-            添加{label}
-          </button>
-        </div>
-        <div className="structured-parameter-list">
-          {items.map((item, index) => (
-            <div
-              className={
-                imageProperty(variantSchema(itemSchema, item))
-                  ? 'url-list-item is-image'
-                  : 'structured-parameter-item'
+      <StructuredAssetDrop schema={active} value={value} projectId={projectId} onChange={onChange}>
+        <section className="parameter-field structured-parameter-array" aria-label={label}>
+          <div className="parameter-field-heading">
+            <span className="parameter-label">{label}</span>
+            <button
+              type="button"
+              className="button secondary url-list-add"
+              disabled={
+                items.length >= (typeof active.maxItems === 'number' ? active.maxItems : 64)
               }
-              key={index}
+              onClick={() => onChange([...items, initial(itemSchema)])}
             >
-              <StructuredParameterField
-                schema={itemSchema}
-                value={item}
-                label={`${label} ${index + 1}`}
-                path={`${path}.${index}`}
-                depth={depth + 1}
-                projectId={projectId}
-                references={references}
-                actions={
-                  <>
-                    {[-1, 1].map((offset) => (
+              <Plus size={14} />
+              添加{label}
+            </button>
+          </div>
+          <div className="structured-parameter-list">
+            {items.map((item, index) => (
+              <div
+                className={
+                  imageProperty(variantSchema(itemSchema, item))
+                    ? 'url-list-item is-image'
+                    : 'structured-parameter-item'
+                }
+                key={index}
+              >
+                <StructuredParameterField
+                  schema={itemSchema}
+                  value={item}
+                  label={`${label} ${index + 1}`}
+                  path={`${path}.${index}`}
+                  depth={depth + 1}
+                  projectId={projectId}
+                  references={references}
+                  actions={
+                    <>
+                      {[-1, 1].map((offset) => (
+                        <button
+                          key={offset}
+                          type="button"
+                          className="icon-button subtle"
+                          title={offset < 0 ? '上移' : '下移'}
+                          aria-label={`${offset < 0 ? '上移' : '下移'}${label} ${index + 1}`}
+                          disabled={index + offset < 0 || index + offset >= items.length}
+                          onClick={() => {
+                            const next = [...items];
+                            [next[index], next[index + offset]] = [
+                              next[index + offset]!,
+                              next[index]!,
+                            ];
+                            onChange(next);
+                          }}
+                        >
+                          {offset < 0 ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                        </button>
+                      ))}
                       <button
-                        key={offset}
                         type="button"
                         className="icon-button subtle"
-                        title={offset < 0 ? '上移' : '下移'}
-                        aria-label={`${offset < 0 ? '上移' : '下移'}${label} ${index + 1}`}
-                        disabled={index + offset < 0 || index + offset >= items.length}
-                        onClick={() => {
-                          const next = [...items];
-                          [next[index], next[index + offset]] = [
-                            next[index + offset]!,
-                            next[index]!,
-                          ];
-                          onChange(next);
-                        }}
+                        title="删除"
+                        aria-label={`删除${label} ${index + 1}`}
+                        onClick={() => onChange(items.filter((_, at) => at !== index))}
                       >
-                        {offset < 0 ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                        <Trash2 size={13} />
                       </button>
-                    ))}
-                    <button
-                      type="button"
-                      className="icon-button subtle"
-                      title="删除"
-                      aria-label={`删除${label} ${index + 1}`}
-                      onClick={() => onChange(items.filter((_, at) => at !== index))}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </>
-                }
-                onChange={(next) =>
-                  onChange(
-                    items.map((previous, at) =>
-                      at === index ? (next ?? initial(itemSchema)) : previous,
-                    ),
-                  )
-                }
-              />
-            </div>
-          ))}
-        </div>
-        {actions && <div className="structured-item-actions">{actions}</div>}
-      </section>
+                    </>
+                  }
+                  onChange={(next) =>
+                    onChange(
+                      items.map((previous, at) =>
+                        at === index ? (next ?? initial(itemSchema)) : previous,
+                      ),
+                    )
+                  }
+                />
+              </div>
+            ))}
+          </div>
+          {actions && <div className="structured-item-actions">{actions}</div>}
+        </section>
+      </StructuredAssetDrop>
     );
   }
   if (active.type === 'boolean')

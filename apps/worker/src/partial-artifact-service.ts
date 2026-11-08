@@ -8,7 +8,7 @@ import type {
   DocumentDetail,
   LlmGenerationIdentity,
 } from '@ai-video/contracts';
-import { DocumentWorkflowService } from './document-workflow-service.js';
+import { DocumentWorkflowError, DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 
 const TERMINAL_CONTENT = '[removed]';
@@ -215,14 +215,15 @@ export class PartialArtifactService {
               generations.conversation_id AS conversationId
        FROM llm_generations generations INNER JOIN llm_generation_attempts attempts
          ON attempts.generation_id = generations.id
-       WHERE generations.id = ? ORDER BY attempts.ordinal DESC LIMIT 1`,
+        AND attempts.assistant_message_id = generations.assistant_message_id
+       WHERE generations.id = ? ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1`,
           )
           .get(generationId) as LlmGenerationIdentity | undefined,
     );
     return identity ? this.captureInterrupted(identity, contentText) : undefined;
   }
 
-  recoverInterrupted(): number {
+  recoverInterrupted(excludedGenerationIds: string[] = []): number {
     const candidates = this.projects.access(
       false,
       (database, project) =>
@@ -253,6 +254,7 @@ export class PartialArtifactService {
     const existingIds = new Set(this.list({ includeTerminal: true }).map((item) => item.id));
     let recovered = 0;
     for (const candidate of candidates) {
+      if (excludedGenerationIds.includes(candidate.generationId)) continue;
       const captured = this.captureInterrupted(candidate, candidate.content);
       if (captured && !existingIds.has(captured.id)) {
         existingIds.add(captured.id);
@@ -355,6 +357,15 @@ export class PartialArtifactService {
           .get(params.artifactId, project.id, params.expectedRowVersion, now) as
           PartialRow | undefined;
         if (!row || !row.document_id) throw new Error('AGENT_PARTIAL_ARTIFACT_UNAVAILABLE');
+        const target = database
+          .prepare('SELECT published_version_id FROM documents WHERE id = ? AND project_id = ?')
+          .get(row.document_id, project.id) as { published_version_id: string | null } | undefined;
+        if (target?.published_version_id) {
+          throw new DocumentWorkflowError(
+            'Published documents are read-only. Unpublish the document before recovering a draft.',
+            'DOCUMENT_PUBLISHED_READ_ONLY',
+          );
+        }
         database
           .prepare(
             `UPDATE documents SET lifecycle_status = 'active', updated_at = ?, row_version = row_version + 1

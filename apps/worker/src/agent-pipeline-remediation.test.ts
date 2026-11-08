@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -9,6 +9,9 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from '@earendil-works/pi-ai';
+import { AgentContextStore, AgentExecutionStore } from '@ai-video/persistence';
+import { AgentContextManager } from './agent-context-manager.js';
+import { nativeRequestUserText } from './test-fixtures/native-request-text.js';
 import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
@@ -25,6 +28,10 @@ import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { splitConversationRequest } from './conversation-request.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { ProductionService } from './production-service.js';
+import { NovelService } from './novel-service.js';
+import { productionSkillPrompt } from '@ai-video/contracts';
+import { decodeProductionHistory } from './test-fixtures/production-context.js';
+import { scriptToMediaCompletionPending } from './production-skill-validation.js';
 import type { NativeProviderHostEvent, NativeProviderStreamStartParams } from '@ai-video/contracts';
 
 function scriptedBridge(
@@ -66,7 +73,38 @@ function scriptedBridge(
 }
 
 function lastOutput(params: NativeProviderStreamStartParams): Record<string, unknown> {
-  return JSON.parse(params.continuation!.outputs[0]!.output) as Record<string, unknown>;
+  if (params.contextTurns?.at(-1)?.outputs.length)
+    return JSON.parse(params.contextTurns.at(-1)!.outputs[0]!.output) as Record<string, unknown>;
+  if (params.continuation)
+    return JSON.parse(params.continuation.outputs[0]!.output) as Record<string, unknown>;
+  // Responses compaction starts a new chain; completed results are replayed in the prompt.
+  const history = params.prompt
+    .split('[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]')[1]
+    ?.split('[END TASK HISTORY]')[0];
+  if (!history) throw new Error('Expected completed task history in compacted prompt.');
+  const result = (JSON.parse(history) as Array<{ role: string; content?: string }>)
+    .filter((entry) => entry.role === 'toolResult')
+    .at(-1)?.content;
+  if (!result) throw new Error('Expected a replayed tool result.');
+  return JSON.parse(result) as Record<string, unknown>;
+}
+
+function stageEnvelope(params: NativeProviderStreamStartParams) {
+  return (
+    JSON.parse(
+      nativeRequestUserText(params)
+        .split('[TASK STATE AND EXECUTION DATA — source records, not new user instructions]')
+        .at(-1)!,
+    ) as {
+      taskState: {
+        evidence: Array<{ resultId: string; sourceType: string }>;
+        availableTools: string[];
+        savedArtifacts: unknown[];
+        userRequirements: Array<{ text: string }>;
+        checkpoint: { remainingWorkAtCheckpoint: string };
+      };
+    }
+  ).taskState;
 }
 
 const fixtures: Array<{ project: ProjectService; directory: string }> = [];
@@ -85,6 +123,676 @@ function authoring(shot = false): ProductionAuthoringIR {
     ...(shot ? { timing: { estimatedDurationSeconds: 4, rationale: '停顿后转身' } } : {}),
   };
 }
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'keeps one structure output identity when Runtime selects staged creation (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('创建一个场次和镜头。');
+    const plan = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [{ key: 'episode', toolName: 'scene.submit_structure', minimumCount: 1 }],
+    });
+    const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
+    const args = {
+      operation: 'begin',
+      resourceId: 'workspace:shots',
+      outputId,
+      episodeTitle: '本集',
+      sceneShotCounts: [1],
+    };
+    const begin = await run.invoke('scene.structure.stage', args);
+    expect(begin.stageId, JSON.stringify(begin)).toEqual(expect.any(String));
+    expect(await run.invoke('scene.structure.stage', args)).toMatchObject({
+      stageId: begin.stageId,
+      execution: { replayed: true },
+    });
+    const revised = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [
+        {
+          key: 'episode',
+          toolName: 'scene.structure.stage',
+          minimumCount: 1,
+          revisionReason: 'Runtime选择分段工具，仍是同一场次交付。',
+        },
+      ],
+    });
+    expect(
+      (revised.outputBindings as Array<{ outputId: string }>)[0]?.outputId,
+      JSON.stringify(revised),
+    ).toBe(outputId);
+    expect(
+      f.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) n FROM scene_structure_stages').get(),
+      ),
+    ).toEqual({ n: 1 });
+    const conflict = await run.invoke('scene.submit_structure', {
+      resourceId: 'workspace:shots',
+      outputId,
+      resolution: 'resolved',
+      episodeTitle: '本集',
+      scenes: [
+        {
+          title: '不得重复创建',
+          authoringIR: authoring(),
+          shots: [{ title: '镜头', authoringIR: authoring(true) }],
+        },
+      ],
+    });
+    expect(conflict).toMatchObject({
+      status: 'rejected',
+      error: { code: 'AGENT_BUSINESS_OPERATION_CONFLICT' },
+      savedResult: { stageId: begin.stageId },
+    });
+    expect(f.content.listScenes()).toHaveLength(0);
+  },
+);
+
+it.each(
+  (['openai-responses', 'openai-chat-completions'] as const).flatMap((protocol) =>
+    [false, true].map((planBeforeSave) => ({ protocol, planBeforeSave })),
+  ),
+)(
+  'allocates an implicit analysis before another output is created ($protocol, planBeforeSave=$planBeforeSave)',
+  async ({ protocol, planBeforeSave }) => {
+    const f = await setup(protocol);
+    const run = f.prepare('先保存分析，再保存分镜与提示词；恢复不得重复创建。');
+    const analysisArgs = {
+      resourceId: 'workspace:documents',
+      documentKind: 'plan',
+      title: '剧情分析',
+      contentMarkdown: '# 分析\n蓝衣，保持原对白。',
+    };
+    const analysis = planBeforeSave
+      ? undefined
+      : await run.invoke('document.submit_draft', analysisArgs);
+    if (analysis) expect(analysis.status).toBe('draft_saved');
+    const plan = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [
+        {
+          key: 'analysis',
+          toolName: 'document.submit_draft',
+          documentKind: 'plan',
+          minimumCount: 1,
+          ...(analysis ? { targetIds: [analysis.documentId] } : {}),
+        },
+        {
+          key: 'remaining-plans',
+          toolName: 'document.submit_draft',
+          documentKind: 'plan',
+          minimumCount: 2,
+        },
+      ],
+    });
+    const savedAnalysis = analysis ?? (await run.invoke('document.submit_draft', analysisArgs));
+    expect(savedAnalysis.status).toBe('draft_saved');
+    const bindings = plan.outputBindings as Array<{ key: string; outputId: string }>;
+    if (analysis) expect(bindings.find((b) => b.key === 'analysis')).toBeUndefined();
+    // The completed output remains internally bound for replay compatibility;
+    // it must not be offered as new creation work to the model.
+    const analysisOutput = f.project.access(
+      false,
+      (db) =>
+        (
+          db
+            .prepare('SELECT id FROM agent_execution_outputs WHERE task_id=? AND plan_key=?')
+            .get(run.agent.taskId, 'analysis') as { id: string }
+        ).id,
+    );
+    const remainingOutput = bindings.find((b) => b.key === 'remaining-plans')!.outputId;
+    const restored = new AgentContextManager(
+      f.project,
+      run.prepared.stream,
+      run.agent.taskId,
+      '继续',
+    );
+    expect(
+      restored.prepare(f.generations.runtime(run.prepared.stream), { messages: [] }).request.prompt,
+    ).toContain(remainingOutput);
+    const storyboardArgs = {
+      ...analysisArgs,
+      title: '分镜',
+      contentMarkdown: '# 分镜\n6镜，共60秒。',
+      outputId: remainingOutput,
+      outputIndex: 0,
+    };
+    const storyboard = await run.invoke('document.submit_draft', storyboardArgs);
+    expect(storyboard, JSON.stringify(storyboard)).toMatchObject({ status: 'draft_saved' });
+    expect(storyboard.documentId).not.toBe(savedAnalysis.documentId);
+    expect(await run.invoke('document.submit_draft', storyboardArgs)).toMatchObject({
+      documentId: storyboard.documentId,
+      execution: { replayed: true },
+    });
+    expect(
+      await run.invoke('document.submit_draft', { ...analysisArgs, outputId: analysisOutput }),
+    ).toMatchObject({ documentId: savedAnalysis.documentId, execution: { replayed: true } });
+    const docs = f.project.access(false, (db) =>
+      db.prepare("SELECT id, title FROM documents WHERE kind='plan' ORDER BY rowid").all(),
+    );
+    expect(docs, JSON.stringify(docs)).toHaveLength(2);
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'saves requested supporting plans in a production task without replacing real production outputs (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('先保存剧情分析、分镜表和提示词文档，再完成真实场镜。');
+    f.project.access(true, (db) =>
+      db
+        .prepare(
+          `UPDATE agent_tasks SET request_snapshot_json=json_set(request_snapshot_json,'$.productionSkillId','script-to-media') WHERE id=?`,
+        )
+        .run(run.agent.taskId),
+    );
+    const plan = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [
+        {
+          key: 'supporting',
+          toolName: 'document.submit_draft',
+          documentKind: 'plan',
+          minimumCount: 3,
+        },
+      ],
+    });
+    const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
+    const reconstructed = new AgentContextManager(
+      f.project,
+      run.prepared.stream,
+      run.agent.taskId,
+      '先保存剧情分析、分镜表和提示词文档，再完成真实场镜。',
+    );
+    const requestAfterHistoryClearing = reconstructed.prepare(
+      f.generations.runtime(run.prepared.stream),
+      {
+        messages: [],
+      },
+    ).request;
+    expect(requestAfterHistoryClearing.prompt).toContain(outputId);
+    expect(requestAfterHistoryClearing.prompt).toContain('creationBinding');
+    const unknown = await run.invoke('document.submit_draft', {
+      resourceId: 'workspace:documents',
+      documentKind: 'plan',
+      outputId: 'invented',
+      title: '剧情分析',
+      contentMarkdown: '待保存',
+    });
+    expect(JSON.stringify(unknown)).toContain(outputId);
+    expect(JSON.stringify(unknown)).toContain('OUTPUT_ID_INVALID');
+    for (const [outputIndex, title] of ['剧情分析', '分镜表', '完整提示词'].entries()) {
+      const args = {
+        resourceId: 'workspace:documents',
+        documentKind: 'plan',
+        outputId,
+        outputIndex,
+        title,
+        contentMarkdown: `# ${title}\n蓝衣，保留原对白；共6镜60秒。`,
+      };
+      const saved = await run.invoke('document.submit_draft', args);
+      expect(saved, JSON.stringify(saved)).toMatchObject({
+        status: 'draft_saved',
+        reviewRequired: false,
+      });
+      expect(f.workflow.getDocument(String(saved.documentId)).currentVersion?.contentMarkdown).toBe(
+        args.contentMarkdown,
+      );
+      expect(await run.invoke('document.submit_draft', args)).toMatchObject({
+        documentId: saved.documentId,
+        execution: { replayed: true },
+      });
+    }
+    const pending = f.project.access(false, (db, p) =>
+      scriptToMediaCompletionPending(db, p.id, run.prepared.stream.generationId, run.agent.taskId),
+    );
+    expect(pending?.[0]).toMatchObject({
+      missingStructure: true,
+      semanticReview: { ready: false },
+    });
+    expect(pending?.[0]?.unreviewedArtifacts).toHaveLength(3);
+    const invalidMaterial = await run.invoke('document.submit_draft', {
+      resourceId: 'workspace:characters',
+      documentKind: 'plan',
+      outputId,
+      outputIndex: 0,
+      title: '不能冒充角色',
+      contentMarkdown: '资料',
+    });
+    expect(invalidMaterial.status).not.toBe('draft_saved');
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'creates the first scene in an empty short-drama workspace without an episode resource (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存第一场和镜头。');
+    const context = await run.invoke('project.get_context', {});
+    expect((context.structure as { domains: { shortDrama: unknown } }).domains.shortDrama).toEqual({
+      enabled: false,
+      sceneCount: 0,
+      shotCount: 0,
+    });
+    const submit = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.submit_structure')!;
+    const args = {
+      resourceId: 'workspace:shots',
+      resolution: 'resolved',
+      episodeTitle: '第一集',
+      scenes: [
+        {
+          title: '第一场',
+          authoringIR: authoring(),
+          shots: [{ title: '第一镜', authoringIR: authoring(true) }],
+        },
+      ],
+    };
+    expect(() => {
+      validateToolArguments(submit, {
+        type: 'toolCall',
+        id: 'invalid-episode',
+        name: submit.name,
+        arguments: { ...args, resourceId: 'shortDrama:episode:1' },
+      });
+    }).toThrow();
+    const saved = await run.invoke('scene.submit_structure', args);
+    expect(saved.status, JSON.stringify(saved)).toBe('scene_structure_saved');
+    expect(f.content.listScenes()).toHaveLength(1);
+    expect(f.content.listShots(f.content.listScenes()[0]!.id)).toHaveLength(1);
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'reuses an identical saved draft across new call IDs and persists only one artifact (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存角色设定，恢复后不重复创建。');
+    const draft = {
+      resourceId: 'workspace:characters',
+      documentKind: 'character',
+      title: '沈砚舟｜完整角色设定板提示词',
+      contentMarkdown: '# 沈砚舟\n同一人物的完整角色设定板。',
+      contentIR: { schemaVersion: 1, kind: 'character', data: { source: '原稿', age: 28 } },
+    };
+    const first = await run.invoke('document.submit_draft', draft);
+    expect(first.status).toBe('draft_saved');
+    const replay = await run.invoke('document.submit_draft', {
+      ...draft,
+      contentIR: { schemaVersion: 1, kind: 'character', data: { age: 28, source: '原稿' } },
+    });
+    expect(replay).toMatchObject({
+      ...first,
+      execution: { ...(first.execution as object), replayed: true },
+    });
+    f.project.close();
+    f.project.open(join(f.directory, 'project'));
+    f.project.access(false, (db) => {
+      expect(db.prepare('SELECT COUNT(*) n FROM documents WHERE title=?').get(draft.title)).toEqual(
+        {
+          n: 1,
+        },
+      );
+      expect(
+        db
+          .prepare('SELECT COUNT(*) n FROM document_versions WHERE document_id=?')
+          .get(first.documentId),
+      ).toEqual({ n: 1 });
+      expect(
+        db
+          .prepare(
+            "SELECT COUNT(*) n FROM agent_tasks WHERE json_extract(request_snapshot_json, '$.parentTaskId')=?",
+          )
+          .get(run.agent.taskId),
+      ).toEqual({ n: 1 });
+      const results = new AgentContextStore(db)
+        .resultRefs(run.prepared.stream.projectId, run.agent.taskId)
+        .filter((result) => result.toolName === 'document.submit_draft');
+      expect(results).toHaveLength(2);
+    });
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'requires CAS when a replay adds metadata and retains the complete rejected submission (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存角色，并登记来源；不新建相同正文的副本。');
+    const draft = {
+      resourceId: 'workspace:characters',
+      documentKind: 'character',
+      title: '沈砚舟',
+      contentMarkdown: '# 沈砚舟\n完整角色正文。',
+    };
+    const first = await run.invoke('document.submit_draft', draft);
+    const candidate = {
+      ...draft,
+      contentIR: { schemaVersion: 1, kind: 'character', data: { sourceBasis: '剧本当前草稿' } },
+    };
+    const conflict = await run.invoke('document.submit_draft', candidate);
+    expect(JSON.stringify(conflict)).toContain('AGENT_BUSINESS_OPERATION_CONFLICT');
+    for (const value of [
+      first.documentId,
+      first.documentVersionId,
+      `document:${String(first.documentId)}`,
+    ])
+      expect(JSON.stringify(conflict)).toContain(String(value));
+    expect(
+      f.workflow.getDocument(String(first.documentId)).currentVersion?.contentIR,
+    ).toBeUndefined();
+    f.project.access(false, (db) => {
+      const rejected = new AgentContextStore(db)
+        .resultRefs(run.prepared.stream.projectId, run.agent.taskId)
+        .filter((result) => result.toolName === 'document.submit_draft')
+        .at(-1)!;
+      expect(
+        new AgentContextStore(db).result(
+          run.prepared.stream.projectId,
+          run.agent.taskId,
+          rejected.resultId,
+        )?.arguments,
+      ).toEqual(candidate);
+      expect(db.prepare('SELECT COUNT(*) n FROM documents WHERE title=?').get(draft.title)).toEqual(
+        { n: 1 },
+      );
+    });
+    const update = {
+      ...candidate,
+      resourceId: first.resourceId,
+      documentId: first.documentId,
+      expectedDocumentRowVersion: first.documentRowVersion,
+      baseVersionId: first.documentVersionId,
+    };
+    const updated = await run.invoke('document.submit_draft', update);
+    expect(updated).toMatchObject({ status: 'draft_saved', documentId: first.documentId });
+    expect(updated.documentVersionId).not.toBe(first.documentVersionId);
+    expect(f.workflow.getDocument(String(first.documentId)).currentVersion?.contentIR).toEqual(
+      candidate.contentIR,
+    );
+    const replay = await run.invoke('document.submit_draft', candidate);
+    expect(replay).toMatchObject({
+      status: 'rejected',
+      savedResult: { documentId: first.documentId },
+    });
+    const stale = await run.invoke('document.submit_draft', update);
+    expect(stale).toMatchObject({ status: 'draft_saved', execution: { replayed: true } });
+    f.project.access(false, (db) => {
+      expect(db.prepare('SELECT COUNT(*) n FROM documents WHERE title=?').get(draft.title)).toEqual(
+        { n: 1 },
+      );
+      expect(
+        db
+          .prepare('SELECT COUNT(*) n FROM document_versions WHERE document_id=?')
+          .get(first.documentId),
+      ).toEqual({ n: 2 });
+    });
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'keeps draft validation and distinct content, titles and parent tasks independent (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存两个人物。');
+    const draft = {
+      resourceId: 'workspace:characters',
+      documentKind: 'character',
+      title: '人物甲',
+      contentMarkdown: '# 角色\n蓝衣。',
+    };
+    const first = await run.invoke('document.submit_draft', draft);
+    const invalid = await run.invoke('document.submit_draft', {
+      ...draft,
+      contentIR: { schemaVersion: 1, kind: 'scene', data: {} },
+    });
+    expect(JSON.stringify(invalid)).toContain('AGENT_BUSINESS_OPERATION_CONFLICT');
+    const otherBody = await run.invoke('document.submit_draft', {
+      ...draft,
+      contentMarkdown: '# 角色\n红衣。',
+    });
+    const otherTitle = await run.invoke('document.submit_draft', { ...draft, title: '人物乙' });
+    const other = f.prepare('用户另一次任务明确保存另一份相同资料。');
+    const otherTask = await other.invoke('document.submit_draft', draft);
+    for (const result of [otherBody, otherTitle])
+      expect(result).toMatchObject({ status: 'rejected', execution: { effect: 'conflict' } });
+    expect(otherTask.status).toBe('draft_saved');
+    expect(otherTask.documentId).not.toBe(first.documentId);
+    const slot = f.project.access(true, (db, p) =>
+      new AgentExecutionStore(db).registerOutput(
+        p.id,
+        run.agent.taskId,
+        'characters',
+        'document.submit_draft',
+        2,
+      ),
+    );
+    const independent = await run.invoke('document.submit_draft', {
+      ...draft,
+      outputId: slot,
+      outputIndex: 1,
+      title: '人物乙',
+    });
+    expect(independent.status).toBe('draft_saved');
+    expect(independent.documentId).not.toBe(first.documentId);
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'delivers automatic completion repair instructions to the Native request through ContextManager (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const prompt = '保存一份角色草稿，保留蓝衣设定。';
+    const run = f.prepare(prompt);
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `repair-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `repair-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index === 0) return tool('tools.load', { names: ['document.submit_draft'] });
+      if (index === 1)
+        return tool('conversation.task.checkpoint', {
+          operation: 'plan',
+          deliverables: [
+            {
+              key: 'character',
+              toolName: 'document.submit_draft',
+              documentKind: 'character',
+              minimumCount: 1,
+            },
+          ],
+        });
+      if (index === 3) {
+        const state = stageEnvelope(params) as unknown as {
+          executionDirective: { source: string; instruction: string };
+        };
+        expect(state.executionDirective).toMatchObject({ source: 'runtime-continuation' });
+        expect(state.executionDirective.instruction).toContain('character');
+        expect(state.executionDirective.instruction).toContain('TASK_DELIVERABLES_PENDING');
+        expect(params.prompt).toContain(prompt);
+        return tool('document.submit_draft', {
+          resourceId: 'workspace:characters',
+          documentKind: 'character',
+          title: '林澈角色',
+          contentMarkdown: '# 林澈\n蓝衣青年。',
+        });
+      }
+      if (index > 3) {
+        expect(params.contextTurns?.at(-1)?.outputs[0]?.output).toContain('draft_saved');
+        expect(stageEnvelope(params)).not.toHaveProperty('executionDirective');
+      }
+      return [
+        {
+          ...common,
+          type: 'text_delta',
+          delta: index === 2 ? '草稿已经完成。' : '角色草稿已保存。',
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `repair-${index}`,
+          finishReason: 'stop',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      createContextManager: (identity, taskId, text) =>
+        new AgentContextManager(f.project, identity, taskId, text),
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const generation = f.generations.get(run.prepared.stream.generationId);
+    expect(generation.status, generation.error).toBe('complete');
+    expect(requests).toHaveLength(5);
+    expect(f.workflow.getTask({ taskId: run.agent.taskId }).documents).toHaveLength(1);
+  },
+);
+
+it('keeps failed delivery checks visibly unfinished across history clearing and restart', async () => {
+  const f = await setup();
+  const prompt = '保存角色草稿，原文对白不得丢失。';
+  const run = f.prepare(prompt);
+  const manager = new AgentContextManager(f.project, run.prepared.stream, run.agent.taskId, prompt);
+  const pending = {
+    key: 'reference',
+    toolName: 'document.submit_draft',
+    documentKind: 'plan',
+    minimumCount: 4,
+    requiredTexts: ['原文对白。'],
+  };
+  await run.invoke('conversation.task.checkpoint', { operation: 'plan', deliverables: [pending] });
+  const request = () => {
+    const restored = new AgentContextManager(
+      f.project,
+      run.prepared.stream,
+      run.agent.taskId,
+      prompt,
+    );
+    return restored.prepare(f.generations.runtime(run.prepared.stream), { messages: [] }).request;
+  };
+  manager.observe({ messages: [] });
+  expect(manager.taskState.recoveryState?.deliverablesVerified).toBe(false);
+  expect(request().prompt).toContain('"deliverablesVerified":false');
+  expect(request().prompt).toContain('Task is unfinished');
+  await run.invoke('conversation.task.checkpoint', {
+    operation: 'plan',
+    deliverables: [
+      {
+        ...pending,
+        minimumCount: 1,
+        documentKind: 'character',
+        revisionReason: '原任务只要一份角色草稿，四份plan是模型自己的错误估计。',
+      },
+    ],
+  });
+  expect(request().prompt).toContain('"deliverablesVerified":false');
+  await run.invoke('document.submit_draft', {
+    resourceId: 'workspace:characters',
+    title: '角色参考',
+    documentKind: 'character',
+    contentMarkdown: '# 角色参考\n原文对白。',
+  });
+  const completed = request();
+  expect(completed.prompt).toContain('"deliverablesVerified":true');
+  expect(completed.prompt).toContain('"pendingSteps":[]');
+  expect(completed.prompt).not.toContain('Task is unfinished');
+});
+
+it('externalizes a large task-state page and restores every requirement through authorized range reads', async () => {
+  const f = await setup();
+  const prompt = '完整原始要求，保留所有约束。'.repeat(2400);
+  const run = f.prepare(prompt);
+  const manager = new AgentContextManager(f.project, run.prepared.stream, run.agent.taskId, prompt);
+  manager.recordUserRequirement('更早确认的重要决定。'.repeat(1000), 'earlier');
+  const page = await run.invoke('conversation.task.checkpoint', { operation: 'state' });
+  expect(page).toMatchObject({ status: 'task_state_read', externalized: true });
+  expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(65536);
+  const read = page.read as Record<string, unknown>;
+  expect(read).toMatchObject({
+    tool: 'conversation.task.checkpoint',
+    operation: 'result',
+    resultId: page.resultId,
+    expectedHash: page.contentHash,
+  });
+  let text = '';
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const part = await run.invoke('conversation.task.checkpoint', {
+      operation: 'result',
+      resultId: page.resultId,
+      expectedHash: page.contentHash,
+      resultOffset: offset,
+      resultLimit: 4096,
+    });
+    expect(part.status).toBe('task_result_read');
+    expect(typeof part.content).toBe('string');
+    text += part.content as string;
+    offset = part.nextOffset as number | null;
+  }
+  const complete = JSON.parse(text) as { taskGoal: string; records: unknown[] };
+  expect(complete.taskGoal).toBe(prompt);
+  expect(complete.records).toContainEqual({
+    kind: 'userRequirement',
+    id: 'original',
+    text: prompt,
+    source: 'current-user-request',
+  });
+  expect(complete.records).toContainEqual({
+    kind: 'userRequirement',
+    id: 'earlier',
+    text: '更早确认的重要决定。'.repeat(1000),
+    source: 'user-supplement',
+  });
+  const restored = new AgentContextManager(
+    f.project,
+    run.prepared.stream,
+    run.agent.taskId,
+    prompt,
+  );
+  expect(restored.taskState.userRequirements).toEqual(manager.taskState.userRequirements);
+  // A new task can inspect an earlier task in this conversation, and the receipt
+  // must keep that scope when its snapshot is read through the same authorized tool.
+  const followUp = f.prepare('核对先前任务的完整要求，不重新执行。');
+  const archived = await followUp.invoke('conversation.task.checkpoint', {
+    operation: 'state',
+    targetGenerationId: run.prepared.stream.generationId,
+  });
+  expect(archived.read).toMatchObject({
+    targetGenerationId: run.prepared.stream.generationId,
+    resultId: archived.resultId,
+  });
+  const readArgs = { ...(archived.read as Record<string, unknown>) };
+  delete readArgs.tool;
+  const part = await followUp.invoke('conversation.task.checkpoint', readArgs);
+  expect(part).toMatchObject({
+    status: 'task_result_read',
+    contentHash: archived.contentHash,
+    offset: 0,
+  });
+  expect(part.content).toContain('"taskGoal":');
+});
 
 it.each(['begin', 'put_scene', 'put_shots', 'finalize', 'checkpoint'])(
   'declares operation-specific stage requirements (%s)',
@@ -141,6 +849,202 @@ it('uses a trusted observed zero stage version when omitted and omits unknown op
   expect(f.content.listScenes()).toHaveLength(0);
 });
 
+it('paginates every resumable scene stage instead of truncating the list at twenty', async () => {
+  const f = await setup();
+  const run = f.prepare('生成大型场次计划');
+  const outputId = f.project.access(true, (db, p) =>
+    new AgentExecutionStore(db).registerOutput(
+      p.id,
+      run.agent.taskId,
+      'pages',
+      'scene.structure.stage',
+      3,
+    ),
+  );
+  for (let page = 0; page < 3; page++)
+    await run.invoke('scene.structure.stage', {
+      operation: 'begin',
+      outputId,
+      outputIndex: page,
+      resourceId: 'workspace:shots',
+      executionKey: `listed-page-${page + 1}`,
+      episodeTitle: `页面 ${page + 1}`,
+      sceneShotCounts: [1],
+    });
+
+  const first = await run.invoke('scene.structure.stage', {
+    operation: 'get',
+    resourceId: 'workspace:shots',
+    pageSize: 1,
+  });
+  const second = await run.invoke('scene.structure.stage', {
+    operation: 'get',
+    resourceId: 'workspace:shots',
+    pageSize: 1,
+    pageOffset: first.nextPageOffset,
+  });
+  const third = await run.invoke('scene.structure.stage', {
+    operation: 'get',
+    resourceId: 'workspace:shots',
+    pageSize: 1,
+    pageOffset: second.nextPageOffset,
+  });
+  expect(first).toMatchObject({
+    status: 'scene_structure_stages',
+    totalStages: 3,
+    nextPageOffset: 1,
+  });
+  expect(second).toMatchObject({
+    status: 'scene_structure_stages',
+    totalStages: 3,
+    nextPageOffset: 2,
+  });
+  expect(third).toMatchObject({ status: 'scene_structure_stages', totalStages: 3 });
+  expect(third.nextPageOffset).toBeUndefined();
+  expect(
+    new Set(
+      [first, second, third].flatMap((page) =>
+        (page.stages as Array<{ stageId: string }>).map((stage) => stage.stageId),
+      ),
+    ).size,
+  ).toBe(3);
+
+  const firstStage = (first.stages as Array<{ stageId: string }>)[0]!;
+  const secondStage = (second.stages as Array<{ stageId: string }>)[0]!;
+  let state = await run.invoke('scene.structure.stage', {
+    operation: 'get',
+    resourceId: 'workspace:shots',
+    stageId: firstStage.stageId,
+  });
+  state = await run.invoke('scene.structure.stage', {
+    operation: 'put_scene',
+    resourceId: 'workspace:shots',
+    stageId: firstStage.stageId,
+    expectedRowVersion: state.rowVersion,
+    sceneIndex: 0,
+    scene: {
+      title: '已完成页场次',
+      sceneDocumentId: f.setting.id,
+      characterDocumentIds: [],
+      authoringIR: authoring(),
+    },
+  });
+  state = await run.invoke('scene.structure.stage', {
+    operation: 'put_shots',
+    resourceId: 'workspace:shots',
+    stageId: firstStage.stageId,
+    expectedRowVersion: state.rowVersion,
+    sceneIndex: 0,
+    shotOffset: 0,
+    shots: [{ title: '已完成页镜头', authoringIR: authoring(true) }],
+  });
+  expect(state).toMatchObject({ status: 'scene_structure_saved', complete: true });
+
+  const secondAfterCompletion = await run.invoke('scene.structure.stage', {
+    operation: 'get',
+    resourceId: 'workspace:shots',
+    pageSize: 1,
+    pageOffset: first.nextPageOffset,
+  });
+  expect((secondAfterCompletion.stages as Array<{ stageId: string }>)[0]?.stageId).toBe(
+    secondStage.stageId,
+  );
+  expect((secondAfterCompletion.stages as Array<{ complete: boolean }>)[0]?.complete).toBe(false);
+});
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'continues paged structure lookup with real CAS through Native/Pi without replaying the user request (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 64000);
+    const scene = f.content.saveScene({
+      title: '目标场次',
+      authoringIR: { ...authoring(), kind: 'scene' },
+    });
+    const shots = Array.from({ length: 25 }, (_, index) =>
+      f.content.saveShot({
+        sceneId: scene.id,
+        title: `目标镜头${index}`,
+        authoringIR: { ...authoring(true), kind: 'shot' },
+      }),
+    );
+    const prompt =
+      '【本会话要求约束】\n' +
+      '保留所有用户要求。'.repeat(600) +
+      '\n【用户本次请求】\n读取目标场次的全部镜头，仅核对，不修改。';
+    const run = f.prepare(prompt);
+    const retrieved: string[] = [];
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      let args: Record<string, unknown> = { kind: 'shot', parentId: `scene:${scene.id}`, limit: 7 };
+      if (index > 0) {
+        const map = lastOutput(params).resourceMap as {
+          resources: Array<{ id: string; rowVersion: number; locator: { sceneId: string } }>;
+          nextOffset?: number;
+          revision: string;
+        };
+        for (const resource of map.resources) {
+          expect(resource.locator.sceneId).toBe(scene.id);
+          expect(resource.rowVersion).toBeTypeOf('number');
+          retrieved.push(resource.id);
+        }
+        if (map.nextOffset === undefined)
+          return [
+            { ...common, type: 'text_delta', delta: '已核对全部镜头，未修改。' },
+            {
+              ...common,
+              type: 'complete',
+              providerResponseId: 'paged-final',
+              finishReason: 'stop',
+            },
+          ];
+        args = { ...args, offset: map.nextOffset, expectedRevision: map.revision };
+      }
+      return [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: {
+            id: `page-${index}`,
+            name: 'project.structure.get',
+            argumentsJson: JSON.stringify(args),
+          },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `page-response-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe('complete');
+    expect(retrieved).toEqual(shots.map((shot) => `shot:${shot.id}`));
+    expect(requests).toHaveLength(5);
+    expect(requests.every((request) => request.prompt === prompt)).toBe(true);
+    expect(f.content.listShots(scene.id).map((shot) => shot.id)).toEqual(
+      shots.map((shot) => shot.id),
+    );
+  },
+);
+
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'compacts old versioned library text through Native/Pi and retains real SQLite sources (%s)',
   async (protocol) => {
@@ -162,6 +1066,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       contentMarkdown: '只核查，不改写。',
     });
     const run = f.prepare('核查三份资料，保留用户手工修改，不写入');
+    // This regression specifically exercises the legacy budget fallback.
+    f.generations.configureAgentTools(
+      run.prepared.stream,
+      run.agent.tools.filter((tool) => tool.name !== 'conversation.task.checkpoint'),
+    );
     const { bridge, requests } = scriptedBridge((params, index) => {
       const common = { projectSessionId: params.projectSessionId };
       const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
@@ -200,6 +1109,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const runtime = new PiConversationRuntime({
       generation: f.generations,
       providerTools: f.loop,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(f.project, identity, taskId, prompt),
       bridge,
       plans: {} as never,
       createGateway: () => {
@@ -222,18 +1133,98 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       completeRequests: 7,
       coverage: 'complete',
     });
-    expect(
-      result.assistantMessage.attempt?.accounting?.requests.some(
-        (request) => request.context?.compactionCount === 1,
-      ),
-    ).toBe(true);
-    const shortened = requests.find((params) => JSON.stringify(params).includes('reread_required'));
+    const shortened = requests.find((params) => JSON.stringify(params).includes('externalized'));
     expect(shortened).toBeDefined();
     expect(JSON.stringify(shortened)).toContain(large.id);
     expect(JSON.stringify(shortened)).toContain('draft');
-    if (protocol === 'openai-responses') expect(shortened?.continuation).toBeUndefined();
-    else expect(shortened?.continuation).toMatchObject({ protocol });
+    const stored = f.project.access(false, (db) =>
+      new AgentContextStore(db).resultForCall(
+        run.prepared.stream.projectId,
+        run.agent.taskId,
+        'budget-1',
+      ),
+    );
+    expect(stored?.content).toContain(body);
+    expect(JSON.stringify(shortened)).not.toContain(body);
     expect(f.content.getDocument(large.id).currentVersion?.contentMarkdown).toBe(body);
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'stops an unchanged library read loop before another Native request and preserves its SQLite audit (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const document = f.content.saveDocument({
+      kind: 'note',
+      title: '重复读取证据',
+      contentMarkdown: '完整且不截断的资料。'.repeat(350),
+    });
+    const run = f.prepare('读取重复读取证据，完成核查');
+    let handle: string | undefined;
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      if (index === 1)
+        handle = (lastOutput(params) as { sources: Array<{ sourceHandle: string }> }).sources[0]!
+          .sourceHandle;
+      // A broken model would keep reading forever; the fifth send must be the last.
+      if (index > 4) throw new Error('Read loop reached another Provider request');
+      const name = index === 0 ? 'library.search' : 'library.read';
+      return [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: {
+            id: `repeat-${index}`,
+            name,
+            argumentsJson: JSON.stringify(
+              index === 0
+                ? { query: '重复读取证据', sourceTypes: ['document'], limit: 1 }
+                : { sourceHandle: handle, readMode: 'source', maxChars: 20000 },
+            ),
+          },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `repeat-response-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '核查资料',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('AGENT_REPEATED_READ_STALLED');
+    expect(requests).toHaveLength(5);
+    expect(f.content.getDocument(document.id).currentVersion?.contentMarkdown).toBe(
+      document.currentVersion!.contentMarkdown,
+    );
+    expect(f.workflow.getTask({ taskId: run.agent.taskId }).librarySources).toHaveLength(1);
+    expect(
+      f.project.access(false, (database) =>
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM agent_tool_calls WHERE task_id=? AND tool_name='library.read' AND status='succeeded'",
+          )
+          .get(run.agent.taskId),
+      ),
+    ).toEqual({ count: 4 });
   },
 );
 
@@ -279,7 +1270,7 @@ it.each([
   ['openai-chat-completions', true],
   ['openai-chat-completions', false],
 ] as const)(
-  'keeps saved progress and one shared 24-request budget across reads, no-ops, loaders and repair (%s, stop=%s)',
+  'keeps saved progress across reads, no-ops, loaders and repair beyond 24 requests (%s, stop=%s)',
   async (protocol, finalStop) => {
     const f = await setup(protocol);
     const scene = f.content.saveScene({ title: '已保存场次', sceneDocumentId: f.setting.id });
@@ -290,17 +1281,23 @@ it.each([
         authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '原文' },
       }),
     );
+    const discoveryShots = Array.from({ length: 16 }, (_, i) =>
+      f.content.saveShot({ sceneId: scene.id, title: `待核对镜头${i}` }),
+    );
     const targets = [
       { kind: 'scene' as const, id: scene.id },
       ...shots.map((shot) => ({ kind: 'shot' as const, id: shot.id })),
     ];
     const production = new ProductionService(f.project);
     const operations = () => ({
-      shots: f.content.listShots(scene.id).map((shot) => ({
-        shotId: shot.id,
-        expectedRowVersion: shot.rowVersion,
-        authoringIR: authoring(true),
-      })),
+      shots: f.content
+        .listShots(scene.id)
+        .filter((shot) => shots.some((target) => target.id === shot.id))
+        .map((shot) => ({
+          shotId: shot.id,
+          expectedRowVersion: shot.rowVersion,
+          authoringIR: authoring(true),
+        })),
     });
     const run = f.prepare('更新已有镜头的制作提示词');
     const { bridge, requests } = scriptedBridge((params, index) => {
@@ -332,7 +1329,7 @@ it.each([
           changedCount: 0,
           unchangedCount: 4,
         });
-      if (index === 21 || (index === 23 && !finalStop))
+      if (index === 21)
         return [
           {
             ...common,
@@ -345,8 +1342,20 @@ it.each([
             },
           },
         ];
-      if (index === 23) {
-        expect(lastOutput(params)).toMatchObject({ status: 'shot_prompts_saved' });
+      if (index === 23) expect(lastOutput(params)).toMatchObject({ status: 'shot_prompts_saved' });
+      if (index === 24 && !finalStop)
+        return [
+          {
+            ...common,
+            type: 'failed',
+            error: {
+              code: 'PROVIDER_FAILED',
+              retryable: false,
+              message: 'Provider failed after 25 requests.',
+            },
+          },
+        ];
+      if (index === 24) {
         return [
           { ...common, type: 'text_delta', delta: '制作提示词已保存。' },
           {
@@ -357,8 +1366,13 @@ it.each([
           },
         ];
       }
-      if (index > 23) throw new Error('Must not send request 25');
-      return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      if (index > 24) throw new Error('Must not send request 26');
+      if (index === 23)
+        return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      return tool('production.read', {
+        target: { kind: 'shot', id: discoveryShots[index - 5]!.id },
+        view: 'authoring',
+      });
     }, true);
     const runtime = new PiConversationRuntime({
       generation: f.generations,
@@ -379,29 +1393,30 @@ it.each([
     await runtime.wait(run.prepared.stream.generationId);
     const result = f.generations.get(run.prepared.stream.generationId);
     expect(result.status, result.error).toBe(finalStop ? 'complete' : 'failed');
-    if (!finalStop) expect(result.error).toContain('24-turn limit');
-    expect(requests).toHaveLength(24);
+    if (!finalStop) expect(result.error).toContain('Provider failed after 25 requests');
+    expect(requests).toHaveLength(25);
     expect(result.assistantMessage.attempt?.usage).toMatchObject({
-      inputTokens: 51_600,
-      cachedInputTokens: 2_760,
-      outputTokens: 240,
-      totalTokens: 51_840,
+      inputTokens: 55_000,
+      cachedInputTokens: 3_000,
+      outputTokens: 250,
+      totalTokens: 55_250,
     });
-    // Tool selections change repeatedly before the first output repair;
+    // New targets keep the task moving beyond 24 requests before output repair;
     // their policies and frozen context must remain byte-identical.
     for (const request of requests.slice(0, 22))
       expect(request.systemInstruction).toBe(requests[0]!.systemInstruction);
     expect(requests[0]!.systemInstruction).not.toContain('# Agent document');
     expect(requests[1]!.continuation!.outputs[0]!.output).toContain(
-      'Production reads use bounded views',
+      'For a single existing shot, load production.read',
     );
     expect(requests[0]!.tools!.some((tool) => tool.name === 'scene.update_shot_prompts')).toBe(
       false,
     );
     expect(f.content.listScenes()).toHaveLength(1);
-    expect(f.content.listShots(scene.id)).toHaveLength(4);
+    expect(f.content.listShots(scene.id)).toHaveLength(20);
     f.project.access(false, (db) => {
-      expect(db.prepare('SELECT COUNT(*) n FROM agent_write_receipts').get()).toEqual({ n: 2 });
+      // An unchanged retry is not a second committed business effect.
+      expect(db.prepare('SELECT COUNT(*) n FROM agent_write_receipts').get()).toEqual({ n: 1 });
       expect(db.prepare('SELECT COUNT(*) n FROM generation_jobs').get()).toEqual({ n: 0 });
     });
     f.project.close();
@@ -413,6 +1428,60 @@ it.each([
         issues: [],
       });
     }
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'stops a provider repeating the same tool load without business writes (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('创建角色资料');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      if (index >= 4) throw new Error('Must stop before sending a fifth empty preparation turn.');
+      return [
+        {
+          type: 'tool_call_end',
+          projectSessionId: params.projectSessionId,
+          call: {
+            id: `load-${index}`,
+            name: 'tools.load',
+            argumentsJson: JSON.stringify({ names: ['document.submit_draft'] }),
+          },
+        },
+        {
+          type: 'complete',
+          projectSessionId: params.projectSessionId,
+          providerResponseId: `loop-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '创建角色资料',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    expect(requests).toHaveLength(4);
+    expect(f.generations.get(run.prepared.stream.generationId)).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('AGENT_PREPARATION_STALLED') as unknown,
+    });
+    expect(f.workflow.getTask({ taskId: run.agent.taskId }).task.status).toBe('failed');
+    f.project.access(false, (db) => {
+      expect(db.prepare('SELECT COUNT(*) n FROM agent_write_receipts').get()).toEqual({ n: 0 });
+    });
   },
 );
 
@@ -449,7 +1518,7 @@ it('does not complete a rejected scene write, and records failure instead of too
   f.loop.startProviderStep(run.prepared.stream);
   expect(() =>
     f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
-  ).toThrow('AGENT_SCENE_NOT_SAVED');
+  ).toThrow('原始请求仍未完成');
   expect(f.content.listScenes()).toHaveLength(0);
   const repaired = await run.invoke('scene.submit_structure', {
     resourceId: 'workspace:shots',
@@ -477,14 +1546,25 @@ it.each(['schema', 'stage'] as const)(
   async (kind) => {
     const f = await setup();
     const run = f.prepare('创建场次');
-    if (kind === 'schema')
+    if (kind === 'schema') {
       f.loop.recordValidationFailure(
         run.prepared.stream,
         'scene.submit_structure',
         100,
         'stillFrame is missing',
       );
-    else
+      expect(
+        f.project.access(false, (db) =>
+          db
+            .prepare(
+              `SELECT usage.tool_call_count, tasks.quota_state
+             FROM agent_tasks tasks JOIN agent_task_usage_counters usage ON usage.task_id=tasks.id
+             WHERE tasks.id=?`,
+            )
+            .get(run.agent.taskId),
+        ),
+      ).toEqual({ tool_call_count: 0, quota_state: 'active' });
+    } else
       await run.invoke('scene.structure.stage', {
         resourceId: 'workspace:shots',
         operation: 'begin',
@@ -495,7 +1575,7 @@ it.each(['schema', 'stage'] as const)(
     f.loop.startProviderStep(run.prepared.stream);
     expect(() =>
       f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
-    ).toThrow('AGENT_SCENE_NOT_SAVED');
+    ).toThrow('原始请求仍未完成');
   },
 );
 
@@ -507,7 +1587,7 @@ it.each([
   ['openai-chat-completions', 'business'],
   ['openai-chat-completions', 'stage'],
 ] as const)(
-  'ends the generation as failed after an unresolved %s/%s write',
+  'retries the same task after an unresolved %s/%s write and stops only when there is no progress',
   async (protocol, kind) => {
     const f = await setup(protocol);
     const run = f.prepare('生成场次');
@@ -557,7 +1637,7 @@ it.each([
           ],
         });
       }
-      expect(index).toBe(2);
+      expect(index).toBeGreaterThanOrEqual(2);
       return [
         { ...common, type: 'text_delta', delta: '本次尚未生成场次。' },
         { ...complete, finishReason: 'stop' },
@@ -582,7 +1662,14 @@ it.each([
     await runtime.wait(run.prepared.stream.generationId);
     const result = f.generations.get(run.prepared.stream.generationId);
     expect(result.status).toBe('failed');
-    expect(result.error).toContain('AGENT_SCENE_NOT_SAVED');
+    expect(result.error).toContain('AGENT_TASK_CONTINUATION_STALLED');
+    expect(
+      f.project.access(false, (db) =>
+        db
+          .prepare('SELECT COUNT(*) AS value FROM llm_provider_requests WHERE generation_id=?')
+          .get(run.prepared.stream.generationId),
+      ),
+    ).toEqual({ value: 5 });
     const detail = f.workflow.getTask({ taskId: run.agent.taskId });
     expect(detail.task.status).toBe('failed');
     expect(detail.events.some((e) => e.eventType === 'agent.task.completed')).toBe(false);
@@ -593,8 +1680,15 @@ it.each([
 it('does not hide a second unfinished stage behind another saved stage in the same task', async () => {
   const f = await setup();
   const run = f.prepare('创建多个场次');
+  const plan = await run.invoke('conversation.task.checkpoint', {
+    operation: 'plan',
+    deliverables: [{ key: 'scenes', toolName: 'scene.submit_structure', minimumCount: 2 }],
+  });
+  const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
   await run.invoke('scene.structure.stage', {
     resourceId: 'workspace:shots',
+    outputId,
+    outputIndex: 1,
     operation: 'begin',
     executionKey: 'pending-second',
     episodeTitle: '第二场',
@@ -602,6 +1696,8 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
   });
   const saved = await run.invoke('scene.submit_structure', {
     resourceId: 'workspace:shots',
+    outputId,
+    outputIndex: 0,
     resolution: 'resolved',
     episodeTitle: '第一场',
     scenes: [
@@ -618,10 +1714,11 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
   f.loop.startProviderStep(run.prepared.stream);
   expect(() =>
     f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
-  ).toThrow('尚未保存为完整场次');
+  ).toThrow('TASK_DELIVERABLES_PENDING');
+  expect(f.workflow.getTask({ taskId: run.agent.taskId }).task.status).toBe('running');
 });
 
-it('ends an explicit non-empty checkpoint as visibly partial and keeps normal incomplete tasks unresolved', async () => {
+it('keeps an explicit checkpoint resumable until the full request is complete', async () => {
   const f = await setup();
   const run = f.prepare('创作第一场并保留续作进度');
   const base = { resourceId: 'workspace:shots' };
@@ -657,11 +1754,106 @@ it('ends an explicit non-empty checkpoint as visibly partial and keeps normal in
     complete: false,
   });
   f.loop.startProviderStep(run.prepared.stream);
-  f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' });
+  expect(() =>
+    f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
+  ).toThrow('原始请求仍未完成');
   const task = f.workflow.getTask({ taskId: run.agent.taskId }).task;
-  expect(task).toMatchObject({ status: 'completed', completionState: 'partial' });
-  expect(task.outcome).toBeUndefined();
+  expect(task.status).toBe('running');
+  expect(task.completionState).toBeUndefined();
+  expect(
+    f.workflow
+      .getTask({ taskId: run.agent.taskId })
+      .events.some((e) => e.eventType === 'agent.task.completed'),
+  ).toBe(false);
 });
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'repairs saved scene text through the authorized tool under its original creation obligation (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存一个场次，逐字保留结尾对白。');
+    const obligation = {
+      key: 'episode',
+      toolName: 'scene.submit_structure',
+      minimumCount: 1,
+      requiredTexts: ['结尾对白。'],
+    };
+    const plan = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [obligation],
+    });
+    const saved = await run.invoke('scene.submit_structure', {
+      resourceId: 'workspace:shots',
+      outputId: (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId,
+      resolution: 'resolved',
+      episodeTitle: '本集',
+      scenes: [
+        {
+          title: '庭院',
+          sceneDocumentId: f.setting.id,
+          characterDocumentIds: [],
+          authoringIR: authoring(),
+          shots: [{ title: '结尾', authoringIR: authoring(true) }],
+        },
+      ],
+    });
+    expect(saved.status).toBe('scene_structure_saved');
+    const [sceneId] = saved.sceneIds as string[];
+    const [shotId] = saved.shotIds as string[];
+    const state = await run.invoke('conversation.task.checkpoint', { operation: 'state' });
+    const actions = state.pendingActions as Array<Record<string, unknown>>;
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      key: 'episode',
+      missingTexts: ['结尾对白。'],
+      nextAction: {
+        kind: 'repair_outputs',
+        obligationKey: 'episode',
+        planChangeRequired: false,
+        toolName: 'scene.update_shot_prompts',
+        targetIds: [shotId],
+      },
+    });
+    // Repairs must not rely on weakening or replacing the original obligation.
+    const weakened = await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [{ ...obligation, requiredTexts: undefined }],
+    });
+    expect(JSON.stringify(weakened)).toContain('weaken');
+    const read = await run.invoke('production.read', {
+      target: { kind: 'shot', id: shotId },
+      view: 'authoring',
+    });
+    const repair = {
+      shots: [
+        {
+          shotId,
+          expectedRowVersion: read.rowVersion,
+          authoringIR: { ...(read.authoring as ProductionAuthoringIR), prompt: '结尾对白。' },
+        },
+      ],
+    };
+    const repaired = await run.invoke('scene.update_shot_prompts', repair);
+    expect(repaired, JSON.stringify(repaired)).toMatchObject({ status: 'shot_prompts_saved' });
+    expect(await run.invoke('scene.update_shot_prompts', repair)).toMatchObject({
+      status: 'shot_prompts_saved',
+      execution: { replayed: true },
+    });
+    const checked = await run.invoke('conversation.task.checkpoint', { operation: 'state' });
+    expect(checked.pendingActions).toEqual([]);
+    expect(f.content.listScenes().map((s) => s.id)).toEqual([sceneId]);
+    expect(f.content.listShots(sceneId!).map((s) => s.id)).toEqual([shotId]);
+    expect(
+      f.project.access(false, (db) =>
+        db
+          .prepare(
+            "SELECT count(*) n FROM agent_tool_calls WHERE task_id=? AND json_extract(result_summary_json,'$.status')='task_plan_saved'",
+          )
+          .get(run.agent.taskId),
+      ),
+    ).toEqual({ n: 1 });
+  },
+);
 
 async function setup(
   protocol: NativeProviderStreamStartParams['protocol'] = 'openai-chat-completions',
@@ -766,6 +1958,1361 @@ async function setup(
 }
 
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'corrects a rejected new script from its complete pending body after handoff without audit scanning (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 64000);
+    const run = f.prepare('将已保存资料改编为剧本草稿，不发布。');
+    const source = f.workflow.getDocument(f.setting.id).currentVersion!;
+    const draft = {
+      resourceId: 'workspace:documents',
+      title: '潮路剧本',
+      documentKind: 'plan',
+      contentMarkdown: `# 潮路\n来源 ${f.setting.id}@${source.id} (draft)\n完整原创对白：潮退后再进港。\n结构与细节：阿宁在门边停顿，保留手写伏笔。`,
+    };
+    const rejected = {
+      ...draft,
+      baseVersionId: source.id,
+      contentIR: { schemaVersion: 1, kind: 'plan', data: { detail: '保留手写伏笔' } },
+    };
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `pending-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `pending-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      switch (index) {
+        case 0:
+          return tool('tools.load', { names: ['document.submit_draft'] });
+        case 1:
+          return tool('project.structure.get', {});
+        case 2:
+          return tool('conversation.task.checkpoint', {
+            operation: 'plan',
+            deliverables: [
+              {
+                key: 'script',
+                toolName: 'document.submit_draft',
+                documentKind: 'plan',
+                minimumCount: 1,
+              },
+            ],
+          });
+        case 3:
+          return tool('document.submit_draft', rejected);
+        case 4:
+          return tool('conversation.task.checkpoint', {
+            operation: 'save',
+            remainingWork: '修正新建参数并保存原剧本。',
+            workingNotes: '原提交未保存，完整正文应继续保留。',
+          });
+        case 5: {
+          expect(params.continuation).toBeUndefined();
+          expect(params.systemInstruction).not.toContain(JSON.stringify(rejected));
+          const result = f.project.access(false, (db) =>
+            new AgentContextStore(db).resultForCall(
+              run.prepared.stream.projectId,
+              run.agent.taskId,
+              'pending-3',
+            ),
+          )!;
+          return tool('conversation.task.checkpoint', {
+            operation: 'result',
+            resultId: result.id,
+            resultView: 'arguments',
+          });
+        }
+        case 6:
+          expect(JSON.parse(String(lastOutput(params).content))).toEqual(rejected);
+          return tool('document.submit_draft', draft);
+        default:
+          return [
+            { ...common, type: 'text_delta', delta: '剧本草稿已保存，未发布。' },
+            {
+              ...common,
+              type: 'complete',
+              providerResponseId: 'pending-done',
+              finishReason: 'stop',
+            },
+          ];
+      }
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(f.project, identity, taskId, prompt),
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '将已保存资料改编为剧本草稿，不发布。',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const generation = f.generations.get(run.prepared.stream.generationId);
+    expect(generation.status, generation.error).toBe('complete');
+    expect(requests).toHaveLength(8);
+    const task = f.workflow.getTask({ taskId: run.agent.taskId });
+    expect(task.documents).toHaveLength(1);
+    const saved = f.workflow.getDocument(task.documents[0]!.documentId);
+    expect(saved.currentVersion?.contentMarkdown).toBe(draft.contentMarkdown);
+    expect(saved.kind).toBe('plan');
+    expect(saved.currentVersion?.state).toBe('draft');
+    expect(
+      f.project.access(false, (db) =>
+        db.prepare('SELECT COUNT(*) AS n FROM document_versions WHERE document_id=?').get(saved.id),
+      ),
+    ).toEqual({ n: 1 });
+    expect(
+      f.project.access(false, (db) =>
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM agent_tool_calls WHERE generation_id=? AND tool_name='conversation.task.checkpoint' AND json_extract(arguments_summary_json,'$.keys') LIKE '%evidenceOffset%'",
+          )
+          .get(run.prepared.stream.generationId),
+      ),
+    ).toEqual({ n: 0 });
+  },
+);
+
+it.each([
+  ['openai-responses', 'correct'],
+  ['openai-chat-completions', 'correct'],
+  ['openai-responses', 'partial'],
+  ['openai-chat-completions', 'partial'],
+] as const)(
+  'repairs a failed chapter save and rejects unsupported partial completion under context pressure (%s, %s)',
+  async (protocol, exit) => {
+    const f = await setup(protocol, 32000);
+    const chapter = new NovelService(f.project).saveChapter({
+      title: '潮路',
+      displayLabel: '第一章',
+    });
+    const sourceBody = '潮水退去，阿宁走入港口。'.repeat(120);
+    const source = f.workflow.saveDraft({
+      documentId: chapter.documentId,
+      title: chapter.title,
+      contentMarkdown: sourceBody,
+      expectedDocumentRowVersion: chapter.documentRowVersion,
+    });
+    const prompt = productionSkillPrompt('chapters-to-script', [
+      {
+        id: chapter.id,
+        documentId: chapter.documentId,
+        title: chapter.title,
+        kind: 'note',
+        versionId: source.currentVersion!.id,
+        state: 'draft',
+      },
+    ]);
+    const run = f.prepare(prompt);
+    const draft = {
+      resourceId: 'workspace:documents',
+      title: '第一集 潮路',
+      documentKind: 'plan',
+      contentMarkdown: `# 第一集 潮路\n来源：${chapter.documentId}@${source.currentVersion!.id} (draft)\n阿宁：潮退了，进港。`,
+    };
+    let step = 0;
+    let repaired = false;
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `chapter-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `chapter-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      const partial = () =>
+        tool('conversation.task.checkpoint', {
+          operation: 'partial',
+          reason: '保存参数失败；源章节已读，剧本尚未保存。',
+        });
+      if (step === 6 && lastOutput(params).externalized === true) {
+        return tool('conversation.task.checkpoint', {
+          operation: 'result',
+          resultId: lastOutput(params).resultId,
+          resultLimit: 16384,
+        });
+      }
+      switch (step++) {
+        case 0:
+          return tool('tools.load', { names: ['document.submit_draft', 'production.skill.read'] });
+        case 1:
+          return tool('production.skill.read', { skillId: 'chapters-to-script' });
+        case 2:
+          return tool('project.structure.get', {});
+        case 3:
+          return tool('conversation.task.checkpoint', {
+            operation: 'plan',
+            deliverables: [
+              {
+                key: 'script',
+                toolName: 'document.submit_draft',
+                documentKind: 'plan',
+                minimumCount: 1,
+              },
+            ],
+          });
+        case 4:
+          return tool('library.search', {
+            query: '潮路',
+            sourceTypes: ['novel-chapter'],
+            limit: 1,
+          });
+        case 5: {
+          const sources = lastOutput(params).sources as Array<{ sourceHandle: string }>;
+          return tool('library.read', {
+            sourceHandle: sources[0]!.sourceHandle,
+            readMode: 'source',
+          });
+        }
+        case 6: {
+          const value = lastOutput(params);
+          expect(
+            value.status === 'selected_source_included'
+              ? nativeRequestUserText(params)
+              : JSON.stringify(
+                  value.status === 'task_result_read' ? JSON.parse(String(value.content)) : value,
+                ),
+          ).toContain(sourceBody);
+          return tool('conversation.task.checkpoint', {
+            operation: 'save',
+            remainingWork: '仅保存一份剧本。',
+            workingNotes: '使用已读取源正文及 plan 文档类型。',
+          });
+        }
+        case 7:
+          return tool('document.submit_draft', {
+            ...draft,
+            documentKind: 'script',
+            contentMarkdown: 'unsaved-script '.repeat(1200),
+          });
+        case 8:
+          expect(params.systemInstruction).not.toContain('[TASK STAGE HANDOFF REQUIRED]');
+          expect(params.systemInstruction).not.toContain(sourceBody);
+          expect(
+            f.project.access(
+              false,
+              (db) =>
+                new AgentContextStore(db).resultForCall(
+                  run.prepared.stream.projectId,
+                  run.agent.taskId,
+                  'chapter-7',
+                )?.arguments,
+            ),
+          ).toBeDefined();
+          repaired = true;
+          return exit === 'correct' ? tool('document.submit_draft', draft) : partial();
+        case 9:
+          if (exit !== 'correct') {
+            expect(JSON.stringify(lastOutput(params))).toContain('TASK_REPAIR_REQUIRED');
+            expect(
+              f.project.access(false, (db) =>
+                new AgentContextStore(db).loadTask(run.prepared.stream.projectId, run.agent.taskId),
+              )?.executionStatus,
+            ).not.toBe('partial');
+            return tool('document.submit_draft', draft);
+          }
+          // The direct correction already saved its output.
+          break;
+        default:
+          break;
+      }
+      return [
+        {
+          ...common,
+          type: 'text_delta',
+          delta: '剧本草稿已保存，未发布。',
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: 'chapter-done',
+          finishReason: 'stop',
+        },
+      ];
+    }, true);
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(f.project, identity, taskId, prompt),
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const generation = f.generations.get(run.prepared.stream.generationId);
+    expect(
+      generation.status,
+      JSON.stringify({
+        error: generation.error,
+        step,
+        repaired,
+        tools: requests.map((request) => request.tools?.length),
+      }),
+    ).toBe('complete');
+    expect(repaired).toBe(true);
+    expect(
+      generation.assistantMessage.attempt!.accounting!.requests.every(
+        ({ context }) =>
+          !context || context.estimatedInputTokens <= context.maximumInputBudgetTokens!,
+      ),
+    ).toBe(true);
+    expect(requests.length).toBeLessThan(13);
+    const durableState = f.project.access(false, (db) =>
+      new AgentContextStore(db).loadTask(run.prepared.stream.projectId, run.agent.taskId),
+    )!;
+    expect(durableState.executionStatus).toBe('completed');
+    expect(durableState.pendingSteps).toEqual([]);
+    const task = f.workflow.getTask({ taskId: run.agent.taskId });
+    expect(task.documents).toHaveLength(1);
+    const doc = f.workflow.getDocument(task.documents[0]!.documentId);
+    expect(doc.kind).toBe('plan');
+    expect(doc.currentVersion?.contentMarkdown).toBe(draft.contentMarkdown);
+    expect(doc.currentVersion?.state).toBe('draft');
+    expect(task.task.completionState).not.toBe('partial');
+    expect(f.workflow.getDocument(chapter.documentId).currentVersion?.contentMarkdown).toBe(
+      sourceBody,
+    );
+    const reads = f.project.access(false, (db) =>
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_tool_calls WHERE generation_id=? AND tool_name='library.read'",
+        )
+        .get(run.prepared.stream.generationId),
+    );
+    expect(reads).toEqual({ n: 1 });
+  },
+);
+
+it.each([
+  ['openai-responses', 'schema'],
+  ['openai-chat-completions', 'schema'],
+  ['openai-responses', 'business'],
+  ['openai-chat-completions', 'business'],
+] as const)(
+  'stops repeated checkpoint error states despite rewritten prose before a fifth Native retry and retains saved drafts (%s, %s)',
+  async (protocol, failure) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存剧本，核对剩余任务。');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const item = {
+        key: 'duplicate',
+        toolName: 'document.submit_draft',
+        documentKind: 'plan',
+        minimumCount: 1,
+      };
+      const call =
+        index === 0
+          ? { name: 'tools.load', args: { names: ['document.submit_draft'] } }
+          : index === 1
+            ? { name: 'project.structure.get', args: {} }
+            : index === 2
+              ? {
+                  name: 'document.submit_draft',
+                  args: {
+                    resourceId: 'workspace:documents',
+                    title: '已完成剧本',
+                    documentKind: 'plan',
+                    contentMarkdown: '已保存的对白必须保留。',
+                  },
+                }
+              : {
+                  name: 'conversation.task.checkpoint',
+                  args:
+                    failure === 'schema'
+                      ? { operation: 'save', remainingWork: `第${index}次重述剩余工作` }
+                      : {
+                          operation: 'plan',
+                          deliverables: [item, { ...item, description: `第${index}次重述计划` }],
+                        },
+                };
+      return [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: {
+            id: `failure-${index}`,
+            name: call.name,
+            argumentsJson: JSON.stringify(call.args),
+          },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `failure-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '保存剧本，核对剩余任务。',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('AGENT_TOOL_FAILURE_STALLED');
+    expect(requests).toHaveLength(7);
+    const task = f.workflow.getTask({ taskId: run.agent.taskId });
+    expect(task.task.status).toBe('failed');
+    expect(task.documents).toHaveLength(1);
+    expect(
+      f.workflow.getDocument(task.documents[0]!.documentId).currentVersion?.contentMarkdown,
+    ).toBe('已保存的对白必须保留。');
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'finishes a long task across durable context stages without repeating saves (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 64000);
+    const scene = f.content.saveScene({ title: '长任务', sceneDocumentId: f.setting.id });
+    const shots = Array.from({ length: 30 }, (_, i) =>
+      f.content.saveShot({
+        sceneId: scene.id,
+        title: `第${i + 1}镜`,
+        authoringIR: {
+          schemaVersion: 1,
+          kind: 'shot',
+          prompt: `第${i + 1}镜独有的原始正文。${'转身后按原位停顿。'.repeat(240)}`,
+          timing: { estimatedDurationSeconds: 8, rationale: '保留完整动作' },
+          references: { sceneDocumentIds: [f.setting.id] },
+          data: { manual: { locked: `手动字段${i}` } },
+        },
+      }),
+    );
+    const originalRequest = '完成全部三十镜。保留时长、手动内容和全部原文，再增加衔接。';
+    const run = f.prepare(originalRequest);
+    let cursor = 0;
+    let read = 0;
+    let checkpoints = 0;
+    let repaired = false;
+    let expectFresh = false;
+    const checkpointCursors: number[] = [];
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `stage-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `stage-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      expect(params.prompt).toContain(originalRequest);
+      if (checkpoints > 0) {
+        const requirements = stageEnvelope(params).userRequirements;
+        expect(requirements.some((r) => r.text === '交接时补充：保持左手持杯')).toBe(true);
+        expect(requirements.filter((r) => r.text === '重复补充：不改对白')).toHaveLength(2);
+      }
+      if (expectFresh) {
+        expect(params.continuation).toBeUndefined();
+        expect(stageEnvelope(params).checkpoint.remainingWorkAtCheckpoint).toContain(
+          `从第${cursor + 1}镜继续`,
+        );
+        expect(nativeRequestUserText(params)).toContain('checkpointId');
+        expect(stageEnvelope(params).savedArtifacts.length).toBeGreaterThan(0);
+        // Bodies of completed shots leave the working stage; source audit stays intact.
+        if (cursor > 10)
+          expect(JSON.stringify(params)).not.toContain(shots[0]!.authoringIR!.prompt);
+        if (read) {
+          expect(params.systemInstruction).not.toContain(shots[cursor]!.authoringIR!.prompt);
+          expect(stageEnvelope(params).evidence.length).toBeGreaterThan(0);
+        }
+        expectFresh = false;
+      }
+      if (
+        cursor > 0 &&
+        cursor < shots.length &&
+        cursor % 6 === 0 &&
+        read === 0 &&
+        checkpointCursors.at(-1) !== cursor
+      ) {
+        checkpoints++;
+        checkpointCursors.push(cursor);
+        expectFresh = true;
+        return tool('conversation.task.checkpoint', {
+          operation: 'save',
+          remainingWork: `从第${cursor + 1}镜继续直到30镜，nextShotId=${shots[cursor]?.id ?? 'done'}`,
+          workingNotes:
+            '前面镜头已保存，以回执为准。逐镜重新读取当前版本，保留完整原文、时长、手动内容后补衔接；不要重复已保存镜头。',
+        });
+      }
+      if (index === 0)
+        return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      if (cursor < shots.length) {
+        const shot = shots[cursor]!;
+        if (read < 2) {
+          const view = read++ === 0 ? 'authoring' : 'media';
+          return tool('production.read', {
+            target: { kind: 'shot', id: shot.id },
+            view,
+          });
+        }
+        if (cursor === 4 && !repaired) {
+          repaired = true;
+          return [
+            {
+              ...common,
+              type: 'failed',
+              error: {
+                code: 'PROVIDER_FAILED',
+                retryable: false,
+                message:
+                  'INVALID_TOOL_ARGUMENTS: scene.update_shot_prompts returned invalid object JSON (100 bytes); finishReason=tool_calls. No tool was executed.',
+              },
+            },
+          ];
+        }
+        read = 0;
+        cursor++;
+        return tool('scene.update_shot_prompts', {
+          shots: [
+            {
+              shotId: shot.id,
+              expectedRowVersion: shot.rowVersion,
+              authoringIR: { ...shot.authoringIR, prompt: shot.authoringIR!.prompt + '补充衔接。' },
+            },
+          ],
+        });
+      }
+      return [
+        { ...common, type: 'text_delta', delta: '三十镜已全部保存。' },
+        { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(f.project, identity, taskId, prompt),
+      bridge,
+      plans: {} as never,
+      onEvent: (event) => {
+        if (
+          event.type === 'tool_succeeded' &&
+          event.toolName === 'conversation.task.checkpoint' &&
+          checkpoints === 1
+        ) {
+          for (const [index, text] of [
+            '交接时补充：保持左手持杯',
+            '重复补充：不改对白',
+            '重复补充：不改对白',
+          ].entries())
+            f.generations.supplement(
+              run.prepared.stream.generationId,
+              text,
+              `handoff-supplement-${index}`,
+            );
+        }
+      },
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: originalRequest,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe('complete');
+    expect(checkpoints).toBeGreaterThanOrEqual(3);
+    expect(repaired).toBe(true);
+    expect(
+      checkpointCursors.every((value, i) => i === 0 || value > checkpointCursors[i - 1]!),
+    ).toBe(true);
+    expect(
+      result.assistantMessage.attempt!.accounting!.requests.every(
+        (request) => (request.context?.reservedOutputTokens ?? 16000) >= 8192,
+      ),
+    ).toBe(true);
+    const audit = f.project.access(false, (db) =>
+      db
+        .prepare(
+          'SELECT tool_name,status,result_summary_json FROM agent_tool_calls WHERE generation_id=? ORDER BY rowid',
+        )
+        .all(run.prepared.stream.generationId),
+    ) as Array<{ tool_name: string; status: string; result_summary_json: string }>;
+    expect(audit.filter((row) => row.status === 'failed')).toEqual([]);
+    expect(audit.filter((row) => row.tool_name === 'scene.update_shot_prompts')).toHaveLength(30);
+    expect(audit.filter((row) => row.tool_name === 'production.read')).toHaveLength(60);
+    expect(audit.filter((row) => row.tool_name === 'conversation.task.checkpoint')).toHaveLength(
+      checkpoints,
+    );
+    expect(
+      audit.some((row) => row.result_summary_json.includes(shots[0]!.authoringIR!.prompt)),
+    ).toBe(true);
+    const current = new ProductionService(f.project);
+    for (const shot of shots) {
+      const saved = current.read({ kind: 'shot', id: shot.id });
+      expect(saved.rowVersion).toBe(shot.rowVersion + 1);
+      expect(saved.authoringIR).toEqual({
+        ...shot.authoringIR,
+        prompt: shot.authoringIR!.prompt + '补充衔接。',
+      });
+    }
+    const recovery = f.prepare('只核对上次交接，不改写');
+    const restored = await recovery.invoke('conversation.task.checkpoint', {
+      operation: 'read',
+      targetGenerationId: run.prepared.stream.generationId,
+    });
+    expect(restored.status).toBe('task_checkpoint_read');
+    expect(restored.checkpoint).toMatchObject({
+      generationId: run.prepared.stream.generationId,
+      notesAreAssistantClaims: true,
+    });
+    const receipts = await recovery.invoke('conversation.task.checkpoint', {
+      operation: 'read',
+      targetGenerationId: run.prepared.stream.generationId,
+      receiptOffset: 20,
+    });
+    expect((receipts.savedProductionReceipts as { receipts: unknown[] }).receipts).toHaveLength(10);
+    expect(receipts.checkpoint).toBeUndefined();
+    let evidenceContentOffset = 0;
+    let evidenceJson = '';
+    do {
+      const page = await recovery.invoke('conversation.task.checkpoint', {
+        operation: 'read',
+        targetGenerationId: run.prepared.stream.generationId,
+        evidenceOffset: 0,
+        evidenceContentOffset,
+      });
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(65536);
+      const evidence = page.evidence as { resultJson: string; nextContentOffset?: number };
+      evidenceJson += evidence.resultJson;
+      evidenceContentOffset = evidence.nextContentOffset ?? 0;
+    } while (evidenceContentOffset);
+    expect(evidenceJson).toBe(
+      audit.find((row) => row.tool_name !== 'conversation.task.checkpoint')!.result_summary_json,
+    );
+    expect(requests.length).toBeGreaterThan(62);
+  },
+  30000,
+);
+
+it.each([
+  ['openai-responses', false],
+  ['openai-chat-completions', false],
+  ['openai-responses', true],
+  ['openai-chat-completions', true],
+] as const)(
+  'uses unfinished stage evidence to save, honors CAS conflicts and replays the same receipt (%s, conflict=%s)',
+  async (protocol, conflict) => {
+    const f = await setup(protocol, 64000);
+    const scene = f.content.saveScene({ title: '交接中镜头', sceneDocumentId: f.setting.id });
+    const shot = f.content.saveShot({
+      sceneId: scene.id,
+      title: '第11镜',
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: '完整镜头正文'.repeat(100),
+        references: { sceneDocumentIds: [f.setting.id] },
+        timing: { estimatedDurationSeconds: 8, rationale: '保留动作' },
+        data: { manual: { locked: '保留左手' } },
+      },
+    });
+    const run = f.prepare('继续修第11镜，保留原文和手动设置。');
+    let step = 0;
+    let saveArgs: Record<string, unknown>;
+    let current = shot;
+    const { bridge } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `working-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `working-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      const read = (view: string) =>
+        tool('production.read', { target: { kind: 'shot', id: shot.id }, view });
+      const checkpoint = () =>
+        tool('conversation.task.checkpoint', {
+          operation: 'save',
+          remainingWork: '保存未完成的第11镜，正文与媒体已读，不重启路由。',
+          workingNotes: '基于Worker证据完成保存。',
+        });
+      const next = step++;
+      if (next === 0)
+        return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      if (next === 1) return read('authoring');
+      if (next === 2) return read('media');
+      if (next === 3) return checkpoint();
+      if (next === 4) {
+        expect(params.continuation).toBeUndefined();
+        const envelope = stageEnvelope(params);
+        expect(envelope.evidence).toHaveLength(2);
+        const stored = f.project.access(false, (db) =>
+          new AgentContextStore(db).result(
+            run.prepared.stream.projectId,
+            run.agent.taskId,
+            envelope.evidence[0]!.resultId,
+          ),
+        );
+        expect((JSON.parse(stored!.content) as { authoring: unknown }).authoring).toEqual(
+          shot.authoringIR,
+        );
+        expect(params.systemInstruction).not.toContain(shot.authoringIR!.prompt);
+        expect(envelope.availableTools).toContain('scene.update_shot_prompts');
+        saveArgs = {
+          shots: [
+            {
+              shotId: shot.id,
+              expectedRowVersion: shot.rowVersion,
+              authoringIR: { ...shot.authoringIR, prompt: shot.authoringIR!.prompt + '剪辑接点。' },
+            },
+          ],
+        };
+        if (conflict)
+          current = f.content.saveShot({
+            shotId: shot.id,
+            sceneId: scene.id,
+            title: shot.title,
+            expectedRowVersion: shot.rowVersion,
+            authoringIR: {
+              ...shot.authoringIR!,
+              prompt: shot.authoringIR!.prompt + '用户并发补充。',
+            },
+          });
+        return tool('scene.update_shot_prompts', saveArgs);
+      }
+      if (conflict && next === 5) {
+        expect(JSON.stringify(lastOutput(params))).toContain('SHOT_ROW_VERSION_CONFLICT');
+        return read('authoring');
+      }
+      if (conflict && next === 6) return read('media');
+      if (conflict && next === 7) {
+        saveArgs = {
+          shots: [
+            {
+              shotId: shot.id,
+              expectedRowVersion: current.rowVersion,
+              authoringIR: {
+                ...current.authoringIR,
+                prompt: current.authoringIR!.prompt + '剪辑接点。',
+              },
+            },
+          ],
+        };
+        return tool('scene.update_shot_prompts', saveArgs);
+      }
+      const afterSave = conflict ? 8 : 5;
+      if (next === afterSave) return checkpoint();
+      if (next === afterSave + 1) {
+        expect(params.continuation).toBeUndefined();
+        const envelope = stageEnvelope(params);
+        expect(envelope.savedArtifacts).toHaveLength(1);
+        expect(params.systemInstruction).not.toContain(shot.authoringIR!.prompt);
+        return tool('scene.update_shot_prompts', saveArgs);
+      }
+      return [
+        { ...common, type: 'text_delta', delta: '第11镜已保存。' },
+        { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(f.project, identity, taskId, prompt),
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '继续修第11镜，保留原文和手动设置。',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const generation = f.generations.get(run.prepared.stream.generationId);
+    expect(generation.status, generation.error).toBe('complete');
+    const saved = new ProductionService(f.project).read({ kind: 'shot', id: shot.id });
+    expect(saved.rowVersion).toBe(current.rowVersion + 1);
+    expect(saved.authoringIR).toEqual({
+      ...current.authoringIR,
+      prompt: current.authoringIR!.prompt + '剪辑接点。',
+    });
+    const counts = f.project.access(false, (db) => ({
+      receipts: db.prepare('SELECT COUNT(*) AS n FROM agent_write_receipts').get(),
+      reads: db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM agent_tool_calls WHERE generation_id=? AND tool_name='production.read'",
+        )
+        .get(run.prepared.stream.generationId),
+    }));
+    expect(counts.receipts).toEqual({ n: 1 });
+    expect(counts.reads).toEqual({ n: conflict ? 4 : 2 });
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'keeps a committed checkpoint when cancelled before the next stage (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 64000);
+    const run = f.prepare('核对目录后继续未完成工作');
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const name = ['tools.load', 'project.get_context', 'conversation.task.checkpoint'][index];
+      if (!name) throw new Error('Cancelled task sent another model request.');
+      const args =
+        index === 0
+          ? { names: ['project.get_context'] }
+          : index === 1
+            ? {}
+            : {
+                operation: 'save',
+                remainingWork: '继续核对未完成部分',
+                workingNotes: '目录已读取，正文仍按需获取',
+              };
+      return [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `cancel-stage-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `cancel-stage-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+      onEvent: (event) => {
+        if (event.type === 'tool_succeeded' && event.toolName === 'conversation.task.checkpoint')
+          runtime.cancel(run.prepared.stream.generationId);
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '核对目录后继续未完成工作',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    expect(requests).toHaveLength(3);
+    expect(f.generations.get(run.prepared.stream.generationId).status).toBe('cancelled');
+    const recovery = f.prepare('核对已取消任务的交接');
+    expect(
+      await recovery.invoke('conversation.task.checkpoint', {
+        operation: 'read',
+        targetGenerationId: run.prepared.stream.generationId,
+      }),
+    ).toMatchObject({
+      status: 'task_checkpoint_read',
+      checkpoint: { remainingWork: '继续核对未完成部分' },
+    });
+  },
+);
+
+it('rejects checkpoint-only loops, cross-conversation recovery and saves into another generation', async () => {
+  const f = await setup();
+  const run = f.prepare('核对当前目录');
+  expect(
+    await run.invoke('conversation.task.checkpoint', {
+      operation: 'save',
+      remainingWork: '继续',
+      workingNotes: '没有证据',
+    }),
+  ).toMatchObject({ status: 'rejected' });
+  await run.invoke('project.get_context', {});
+  expect(
+    await run.invoke('conversation.task.checkpoint', {
+      operation: 'save',
+      remainingWork: '继续核对',
+      workingNotes: '已经获取目录，正文仍按需读',
+    }),
+  ).toMatchObject({ status: 'task_checkpoint_saved' });
+  expect(
+    await run.invoke('conversation.task.checkpoint', {
+      operation: 'save',
+      remainingWork: '继续',
+      workingNotes: '重复交接',
+    }),
+  ).toMatchObject({ status: 'rejected' });
+  const other = f.prepare('独立任务');
+  expect(
+    await other.invoke('conversation.task.checkpoint', {
+      operation: 'save',
+      targetGenerationId: run.prepared.stream.generationId,
+      remainingWork: '继续',
+      workingNotes: '越界',
+    }),
+  ).toMatchObject({ status: 'rejected' });
+  const conversation = f.content.createConversation({ scopeType: 'project' });
+  f.project.access(true, (db) =>
+    db
+      .prepare('UPDATE llm_generations SET conversation_id=? WHERE id=?')
+      .run(conversation.id, run.prepared.stream.generationId),
+  );
+  expect(
+    await other.invoke('conversation.task.checkpoint', {
+      operation: 'read',
+      targetGenerationId: run.prepared.stream.generationId,
+    }),
+  ).toMatchObject({ status: 'rejected' });
+});
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'saves every target once after many production reads without losing shared media evidence (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 64000);
+    const documents = [
+      f.content.saveDocument({
+        kind: 'character',
+        title: '角色甲完整设定板（草稿）',
+        contentMarkdown: '按需资料甲',
+      }),
+      f.content.saveDocument({
+        kind: 'character',
+        title: '角色乙完整设定板（草稿）',
+        contentMarkdown: '按需资料乙',
+      }),
+      f.setting,
+      f.content.saveDocument({
+        kind: 'prop',
+        title: '道具完整设定板（草稿）',
+        contentMarkdown: '按需道具资料',
+      }),
+    ];
+    const root = f.project.access(false, (_db, project) => project.rootPath);
+    await mkdir(join(root, 'assets', 'images'), { recursive: true });
+    for (const document of documents) {
+      const assetId = `image-${document.id}`;
+      f.project.access(true, (db, project) => {
+        db.prepare(
+          'INSERT INTO assets(id,project_id,kind,relative_path,content_hash,size_bytes,created_at) VALUES(?,?,?,?,?,?,?)',
+        ).run(
+          assetId,
+          project.id,
+          document.kind,
+          `assets/images/${assetId}.png`,
+          'a'.repeat(64),
+          1,
+          '2026-11-02T00:00:00.000Z',
+        );
+        db.prepare(
+          "INSERT INTO generation_jobs(id,project_id,adapter_key,status,request_json,task_snapshot_json,created_at,updated_at) VALUES(?,?,'fixture','succeeded','{}',?,'now','now')",
+        ).run(`job-${assetId}`, project.id, JSON.stringify({ sourceDocumentId: document.id }));
+        db.prepare(
+          "INSERT INTO generation_results(id,job_id,asset_id,created_at) VALUES(?,?,?,'now')",
+        ).run(`result-${assetId}`, `job-${assetId}`, assetId);
+      });
+      await writeFile(
+        join(root, 'assets', 'images', `${assetId}.png`),
+        Buffer.from('fixture-image'),
+      );
+    }
+    const scene = f.content.saveScene({ title: '连续七镜', sceneDocumentId: f.setting.id });
+    const shots = Array.from({ length: 7 }, (_, i) =>
+      f.content.saveShot({
+        sceneId: scene.id,
+        title: `第${i + 11}镜`,
+        authoringIR: {
+          schemaVersion: 1,
+          kind: 'shot',
+          prompt: `镜头${i}原始完整要求。`.repeat(120),
+          references: {
+            characterDocumentIds: documents.slice(0, 2).map((d) => d.id),
+            sceneDocumentIds: [f.setting.id],
+            propDocumentIds: [documents[3]!.id],
+          },
+          timing: { estimatedDurationSeconds: 8, rationale: '保留时长' },
+          data: { manual: { instruction: `保留手动事实${i}` } },
+        },
+      }),
+    );
+    const revised = shots.map(
+      (shot, i) => `${shot.authoringIR!.prompt}第${i + 11}镜完成衔接修订。`,
+    );
+    const run = f.prepare(
+      `继续修订第11至17镜，完整保留引用、时长与手动内容。${'user requirement '.repeat(4900)}`,
+    );
+    // Exercise the lossless fallback independently of the new stage coordinator.
+    f.generations.configureAgentTools(
+      run.prepared.stream,
+      run.agent.tools.filter((tool) => tool.name !== 'conversation.task.checkpoint'),
+    );
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `many-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `many-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index === 0)
+        return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      if (index <= 14)
+        return tool('production.read', {
+          target: { kind: 'shot', id: shots[(index - 1) % 7]!.id },
+          view: index <= 7 ? 'authoring' : 'media',
+        });
+      if (index <= 21) {
+        const shot = shots[index - 15]!;
+        return tool('scene.update_shot_prompts', {
+          shots: [
+            {
+              shotId: shot.id,
+              expectedRowVersion: shot.rowVersion,
+              authoringIR: { ...shot.authoringIR, prompt: revised[index - 15] },
+            },
+          ],
+        });
+      }
+      expect(lastOutput(params)).toMatchObject({ status: 'shot_prompts_saved', changedCount: 1 });
+      return [
+        { ...common, type: 'text_delta', delta: '七个镜头的修改均已保存。' },
+        { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '继续修订七个镜头',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe('complete');
+    expect(requests).toHaveLength(23);
+    expect(
+      result.assistantMessage
+        .attempt!.accounting!.requests.slice(15)
+        .every((request) => request.context!.reservedOutputTokens > 4096),
+    ).toBe(true);
+    expect(
+      requests.some((request) => JSON.stringify(request).includes('lossless_references')),
+    ).toBe(true);
+    const firstWrite = requests[15]!;
+    const wireOutputs =
+      firstWrite.continuation?.protocol === 'openai-chat-completions'
+        ? [...(firstWrite.continuation.history ?? []), firstWrite.continuation].flatMap(
+            (turn) => turn.outputs,
+          )
+        : (
+            JSON.parse(
+              firstWrite.prompt
+                .split('[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]\n')[1]!
+                .split('\n[END TASK HISTORY]')[0]!,
+            ) as Array<{ role: string; callId: string; content: string }>
+          )
+            .filter((entry) => entry.role === 'toolResult')
+            .map((entry) => ({ callId: entry.callId, output: entry.content }));
+    const decoded = decodeProductionHistory(wireOutputs);
+    const audit = f.project.access(false, (db) =>
+      db
+        .prepare(
+          'SELECT provider_call_id,result_summary_json,tool_name FROM agent_tool_calls WHERE generation_id=? ORDER BY created_at,tool_ordinal',
+        )
+        .all(run.prepared.stream.generationId),
+    ) as Array<{ provider_call_id: string; result_summary_json: string; tool_name: string }>;
+    for (const entry of audit.filter((entry) => entry.tool_name === 'production.read'))
+      expect(decoded.get(entry.provider_call_id)).toEqual(JSON.parse(entry.result_summary_json));
+    const receipts = f.workflow.getTask({ taskId: run.agent.taskId }).savedProductionReceipts!
+      .receipts;
+    expect(receipts).toHaveLength(7);
+    expect(audit.filter((entry) => entry.tool_name === 'production.read')).toHaveLength(14);
+    expect(audit.filter((entry) => entry.tool_name === 'scene.update_shot_prompts')).toHaveLength(
+      7,
+    );
+    const persisted = f.content.listShots(scene.id);
+    shots.forEach((shot, i) =>
+      expect(persisted.find((saved) => saved.id === shot.id)).toMatchObject({
+        rowVersion: shot.rowVersion + 1,
+        authoringIR: { ...shot.authoringIR, prompt: revised[i] },
+      }),
+    );
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'reads and saves one shot once, then inspects exact durable receipts after a final provider failure (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 28000);
+    const scene = f.content.saveScene({ title: '场次', sceneDocumentId: f.setting.id });
+    const shot = f.content.saveShot({
+      sceneId: scene.id,
+      title: '镜头七',
+      authoringIR: { ...authoring(true), kind: 'shot' },
+    });
+    const savedPrompt = `另两影作背景剪影。${'composition '.repeat(1200)}`;
+    const run = f.prepare(`只修改镜头七，保留所有要求。${'user requirement '.repeat(1600)}`);
+    // Keep the compaction/receipt regression independent of stage rollover.
+    f.generations.configureAgentTools(
+      run.prepared.stream,
+      run.agent.tools.filter((tool) => tool.name !== 'conversation.task.checkpoint'),
+    );
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `single-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `single-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index === 0)
+        return tool('tools.load', { names: ['production.read', 'scene.update_shot_prompts'] });
+      if (index === 1) return tool('production.read', { target: { kind: 'shot', id: shot.id } });
+      if (index === 2) {
+        expect(lastOutput(params)).toMatchObject({
+          shotId: shot.id,
+          sceneId: scene.id,
+          rowVersion: shot.rowVersion,
+          authoring: authoring(true),
+        });
+        return tool('scene.update_shot_prompts', {
+          shots: [
+            {
+              shotId: shot.id,
+              expectedRowVersion: shot.rowVersion,
+              authoringIR: { schemaVersion: 1, kind: 'shot', prompt: savedPrompt },
+            },
+          ],
+        });
+      }
+      expect(lastOutput(params)).toMatchObject({
+        status: 'shot_prompts_saved',
+        changedCount: 1,
+        executionId: expect.any(String) as unknown,
+        shots: [
+          { shotId: shot.id, sceneId: scene.id, rowVersion: shot.rowVersion + 1, changed: true },
+        ],
+      });
+      return [
+        {
+          ...common,
+          type: 'failed',
+          error: {
+            code: 'PROVIDER_FAILED',
+            message: 'Provider HTTP 400: final response unavailable',
+            retryable: false,
+            providerStatus: 400,
+          },
+        },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt: '只修改镜头七',
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    expect(requests, f.generations.get(run.prepared.stream.generationId).error).toHaveLength(4);
+    expect(
+      requests.every(
+        (request) => !request.tools?.some((tool) => tool.name === 'conversation.task.checkpoint'),
+      ),
+    ).toBe(true);
+    expect(requests.every((request) => !request.systemInstruction.includes('operation=plan'))).toBe(
+      true,
+    );
+    expect(f.generations.get(run.prepared.stream.generationId).status).toBe('failed');
+    const task = f.workflow.getTask({ taskId: run.agent.taskId });
+    expect(
+      f.generations
+        .get(run.prepared.stream.generationId)
+        .assistantMessage.attempt?.accounting?.requests.some(
+          (request) => (request.context?.compactionCount ?? 0) > 0,
+        ),
+    ).toBe(true);
+    expect(task.task.completionState).toBe('partial');
+    expect(task.savedProductionReceipts?.receipts).toEqual([
+      expect.objectContaining({
+        generationId: run.prepared.stream.generationId,
+        result: expect.objectContaining({
+          changedCount: 1,
+          executionId: expect.any(String) as unknown,
+          shots: [
+            { shotId: shot.id, sceneId: scene.id, rowVersion: shot.rowVersion + 1, changed: true },
+          ],
+        }) as unknown,
+      }),
+    ]);
+    const continuation = f.prepare('继续：先核对已保存结果');
+    const inspected = await continuation.invoke('conversation.task.route', {
+      decision: 'inspect',
+      targetGenerationId: run.prepared.stream.generationId,
+      rationale: '先核对已保存修改',
+    });
+    expect(inspected).toMatchObject({
+      targetStatus: 'failed',
+      savedProductionReceipts: task.savedProductionReceipts,
+    });
+    expect(f.content.listShots(scene.id)).toHaveLength(1);
+    expect(f.content.listShots(scene.id)[0]).toMatchObject({
+      rowVersion: shot.rowVersion + 1,
+      authoringIR: { prompt: savedPrompt },
+    });
+    expect(task.providerSteps.at(-1)?.status).toBe('failed');
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'persists local budget diagnostics without counting or sending a provider request (%s)',
+  async (protocol) => {
+    const f = await setup(protocol, 20000);
+    const prompt = '完整用户要求。'.repeat(5000);
+    const run = f.prepare(prompt);
+    const { bridge, requests } = scriptedBridge(() => {
+      throw new Error('Must not dispatch');
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(requests).toEqual([]);
+    expect(result.status).toBe('failed');
+    expect(result.userMessage.content).toBe(prompt);
+    expect(result.assistantMessage.attempt?.accounting).toMatchObject({
+      requestCount: 0,
+      requests: [
+        {
+          errorCode: 'CONTEXT_BUDGET_EXCEEDED',
+          failureOrigin: 'local_context',
+          dispatched: false,
+          sent: false,
+          context: {
+            contextWindowTokens: 20000,
+            safetyTokens: 1000,
+            minimumOutputTokens: 2048,
+            maximumInputBudgetTokens: 16952,
+          },
+        },
+      ],
+    });
+    expect(f.workflow.getTask({ taskId: run.agent.taskId }).task.usage?.state).toBe(
+      'context_exhausted',
+    );
+  },
+);
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'recovers Native and bridge JSON failures into one saved scene without repeating reads or saved parts (%s)',
   async (protocol) => {
     const f = await setup(protocol);
@@ -808,20 +3355,20 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
             },
           },
         ];
-      if (index === 4 || index === 8) {
+      if (index === 4 || index === 9) {
         expect(params.systemInstruction).toContain('[TOOL OUTPUT RECOVERY]');
         expect(params.prompt).toContain('固定清晨水墨风格');
         expect(params.tools!.some((item) => item.name === 'scene.structure.stage')).toBe(true);
         expect(params.tools!.some((item) => item.name === 'scene.submit_structure')).toBe(false);
         expect(params.continuation!.outputs[0]!.callId).toBe(index === 4 ? 'call-2' : 'call-6');
-        if (index === 8) {
+        if (index === 9) {
           expect(lastOutput(params).stageId).toBe(stageId);
           expect(lastOutput(params).rowVersion).toBe(savedVersion);
         }
         return tool('scene.structure.stage', {
           ...base,
           operation: 'get',
-          ...(index === 8 ? { stageId } : {}),
+          ...(index === 9 ? { stageId } : {}),
         });
       }
       if (index === 5)
@@ -864,7 +3411,20 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           complete,
         ];
       }
-      if (index === 9)
+      if (index === 8)
+        return [
+          {
+            ...common,
+            type: 'tool_call_end',
+            call: {
+              id: 'malformed-second',
+              name: 'scene.structure.stage',
+              argumentsJson: '{"invalid":',
+            },
+          },
+          complete,
+        ];
+      if (index === 10)
         return tool('scene.structure.stage', {
           ...base,
           operation: 'put_shots',
@@ -874,14 +3434,14 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           shotOffset: 0,
           shots: [{ title: '转身', authoringIR: authoring(true) }],
         });
-      if (index === 10)
+      if (index === 11)
         return tool('scene.structure.stage', {
           ...base,
           operation: 'finalize',
           stageId,
           expectedRowVersion: lastOutput(params).rowVersion,
         });
-      expect(index).toBe(11);
+      expect(index).toBe(12);
       expect(lastOutput(params)).toMatchObject({ status: 'scene_structure_saved', applied: true });
       return [
         { ...common, type: 'text_delta', delta: '场次和镜头已保存。' },
@@ -908,13 +3468,13 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const result = f.generations.get(run.prepared.stream.generationId);
     expect(result.error).toBeUndefined();
     expect(result.status).toBe('complete');
-    expect(requests).toHaveLength(12);
+    expect(requests).toHaveLength(13);
     expect(f.content.listScenes()).toHaveLength(1);
     expect(f.content.listShots(f.content.listScenes()[0]!.id)).toHaveLength(1);
     expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(1);
     const detail = f.workflow.getTask({ taskId: run.agent.taskId });
     const failures = detail.events.filter((item) => item.eventType === 'tool_validation_failed');
-    expect(failures).toHaveLength(2);
+    expect(failures).toHaveLength(3);
     expect(detail.events.filter((item) => item.eventType === 'scene.structure.saved')).toHaveLength(
       1,
     );
@@ -932,12 +3492,12 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         .prepare("SELECT id FROM llm_provider_requests WHERE generation_id=? AND stage='failed'")
         .all(run.prepared.stream.generationId),
     );
-    expect(failedRequests).toHaveLength(2);
+    expect(failedRequests).toHaveLength(3);
   },
 );
 
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
-  'recovers mixed IR schema/JSON failures with smaller batches, preserving saved scenes and prompt text (%s)',
+  'recovers IR schema/JSON syntax failures without shrinking batches, preserving saved scenes and prompt text (%s)',
   async (protocol) => {
     const f = await setup(protocol);
     const run = f.prepare('生成原创短剧场次，保留提示词全文');
@@ -1035,7 +3595,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         expect(feedback).toContain('shots[0].camera');
         expect(feedback).toContain('authoringIR.data');
         expect(feedback).not.toContain('PRIVATE_BODY');
-        expect(maxItems).toBe(2);
+        expect(maxItems).toBe(4);
         return [
           {
             ...common,
@@ -1049,9 +3609,9 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           },
         ];
       }
-      expect(maxItems).toBe(1);
+      expect(maxItems).toBe(4);
       if (index === 7) {
-        expect(params.systemInstruction).toContain('at most 1 ordered shots');
+        expect(params.systemInstruction).toContain('at most 4 ordered shots');
         return tool('scene.structure.stage', {
           resourceId: 'workspace:shots',
           operation: 'get',
@@ -1217,15 +3777,15 @@ it('preserves existing scene identity and prompt when a binding update needs out
 it.each([
   [
     'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (18610 bytes); finishReason=tool_calls. No tool was executed.',
-    3,
+    2,
   ],
   [
     'INCOMPLETE_PROVIDER_OUTPUT: finishReason=length; 1 tool calls, 18000 argument bytes. No tool was executed.',
-    3,
+    2,
   ],
   [
     'INCOMPLETE_TOOL_OUTPUT: finishReason=max_tokens. No tool was executed; use smaller staged submissions.',
-    3,
+    2,
   ],
   [
     'INCOMPLETE_PROVIDER_OUTPUT: finishReason=content_filter; 1 tool calls, 100 argument bytes. No tool was executed.',
@@ -1235,7 +3795,7 @@ it.each([
   ['Provider rejected the configured credential.', 1],
   ['STALE_SESSION: project switched.', 1],
 ] as const)(
-  'bounds safe output repair and never retries other failures: %s',
+  'stops repeated safe output failures and never retries other failures: %s',
   async (message, count) => {
     const f = await setup();
     const run = f.prepare('生成庭院镜头');
@@ -1265,16 +3825,117 @@ it.each([
     await runtime.wait(run.prepared.stream.generationId);
     const failed = f.generations.get(run.prepared.stream.generationId);
     expect(failed.status).toBe('failed');
-    expect(failed.error).toContain(count === 3 ? 'TOOL_OUTPUT_REPAIR_LIMIT' : message);
+    expect(failed.error).toContain(count === 2 ? 'AGENT_OUTPUT_REPAIR_STALLED' : message);
     expect(requests).toHaveLength(count);
     expect(f.content.listScenes()).toHaveLength(0);
     expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(0);
     const failures = f.workflow
       .getTask({ taskId: run.agent.taskId })
       .events.filter((item) => item.eventType === 'tool_validation_failed');
-    expect(failures).toHaveLength(count === 3 ? 3 : 0);
+    expect(failures).toHaveLength(count === 2 ? 2 : 0);
   },
 );
+
+it('stops an identical malformed output while preserving the already saved scene stage', async () => {
+  const f = await setup();
+  const run = f.prepare('生成庭院镜头');
+  const { bridge, requests } = scriptedBridge((params, index) => {
+    const common = { projectSessionId: params.projectSessionId };
+    const complete: NativeProviderHostEvent = {
+      ...common,
+      type: 'complete',
+      providerResponseId: `repeat-${index}`,
+      finishReason: 'tool_calls',
+    };
+    const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+      {
+        ...common,
+        type: 'tool_call_end',
+        call: { id: `repeat-call-${index}`, name, argumentsJson: JSON.stringify(args) },
+      },
+      complete,
+    ];
+    if (index === 0) return tool('tools.load', { names: ['scene.structure.stage'] });
+    if (index === 1)
+      return tool('scene.structure.stage', {
+        resourceId: 'workspace:shots',
+        operation: 'begin',
+        executionKey: 'repeat-output-stage',
+        episodeTitle: '庭院',
+        sceneShotCounts: [1],
+      });
+    if (index === 2) {
+      const state = lastOutput(params);
+      return tool('scene.structure.stage', {
+        resourceId: 'workspace:shots',
+        operation: 'put_scene',
+        stageId: state.stageId,
+        expectedRowVersion: state.rowVersion,
+        sceneIndex: 0,
+        scene: { title: '庭院', authoringIR: authoring() },
+      });
+    }
+    if (index === 4)
+      return tool('scene.structure.stage', {
+        resourceId: 'workspace:shots',
+        operation: 'get',
+        stageId: lastOutput(params).stageId,
+      });
+    expect([3, 5]).toContain(index);
+    return [
+      {
+        ...common,
+        type: 'tool_call_end',
+        call: {
+          id: `repeat-malformed-${index}`,
+          name: 'scene.structure.stage',
+          argumentsJson: '{"operation":"put_shots","sceneIndex":0',
+        },
+      },
+      complete,
+    ];
+  });
+  const runtime = new PiConversationRuntime({
+    generation: f.generations,
+    providerTools: f.loop,
+    bridge,
+    plans: {} as never,
+    createGateway: () => {
+      throw new Error('No planning');
+    },
+  });
+  await runtime.start({
+    ...run.prepared.stream,
+    identity: run.prepared.stream,
+    taskId: run.agent.taskId,
+    prompt: '生成庭院镜头',
+    mode: 'document',
+  });
+  await runtime.wait(run.prepared.stream.generationId);
+  const failed = f.generations.get(run.prepared.stream.generationId);
+  expect(failed.status).toBe('failed');
+  expect(failed.error).toContain('AGENT_OUTPUT_REPAIR_STALLED');
+  expect(failed.error).not.toContain('failureFingerprint=');
+  expect(requests).toHaveLength(6);
+  const stages = f.project.access(
+    false,
+    (db) =>
+      db
+        .prepare(
+          'SELECT scenes_json FROM scene_structure_stages WHERE project_id=? AND conversation_id=?',
+        )
+        .all(run.prepared.stream.projectId, run.prepared.stream.conversationId) as Array<{
+        scenes_json: string;
+      }>,
+  );
+  expect(stages).toHaveLength(1);
+  const [savedScene] = JSON.parse(stages[0]!.scenes_json) as Array<{
+    scene?: { title?: string };
+    shots: Array<Record<string, unknown> | null>;
+  }>;
+  expect(savedScene!.scene?.title).toBe('庭院');
+  expect(savedScene!.shots).toEqual([null]);
+});
 
 it('stops output recovery before sending another request when cancelled at the repair boundary', async () => {
   const f = await setup();
@@ -1317,6 +3978,83 @@ it('stops output recovery before sending another request when cancelled at the r
   expect(f.content.listScenes()).toHaveLength(0);
 });
 
+it.each([
+  ['stage', false, false],
+  ['submit', false, false],
+  ['stage', true, false],
+  ['submit', true, false],
+  ['stage', true, true],
+  ['submit', true, true],
+] as const)(
+  'saves modern scene IR with optional setting and authoritative explicit references (%s, %s, %s)',
+  async (mode, withSceneBinding, explicitScopes) => {
+    const f = await setup();
+    const actor = f.content.saveDocument({
+      kind: 'character',
+      title: '演员',
+      contentMarkdown: '角色资料',
+    });
+    const run = f.prepare('保存一场一镜，引用只绑定本镜出镜资料');
+    const scene = {
+      title: '庭院',
+      characterDocumentIds: [actor.id],
+      ...(withSceneBinding ? { sceneDocumentId: f.setting.id } : {}),
+      authoringIR: {
+        ...authoring(),
+        ...(explicitScopes
+          ? { references: { characterDocumentIds: [], sceneDocumentIds: [] } }
+          : {}),
+      },
+    };
+    const references = {
+      characterDocumentIds: [actor.id],
+      sceneDocumentIds: [f.setting.id],
+      propDocumentIds: [],
+    };
+    const shots = [{ title: '一镜', authoringIR: { ...authoring(true), references } }];
+    let result;
+    if (mode === 'stage') {
+      let state = await run.invoke('scene.structure.stage', {
+        operation: 'begin',
+        resourceId: 'workspace:shots',
+        executionKey: 'modern',
+        episodeTitle: '一场',
+        sceneShotCounts: [1],
+      });
+      const base = { resourceId: 'workspace:shots', stageId: state.stageId, sceneIndex: 0 };
+      state = await run.invoke('scene.structure.stage', { ...base, operation: 'put_scene', scene });
+      result = await run.invoke('scene.structure.stage', {
+        ...base,
+        operation: 'put_shots',
+        expectedRowVersion: state.rowVersion,
+        shotOffset: 0,
+        shots,
+      });
+    } else {
+      result = await run.invoke('scene.submit_structure', {
+        resourceId: 'workspace:shots',
+        resolution: 'resolved',
+        episodeTitle: '一场',
+        scenes: [{ ...scene, shots }],
+      });
+    }
+    expect(result.status, JSON.stringify(result)).toBe('scene_structure_saved');
+    const savedScene = f.content.listScenes()[0]!;
+    expect(f.content.listScenes()).toHaveLength(1);
+    expect(f.content.listShots(savedScene.id)[0]?.authoringIR?.references).toEqual(references);
+    // Compatibility IDs fill omitted scopes, never replace explicit IR scopes
+    // or leak the full scene cast into individual shots.
+    expect(savedScene.characterBindings).toEqual(
+      explicitScopes ? [] : [{ characterDocumentId: actor.id }],
+    );
+    f.project.access(false, (db) => {
+      expect(
+        db.prepare('SELECT scene_document_id FROM scenes WHERE id=?').get(savedScene.id),
+      ).toEqual({ scene_document_id: withSceneBinding && !explicitScopes ? f.setting.id : null });
+    });
+  },
+);
+
 it('resumes staged authoring across a cancelled task and saves one editable draft with real IDs without approval', async () => {
   const f = await setup();
   const first = f.prepare('生成两镜');
@@ -1344,6 +4082,10 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
     },
   };
   state = await first.invoke('scene.structure.stage', setupArgs);
+  expect(state.scenes).toEqual([
+    expect.objectContaining({ setupSaved: true, setupStaged: true, saved: false }),
+  ]);
+  expect(f.content.listScenes()).toHaveLength(0);
   const version = state.rowVersion;
   expect((await first.invoke('scene.structure.stage', setupArgs)).rowVersion).toBe(version);
   expect(
@@ -1383,6 +4125,13 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
     expectedRowVersion: state.rowVersion,
   });
   expect(state.status).toBe('scene_structure_saved');
+  expect(state.scenes).toEqual([
+    expect.objectContaining({
+      setupStaged: true,
+      saved: true,
+      sceneId: state.sceneIds && (state.sceneIds as string[])[0],
+    }),
+  ]);
   expect(f.content.listScenes()).toHaveLength(1);
   expect(
     (await second.invoke('scene.structure.stage', { ...base, operation: 'finalize', stageId }))
@@ -1493,100 +4242,80 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
   expect(f.content.listShots(firstSceneId)).toHaveLength(1);
 });
 
-it('continues a 17-scene, 47-shot manifest across a real tool-budget checkpoint without duplicates', async () => {
+it('completes a request larger than one page in the same task without duplicates', async () => {
   const f = await setup();
-  const counts = [...Array<number>(13).fill(3), ...Array<number>(4).fill(2)];
-  expect(counts.reduce((sum, count) => sum + count, 0)).toBe(47);
+  const counts = Array<number>(14).fill(8);
+  expect(counts.reduce((sum, count) => sum + count, 0)).toBe(112);
   const base = { resourceId: 'workspace:shots' };
-  const first = f.prepare('生成 17 场 47 镜');
-  let state = await first.invoke('scene.structure.stage', {
-    ...base,
-    operation: 'begin',
-    executionKey: 'seventeen-scenes-forty-seven-shots',
-    episodeTitle: '17 场测试',
-    sceneShotCounts: counts,
-  });
-  const stageId = state.stageId;
-  for (let sceneIndex = 0; sceneIndex < 15; sceneIndex++) {
-    state = await first.invoke('scene.structure.stage', {
+  const run = f.prepare('生成 14 场 112 镜');
+  const outputId = f.project.access(true, (db, p) =>
+    new AgentExecutionStore(db).registerOutput(
+      p.id,
+      run.agent.taskId,
+      'pages',
+      'scene.structure.stage',
+      14,
+    ),
+  );
+  const allStageSceneIds: string[] = [];
+  for (let page = 0; page < 2; page++) {
+    const pageStart = page * 7;
+    const pageCounts = counts.slice(pageStart, pageStart + 7);
+    let state = await run.invoke('scene.structure.stage', {
       ...base,
-      operation: 'put_scene',
-      stageId,
-      expectedRowVersion: state.rowVersion,
-      sceneIndex,
-      scene: {
-        title: `场${sceneIndex + 1}`,
-        sceneDocumentId: f.setting.id,
-        characterDocumentIds: [],
-        authoringIR: authoring(),
-      },
+      operation: 'begin',
+      outputId,
+      outputIndex: page,
+      executionKey: `fourteen-scenes-page-${page + 1}`,
+      episodeTitle: '14 场测试',
+      sceneShotCounts: pageCounts,
     });
-    state = await first.invoke('scene.structure.stage', {
-      ...base,
-      operation: 'put_shots',
-      stageId,
-      expectedRowVersion: state.rowVersion,
-      sceneIndex,
-      shotOffset: 0,
-      shots: Array.from({ length: counts[sceneIndex]! }, (_, offset) => ({
-        title: `场${sceneIndex + 1}镜${offset + 1}`,
-        authoringIR: authoring(true),
-      })),
-    });
+    const stageId = state.stageId as string;
+    for (let sceneIndex = 0; sceneIndex < pageCounts.length; sceneIndex++) {
+      const absoluteScene = pageStart + sceneIndex;
+      state = await run.invoke('scene.structure.stage', {
+        ...base,
+        operation: 'put_scene',
+        stageId,
+        expectedRowVersion: state.rowVersion,
+        sceneIndex,
+        scene: {
+          title: `场${absoluteScene + 1}`,
+          sceneDocumentId: f.setting.id,
+          characterDocumentIds: [],
+          authoringIR: authoring(),
+        },
+      });
+      for (let shotOffset = 0; shotOffset < pageCounts[sceneIndex]!; shotOffset += 4) {
+        state = await run.invoke('scene.structure.stage', {
+          ...base,
+          operation: 'put_shots',
+          stageId,
+          expectedRowVersion: state.rowVersion,
+          sceneIndex,
+          shotOffset,
+          shots: Array.from(
+            { length: Math.min(4, pageCounts[sceneIndex]! - shotOffset) },
+            (_, offset) => ({
+              title: `场${absoluteScene + 1}镜${shotOffset + offset + 1}`,
+              authoringIR: authoring(true),
+            }),
+          ),
+        });
+      }
+    }
+    expect(state).toMatchObject({ status: 'scene_structure_saved', complete: true });
+    allStageSceneIds.push(...(state.sceneIds as string[]));
   }
-  expect(f.content.listScenes()).toHaveLength(15);
-  expect(state.businessCallsRemaining).toBe(1);
-  expect(state.minimumRemainingWrites).toBe(4);
-  const partial = await first.invoke('scene.structure.stage', {
-    ...base,
-    operation: 'checkpoint',
-    stageId,
-    expectedRowVersion: state.rowVersion,
-  });
-  expect(partial).toMatchObject({ status: 'scene_structure_checkpointed', complete: false });
-  expect((partial.sceneIds as string[]).length).toBeGreaterThan(0);
-  f.loop.startProviderStep(first.prepared.stream);
-  f.loop.completeProviderStep({ ...first.prepared.stream, finishReason: 'stop' });
-  expect(f.workflow.getTask({ taskId: first.agent.taskId }).task.completionState).toBe('partial');
-
-  const second = f.prepare('继续 17 场测试');
-  state = await second.invoke('scene.structure.stage', { ...base, operation: 'get', stageId });
-  expect(state.nextSceneIndex).toBe(15);
-  for (let sceneIndex = 15; sceneIndex < counts.length; sceneIndex++) {
-    state = await second.invoke('scene.structure.stage', {
-      ...base,
-      operation: 'put_scene',
-      stageId,
-      expectedRowVersion: state.rowVersion,
-      sceneIndex,
-      scene: {
-        title: `场${sceneIndex + 1}`,
-        sceneDocumentId: f.setting.id,
-        characterDocumentIds: [],
-        authoringIR: authoring(),
-      },
-    });
-    state = await second.invoke('scene.structure.stage', {
-      ...base,
-      operation: 'put_shots',
-      stageId,
-      expectedRowVersion: state.rowVersion,
-      sceneIndex,
-      shotOffset: 0,
-      shots: Array.from({ length: counts[sceneIndex]! }, (_, offset) => ({
-        title: `场${sceneIndex + 1}镜${offset + 1}`,
-        authoringIR: authoring(true),
-      })),
-    });
-  }
-  expect(state).toMatchObject({ status: 'scene_structure_saved', complete: true });
-  f.loop.startProviderStep(second.prepared.stream);
-  f.loop.completeProviderStep({ ...second.prepared.stream, finishReason: 'stop' });
+  expect(allStageSceneIds).toHaveLength(14);
+  f.loop.startProviderStep(run.prepared.stream);
+  f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' });
+  expect(f.workflow.getTask({ taskId: run.agent.taskId }).task.status).toBe('completed');
   const scenes = f.content.listScenes();
-  expect(scenes).toHaveLength(17);
-  expect(new Set(state.sceneIds as string[]).size).toBe(17);
-  expect(scenes.reduce((sum, scene) => sum + f.content.listShots(scene.id).length, 0)).toBe(47);
-  expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(17);
+  expect(scenes).toHaveLength(14);
+  expect(new Set(allStageSceneIds).size).toBe(14);
+  expect(scenes.reduce((sum, scene) => sum + f.content.listShots(scene.id).length, 0)).toBe(112);
+  expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(14);
 });
 
 it('shares create/update validation, retains binding text, rejects conflicting text and preflights total/rendered limits', async () => {
@@ -1671,28 +4400,57 @@ it('shares create/update validation, retains binding text, rejects conflicting t
 });
 
 it.each(['document.submit_draft', 'tools.load'])(
-  'bounds Pi validation failures for %s before execution and persists sizes without bodies',
+  'allows distinct Pi argument repairs for %s and records them without charging tool calls',
   async (operation) => {
     const f = await setup();
-    const run = f.prepare('保存文档');
+    const run = f.prepare('检查项目文档');
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    const body = { contentMarkdown: 'PRIVATE_BODY'.repeat(10000) };
+    const repairs =
+      operation === 'document.submit_draft'
+        ? [
+            body,
+            { ...body, title: '修正标题' },
+            { ...body, title: '修正标题', resourceId: 'workspace:documents' },
+            {
+              ...body,
+              title: '修正标题',
+              resourceId: 'workspace:documents',
+              documentKind: 'script',
+            },
+          ]
+        : [
+            body,
+            { names: [] },
+            { names: [42] },
+            {
+              names: [
+                'conversation.ask',
+                'conversation.task.route',
+                'conversation.task.checkpoint',
+                'project.structure.get',
+                'library.search',
+                'library.read',
+                'document.submit_draft',
+                'document.submit_draft',
+              ],
+            },
+          ];
     faux.setResponses([
       fauxAssistantMessage(
         [fauxToolCall('tools.load', { names: ['document.submit_draft'] }, { id: 'load' })],
         { stopReason: 'toolUse', responseId: 'load' },
       ),
-      ...[1, 2, 3, 4].map((index) =>
-        fauxAssistantMessage(
-          [
-            fauxToolCall(
-              operation,
-              { contentMarkdown: 'PRIVATE_BODY'.repeat(10000) },
-              { id: `bad-${index}` },
-            ),
-          ],
-          { stopReason: 'toolUse', responseId: `bad-${index}` },
-        ),
+      ...repairs.map((args, index) =>
+        fauxAssistantMessage([fauxToolCall(operation, args, { id: `bad-${index}` })], {
+          stopReason: 'toolUse',
+          responseId: `bad-${index}`,
+        }),
       ),
+      fauxAssistantMessage('已检查，暂无需要更改。', {
+        stopReason: 'stop',
+        responseId: 'final',
+      }),
     ]);
     const runtime = new PiConversationRuntime({
       generation: f.generations,
@@ -1707,13 +4465,12 @@ it.each(['document.submit_draft', 'tools.load'])(
       ...run.prepared.stream,
       identity: run.prepared.stream,
       taskId: run.agent.taskId,
-      prompt: '保存文档',
+      prompt: '检查项目文档',
       mode: 'document',
     });
     await runtime.wait(run.prepared.stream.generationId);
-    const failed = f.generations.get(run.prepared.stream.generationId);
-    expect(failed.status).toBe('failed');
-    expect(failed.error).toContain('TOOL_REPAIR_LIMIT');
+    const completed = f.generations.get(run.prepared.stream.generationId);
+    expect(completed.status, completed.error).toBe('complete');
     const rows = f.project.access(false, (db) =>
       db
         .prepare(
@@ -1721,13 +4478,24 @@ it.each(['document.submit_draft', 'tools.load'])(
         )
         .all(run.agent.taskId),
     ) as Array<{ summary: string }>;
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     expect(
       rows.every((row) => row.summary.length < 2000 && !row.summary.includes('PRIVATE_BODY')),
     ).toBe(true);
     expect(
       (JSON.parse(rows[0]!.summary) as { argumentBytes: number }).argumentBytes,
     ).toBeGreaterThan(100000);
+    expect(
+      f.project.access(false, (db) =>
+        db
+          .prepare(
+            `SELECT usage.tool_call_count, tasks.turn_count, tasks.quota_state
+             FROM agent_tasks tasks JOIN agent_task_usage_counters usage ON usage.task_id=tasks.id
+             WHERE tasks.id=?`,
+          )
+          .get(run.agent.taskId),
+      ),
+    ).toEqual({ tool_call_count: 0, turn_count: 6, quota_state: 'active' });
     expect(f.workflow.listDocuments()).toHaveLength(1); // Only the fixture setting.
   },
 );

@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import type {
   LibraryCatalogItem,
   LibrarySourceStatus,
   ProductionContextInfo,
+  ProjectStructureSnapshot,
 } from '@ai-video/contracts';
+import type { OpenProject } from '@ai-video/domain';
 import {
   compileProductionContext,
   toContextManifest,
@@ -13,6 +16,7 @@ import {
 } from '@ai-video/context';
 import {
   createRepositories,
+  getProjectLibraryRevision,
   listProjectLibraryCatalog,
   taskHistoryMessageIds,
   type TaskHistoryBoundary,
@@ -21,7 +25,15 @@ import { ProjectService } from './project-service.js';
 import { ProjectStructureCompiler, renderProjectStructure } from './structure-compiler.js';
 import { splitConversationRequest } from './conversation-request.js';
 
+interface CachedProjectMetadata {
+  revision: number;
+  catalog: LibraryCatalogItem[];
+  structure?: ProjectStructureSnapshot;
+}
+
 export class ContextService {
+  private readonly projectMetadata = new Map<string, CachedProjectMetadata>();
+
   constructor(
     private readonly projects: ProjectService,
     private readonly structureCompiler?: ProjectStructureCompiler,
@@ -31,6 +43,7 @@ export class ContextService {
     conversationId: string,
     budgetTokens?: number,
     boundary?: TaskHistoryBoundary,
+    includeSources = true,
   ): ProductionContext {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -43,44 +56,39 @@ export class ContextService {
         conversation.scopeType,
         conversation.scopeId,
       );
-      const catalog = listProjectLibraryCatalog(database, project.id).map((item) => ({
-        id: item.id,
-        sourceType: item.sourceType,
-        sourceId: item.sourceId,
-        versionId: item.versionId,
-        status: item.status as LibrarySourceStatus,
-        kind: item.kind,
-        title: item.title,
-        updatedAt: item.updatedAt,
-      }));
-      const sources: ContextSourceInput[] = [
-        {
-          id: `${project.id}:catalog`,
-          type: 'catalog',
-          scopeType: 'project',
-          label: `资料目录 ${catalog.length} 项`,
-          content: renderLibraryCatalog(catalog),
-          updatedAt: project.updatedAt,
-          priority: 10,
-        },
-      ];
-      if (this.structureCompiler) {
-        const structure = this.structureCompiler.compileFromDatabase(database, project, {
-          includeArchived: false,
-        });
+      const metadata: CachedProjectMetadata = includeSources
+        ? this.getProjectMetadata(database, project)
+        : { revision: 0, catalog: [] };
+      const catalog = metadata.catalog;
+      const sources: ContextSourceInput[] = includeSources
+        ? [
+            {
+              id: `${project.id}:catalog`,
+              type: 'catalog',
+              scopeType: 'project',
+              label: `资料目录 ${catalog.length} 项`,
+              content: renderLibraryCatalog(catalog),
+              updatedAt: project.updatedAt,
+              priority: 10,
+            },
+          ]
+        : [];
+      if (metadata.structure) {
         sources.push({
           id: `${project.id}:structure`,
           type: 'catalog',
           scopeType: 'project',
           label: '项目结构目录',
-          content: renderProjectStructure(structure),
+          content: renderProjectStructure(metadata.structure),
           updatedAt: project.updatedAt,
           priority: 20,
         });
       }
-      const messages = taskHistoryMessageIds(database, conversation.id, boundary).map((id) =>
-        repositories.chatMessages.get(id)!,
-      );
+      const messages = includeSources
+        ? taskHistoryMessageIds(database, conversation.id, boundary).map((id) =>
+            repositories.chatMessages.get(id)!,
+          )
+        : [];
       if (messages.length > 0) {
         sources.push({
           id: conversation.id,
@@ -117,16 +125,74 @@ export class ContextService {
     });
   }
 
+  recentTaskContext(conversationId: string, generationId: string): string {
+    return this.projects.access(false, (database, project) => {
+      const rows = database
+        .prepare(
+          `SELECT generations.id,generations.status,COALESCE(generations.user_request,messages.content) AS prompt,
+            generations.created_at,
+            (SELECT COUNT(*) FROM agent_change_sets sets JOIN agent_task_generations links ON links.task_id=sets.task_id WHERE links.generation_id=generations.id) AS proposals
+           FROM llm_generations generations
+           JOIN chat_messages messages ON messages.id=generations.user_message_id
+          WHERE generations.project_id=? AND generations.conversation_id=?
+            AND generations.id<>?
+          ORDER BY generations.created_at DESC LIMIT 8`,
+        )
+        .all(project.id, conversationId, generationId) as Array<{
+        id: string;
+        status: string;
+        prompt: string;
+        created_at: string;
+        proposals: number;
+      }>;
+      if (!rows.length) return '';
+      return `\n\n当前会话最近任务。由你判断语义关系，需要关联时调用 conversation.task.route：\n${rows.map((row) => `- generationId=${row.id}；状态=${row.status}；创建=${row.created_at}；提案数=${row.proposals}；用户请求=${JSON.stringify(splitConversationRequest(row.prompt).request.slice(0, 800))}`).join('\n')}\n可选关系：independent（独立执行）、follow_up（继续成功任务）、inspect（查询失败/取消/其他任务的真实结果，不建立成功依赖）、supplement（向活动任务补充指令）。无明确关系选择 independent。`;
+    });
+  }
+
   preview(conversationId: string, budgetTokens?: number): ProductionContextInfo {
     const context = this.compile(conversationId, budgetTokens);
-    const structure = this.structureCompiler
-      ? this.projects.access(false, (database, project) =>
-          this.structureCompiler!.compileFromDatabase(database, project, {
-            includeArchived: false,
-          }),
-        )
-      : undefined;
+    const structure = this.projects.access(
+      false,
+      (database, project) => this.getProjectMetadata(database, project).structure,
+    );
     return toContextInfo(context, structure);
+  }
+
+  private getProjectMetadata(
+    database: Database.Database,
+    project: OpenProject,
+  ): CachedProjectMetadata {
+    const revision = getProjectLibraryRevision(database, project.id);
+    const cacheKey = `${project.rootPath}\0${project.id}`;
+    const cached = this.projectMetadata.get(cacheKey);
+    if (cached?.revision === revision) {
+      this.projectMetadata.delete(cacheKey);
+      this.projectMetadata.set(cacheKey, cached);
+      return cached;
+    }
+
+    const catalog = listProjectLibraryCatalog(database, project.id).map((item) => ({
+      id: item.id,
+      sourceType: item.sourceType,
+      sourceId: item.sourceId,
+      versionId: item.versionId,
+      status: item.status as LibrarySourceStatus,
+      kind: item.kind,
+      title: item.title,
+      updatedAt: item.updatedAt,
+    }));
+    const structure = this.structureCompiler?.compileFromDatabase(database, project, {
+      includeArchived: false,
+    });
+    const metadata = { revision, catalog, ...(structure ? { structure } : {}) };
+    this.projectMetadata.delete(cacheKey);
+    this.projectMetadata.set(cacheKey, metadata);
+    if (this.projectMetadata.size > 16) {
+      const oldestCacheKey = this.projectMetadata.keys().next().value;
+      if (oldestCacheKey) this.projectMetadata.delete(oldestCacheKey);
+    }
+    return metadata;
   }
 
   saveSnapshot(context: ProductionContext, purpose: string): string {

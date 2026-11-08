@@ -22,7 +22,6 @@ import {
   CONVERSATION_DEFAULT_DOCK_SIZE,
   WORKSPACE_DOCK_LAYOUT_ID,
   conversationWindowOpenAction,
-  isConversationAutoHidden,
   isUnusableConversationLayoutShare,
   isWorkspaceNarrow,
   usableConversationDockLayout,
@@ -46,6 +45,8 @@ interface WorkspaceSurfaceProps {
   conversationContent: ReactNode;
   productionContent: ReactNode;
   assetsContent?: ReactNode;
+  roughCutMode?: boolean;
+  startupMode?: boolean;
   productionOpen: boolean;
   documentActive: boolean;
   children: ReactNode;
@@ -74,6 +75,8 @@ export function WorkspaceSurface({
   conversationContent,
   productionContent,
   assetsContent,
+  roughCutMode = false,
+  startupMode = false,
   productionOpen,
   documentActive,
   children,
@@ -86,9 +89,14 @@ export function WorkspaceSurface({
   detachedPanels,
 }: WorkspaceSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const dockScrollRef = useRef<HTMLDivElement>(null);
+  const paneOrderKey = `${layout.projectId ?? 'no-project'}${roughCutMode ? ':rough-cut' : ''}`;
+  const initialPaneOrder: WorkspacePaneId[] = roughCutMode
+    ? ['assets', 'editor', 'production', 'conversation']
+    : ['editor', 'production', 'assets', 'conversation'];
   const [viewport, setViewport] = useState<WorkspaceViewport>(() => viewportFromElement(null));
   const [paneOrder, setPaneOrder] = useState<WorkspacePaneId[]>(() =>
-    readWorkspacePaneOrder(layout.projectId),
+    readWorkspacePaneOrder(paneOrderKey, initialPaneOrder),
   );
   const [draggingPane, setDraggingPane] = useState<WorkspacePaneId>();
   const [dropIndex, setDropIndex] = useState<number>();
@@ -104,6 +112,7 @@ export function WorkspaceSurface({
   const documentPanel = layout.panels.document;
   const conversationPanel = layout.panels.conversation;
   const assetsPanel = layout.panels.assets;
+  const conversationMinSize = CONVERSATION_MIN_SIZE.width;
   const conversationWindowOptions = {
     panel: conversationPanel,
     detached: Boolean(detachedPanels.conversation),
@@ -115,36 +124,42 @@ export function WorkspaceSurface({
   const narrow = isWorkspaceNarrow(viewport.width);
   const resolvedEditorTitle = editorTitle || documentTitle || '文档';
   const editorDetached = documentActive && Boolean(detachedPanels.document);
-  const documentDocked = documentActive
-    ? documentPanel.open && documentPanel.mode === 'docked' && !editorDetached
-    : documentPanel.open;
-  const conversationAutoHidden = isConversationAutoHidden(conversationWindowOptions);
+  const documentDocked =
+    startupMode ||
+    (documentActive
+      ? documentPanel.open && documentPanel.mode === 'docked' && !editorDetached
+      : documentPanel.open);
   const showDocumentFloating =
+    !startupMode &&
     (!productionOpen || narrow) &&
     documentPanel.open &&
     !editorDetached &&
     (narrow || (documentActive && documentPanel.mode !== 'docked'));
   const showConversationFloating =
+    !startupMode &&
     conversationPanel.open &&
     !detachedPanels.conversation &&
     (conversationPanel.mode !== 'docked' || (narrow && !productionOpen)) &&
     (!narrow || layout.activePanelId === 'conversation');
-  const showProductionDock = productionOpen && !narrow;
+  const showProductionDock = !startupMode && productionOpen && !narrow;
   const showAssetsDock =
+    !startupMode &&
     assetsPanel.open &&
     assetsPanel.mode === 'docked' &&
     !narrow &&
     (!productionOpen || viewport.width >= 960);
-  const showAssetsFloating = assetsPanel.open && !showAssetsDock;
+  const showAssetsFloating = !startupMode && assetsPanel.open && !showAssetsDock;
   const showConversationDock =
+    !startupMode &&
     conversationPanel.open &&
     conversationPanel.mode === 'docked' &&
     !detachedPanels.conversation &&
-    !narrow &&
-    !conversationAutoHidden;
-  const showEditorDock = productionOpen
-    ? !narrow && documentDocked
-    : !narrow && (documentDocked || (!showConversationDock && !showAssetsDock));
+    !narrow;
+  const showEditorDock = startupMode
+    ? true
+    : productionOpen
+      ? !narrow && documentDocked
+      : !narrow && (documentDocked || (!showConversationDock && !showAssetsDock));
   const showProductionPage = showProductionDock || (!showEditorDock && productionOpen);
   const dockedPanelIds = [
     ...(showEditorDock ? ['editor'] : []),
@@ -165,13 +180,36 @@ export function WorkspaceSurface({
   );
   const productionCollapsible = showProductionDock && visiblePaneOrder.length > 1;
   const showProductionCollapsed = productionCollapsible && productionCollapsed;
+  const dockMinWidths: Record<WorkspacePaneId, number> = {
+    editor: showProductionDock ? 320 : 360,
+    production: showProductionCollapsed ? 44 : showProductionDock ? 320 : 0,
+    assets: 320,
+    conversation: conversationMinSize,
+  };
+  const dockMinWidth =
+    startupMode || narrow
+      ? 0
+      : visiblePaneOrder.reduce((width, paneId) => width + dockMinWidths[paneId], 0) +
+        Math.max(0, visiblePaneOrder.length - 1) * 8;
+  const dockedPaneKey = visiblePaneOrder.join(':');
+  const activePanelZOrder = layout.activePanelId ? layout.panels[layout.activePanelId].zOrder : 0;
   const persistedDockLayout = useDefaultLayout({
-    id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}${productionOpen ? ':production' : ''}`,
+    id: `${WORKSPACE_DOCK_LAYOUT_ID}:${layout.projectId ?? 'no-project'}${productionOpen ? ':production' : ''}${roughCutMode ? ':rough-cut' : ''}`,
     panelIds: dockedPanelIds,
     storage: safePanelLayoutStorage,
     onlySaveAfterUserInteractions: true,
   });
   const dockDefaultLayout = usableConversationDockLayout(persistedDockLayout.defaultLayout);
+  const effectiveDockLayout = startupMode ? { editor: 100 } : dockDefaultLayout;
+
+  useEffect(() => {
+    const paneId = layout.activePanelId === 'document' ? 'editor' : layout.activePanelId;
+    if (!paneId) return;
+    dockScrollRef.current?.querySelector<HTMLElement>(`[id="${paneId}"]`)?.scrollIntoView?.({
+      block: 'nearest',
+      inline: 'nearest',
+    });
+  }, [layout.activePanelId, activePanelZOrder, dockedPaneKey, viewport.width]);
 
   useEffect(() => {
     if (!showProductionPage) return;
@@ -189,8 +227,8 @@ export function WorkspaceSurface({
   }, [productionPanelRef, showProductionPage, visiblePaneOrder]);
 
   useEffect(() => {
-    setPaneOrder(readWorkspacePaneOrder(layout.projectId));
-  }, [layout.projectId]);
+    setPaneOrder(readWorkspacePaneOrder(paneOrderKey, initialPaneOrder));
+  }, [paneOrderKey]);
 
   useEffect(() => {
     const element = conversationPanelElementRef.current;
@@ -204,8 +242,8 @@ export function WorkspaceSurface({
       const panel = conversationPanelRef.current;
       if (!panel) return;
       try {
-        if (panel.getSize().inPixels < CONVERSATION_MIN_SIZE.width) {
-          panel.resize(CONVERSATION_DEFAULT_DOCK_SIZE);
+        if (panel.getSize().inPixels < conversationMinSize) {
+          panel.resize(`${conversationMinSize}px`);
         }
       } catch {
         // Group layout is not ready on the first frame.
@@ -214,15 +252,12 @@ export function WorkspaceSurface({
     restoreUsableSize();
     const timer = window.setTimeout(restoreUsableSize, 0);
     return () => window.clearTimeout(timer);
-  }, [conversationPanelRef, showConversationDock]);
+  }, [conversationMinSize, conversationPanelRef, showConversationDock]);
 
   useEffect(() => {
-    const timer = window.setTimeout(
-      () => writeWorkspacePaneOrder(layout.projectId, paneOrder),
-      200,
-    );
+    const timer = window.setTimeout(() => writeWorkspacePaneOrder(paneOrderKey, paneOrder), 200);
     return () => window.clearTimeout(timer);
-  }, [layout.projectId, paneOrder]);
+  }, [paneOrderKey, paneOrder]);
 
   useEffect(() => {
     const element = surfaceRef.current;
@@ -342,7 +377,7 @@ export function WorkspaceSurface({
   };
 
   const paneTitle = (paneId: WorkspacePaneId) => {
-    if (paneId === 'editor') return (documentActive && documentTitle) || resolvedEditorTitle;
+    if (paneId === 'editor') return resolvedEditorTitle;
     if (paneId === 'conversation') return '会话';
     if (paneId === 'assets') return '素材库';
     return '生产参数';
@@ -357,6 +392,7 @@ export function WorkspaceSurface({
   };
 
   const renderPaneHeader = (paneId: WorkspacePaneId, index: number) => {
+    if (startupMode && paneId === 'editor') return null;
     if (paneId === 'production' && showProductionCollapsed) {
       return (
         <header className="workspace-pane-header">
@@ -429,7 +465,7 @@ export function WorkspaceSurface({
               <ExternalLink size={15} />
             </button>
           )}
-          {paneId === 'conversation' && (
+          {paneId === 'conversation' && !startupMode && (
             <button
               type="button"
               title="会话在独立窗口打开"
@@ -492,8 +528,10 @@ export function WorkspaceSurface({
         <Panel
           id="assets"
           key="assets"
-          defaultSize={showProductionDock ? '32%' : showConversationDock ? '30%' : '44%'}
-          minSize="320px"
+          defaultSize={
+            roughCutMode ? '33%' : showProductionDock ? '32%' : showConversationDock ? '30%' : '44%'
+          }
+          minSize={`${dockMinWidths.assets}px`}
         >
           <section className="workspace-docked-page workspace-assets-page">
             {renderPaneHeader(paneId, index)}
@@ -508,19 +546,21 @@ export function WorkspaceSurface({
           id="editor"
           key="editor"
           defaultSize={
-            showProductionDock
-              ? showAssetsDock
-                ? '34%'
-                : '50%'
-              : showAssetsDock
-                ? showConversationDock
-                  ? '40%'
-                  : '56%'
-                : showConversationDock
-                  ? '44%'
-                  : '100%'
+            roughCutMode
+              ? '67%'
+              : showProductionDock
+                ? showAssetsDock
+                  ? '34%'
+                  : '50%'
+                : showAssetsDock
+                  ? showConversationDock
+                    ? '40%'
+                    : '56%'
+                  : showConversationDock
+                    ? '44%'
+                    : '100%'
           }
-          minSize={showProductionDock ? '320px' : '360px'}
+          minSize={`${dockMinWidths.editor}px`}
           maxSize="100%"
         >
           <section className="workspace-docked-page workspace-editor-page" hidden={false}>
@@ -571,8 +611,8 @@ export function WorkspaceSurface({
         className="workspace-conversation-panel"
         elementRef={conversationPanelElementRef}
         panelRef={conversationPanelRef}
-        defaultSize={CONVERSATION_DEFAULT_DOCK_SIZE}
-        minSize={`${CONVERSATION_MIN_SIZE.width}px`}
+        defaultSize={startupMode ? '320px' : CONVERSATION_DEFAULT_DOCK_SIZE}
+        minSize={`${conversationMinSize}px`}
         collapsible={false}
       >
         <section className="workspace-docked-page workspace-conversation-page">
@@ -616,7 +656,7 @@ export function WorkspaceSurface({
       onPointerUp={finishPaneDrag}
       onPointerCancel={cancelPaneDrag}
     >
-      {narrow && (
+      {narrow && !startupMode && (
         <nav className="workspace-mobile-tabs" aria-label="工作区页面">
           <button
             type="button"
@@ -634,37 +674,40 @@ export function WorkspaceSurface({
           </button>
         </nav>
       )}
-      <Group
-        className="workspace-dock-group"
-        orientation="horizontal"
-        defaultLayout={dockDefaultLayout}
-        onLayoutChanged={(nextLayout, meta) => {
-          if (isUnusableConversationLayoutShare(nextLayout.conversation)) {
-            return;
-          }
-          persistedDockLayout.onLayoutChanged(nextLayout, meta);
-        }}
-        resizeTargetMinimumSize={{ fine: 6, coarse: 20 }}
-      >
-        {paneOrder.flatMap((paneId) => {
-          const index = visiblePaneOrder.indexOf(paneId);
-          if (index < 0) {
-            return [];
-          }
-          return [
-            ...(index > 0
-              ? [
-                  <Separator
-                    key={`separator-${paneId}`}
-                    id={`workspace-${visiblePaneOrder[index - 1]}-${paneId}`}
-                    className="workspace-dock-separator"
-                  />,
-                ]
-              : []),
-            renderDockPane(paneId, index),
-          ];
-        })}
-      </Group>
+      <div className="workspace-dock-scroll" ref={dockScrollRef}>
+        <Group
+          className="workspace-dock-group"
+          style={{ minWidth: dockMinWidth }}
+          orientation="horizontal"
+          defaultLayout={effectiveDockLayout}
+          onLayoutChanged={(nextLayout, meta) => {
+            if (startupMode || isUnusableConversationLayoutShare(nextLayout.conversation)) {
+              return;
+            }
+            persistedDockLayout.onLayoutChanged(nextLayout, meta);
+          }}
+          resizeTargetMinimumSize={{ fine: 6, coarse: 20 }}
+        >
+          {paneOrder.flatMap((paneId) => {
+            const index = visiblePaneOrder.indexOf(paneId);
+            if (index < 0) {
+              return [];
+            }
+            return [
+              ...(index > 0
+                ? [
+                    <Separator
+                      key={`separator-${paneId}`}
+                      id={`workspace-${visiblePaneOrder[index - 1]}-${paneId}`}
+                      className="workspace-dock-separator"
+                    />,
+                  ]
+                : []),
+              renderDockPane(paneId, index),
+            ];
+          })}
+        </Group>
+      </div>
       {showAssetsFloating && (
         <FloatingWindow
           panelId="assets"

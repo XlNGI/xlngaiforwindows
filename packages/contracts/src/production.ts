@@ -1,5 +1,5 @@
 import type { AdapterParameters, SceneInfo, SceneMediaResolveResult } from './index.js';
-import type { ProductionAuthoringIR } from './project-ir.js';
+import type { ProductionAuthoringIR, ProductionTiming } from './project-ir.js';
 
 export interface ProductionTarget {
   kind: 'character' | 'setting' | 'scene' | 'shot';
@@ -54,6 +54,7 @@ export interface ProductionTimelineEntry {
   startSeconds?: number;
   endSeconds?: number;
   estimatedDurationSeconds?: number;
+  timing?: ProductionTiming;
   prompt: string;
 }
 

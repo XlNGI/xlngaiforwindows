@@ -10,6 +10,8 @@ import {
   fauxToolCall,
   type Context,
 } from '@earendil-works/pi-ai';
+import { AgentSystemToolService } from './agent-system-tool-service.js';
+import { ProjectStructureCompiler } from './structure-compiler.js';
 import { AgentProviderLoopService } from './agent-provider-loop-service.js';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
@@ -17,6 +19,7 @@ import { DocumentWorkflowService } from './document-workflow-service.js';
 import { GenerationService } from './generation-service.js';
 import { NovelService } from './novel-service.js';
 import { PiConversationRuntime } from './pi-conversation-runtime.js';
+import { AgentContextManager } from './agent-context-manager.js';
 import { ProjectService } from './project-service.js';
 import { TaskPlanService } from './task-plan-service.js';
 
@@ -27,7 +30,7 @@ function toolResult<T>(context: Context, toolName: string): T {
   if (!message || message.role !== 'toolResult') {
     throw new Error(`Missing ${toolName} result in the model context.`);
   }
-  expect(message.isError).toBe(false);
+  expect(message.isError, JSON.stringify(message.content)).toBe(false);
   const text = message.content
     .filter((item) => item.type === 'text')
     .map((item) => item.text)
@@ -101,7 +104,25 @@ describe('Agent library retrieval integration', () => {
         providerProfileId: 'profile',
         modelId: 'model',
       });
-      const loop = new AgentProviderLoopService(projects, workflow);
+      const system = new AgentSystemToolService(
+        projects,
+        content,
+        {} as never,
+        { listProfiles: () => [], listModels: () => [] },
+        undefined,
+        workflow,
+        undefined,
+        new ProjectStructureCompiler(),
+      );
+      const loop = new AgentProviderLoopService(
+        projects,
+        workflow,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        system,
+      );
       const agent = loop.prepare(prepared.stream, prompt);
       generations.configureAgentTools(prepared.stream, agent.tools);
       const initial = generations.runtime(prepared.stream);
@@ -121,6 +142,7 @@ describe('Agent library retrieval integration', () => {
       let searched: LibrarySearchResult | undefined;
       let read: LibraryReadResult | undefined;
       let writtenDocumentId: string | undefined;
+      let writtenTaskId: string | undefined;
       faux.setResponses([
         fauxAssistantMessage(
           [
@@ -172,7 +194,34 @@ describe('Agent library retrieval integration', () => {
           );
         },
         (context) => {
-          read = toolResult<LibraryReadResult>(context, 'library.read');
+          const receipt = toolResult<{ externalized: boolean; resultId: string }>(
+            context,
+            'library.read',
+          );
+          expect(receipt.externalized).toBe(true);
+          expect(JSON.stringify(receipt)).not.toContain(ending);
+          return fauxAssistantMessage(
+            [
+              fauxToolCall(
+                'conversation.task.checkpoint',
+                {
+                  operation: 'result',
+                  resultId: receipt.resultId,
+                  resultLimit: 16384,
+                },
+                { id: 'read-complete-result' },
+              ),
+            ],
+            { stopReason: 'toolUse', responseId: 'read-complete-result' },
+          );
+        },
+        (context) => {
+          const page = toolResult<{ content: string; nextOffset: null }>(
+            context,
+            'conversation.task.checkpoint',
+          );
+          expect(page.nextOffset).toBeNull();
+          read = JSON.parse(page.content) as LibraryReadResult;
           expect(read).toMatchObject({
             status: 'read',
             sourceId: firstChapter.id,
@@ -208,12 +257,16 @@ describe('Agent library retrieval integration', () => {
           );
         },
         (context) => {
-          const result = toolResult<{ status: string; documentId: string }>(
-            context,
-            'document.create_draft',
-          );
+          const result = toolResult<{
+            status: string;
+            documentId: string;
+            taskId: string;
+            parentTaskId: string;
+          }>(context, 'document.create_draft');
           expect(result.status).toBe('draft_created');
+          expect(result.parentTaskId).toBe(agent.taskId);
           writtenDocumentId = result.documentId;
+          writtenTaskId = result.taskId;
           return fauxAssistantMessage('已根据第一章草稿保存镜头提示词，包含交信结尾。');
         },
       ]);
@@ -221,6 +274,8 @@ describe('Agent library retrieval integration', () => {
         generation: generations,
         plans: new TaskPlanService(projects),
         providerTools: loop,
+        createContextManager: (identity, taskId, prompt) =>
+          new AgentContextManager(projects, identity, taskId, prompt),
         streamFn: faux.streamSimple,
         createGateway: () => {
           throw new Error('A single document task does not require a structured plan.');
@@ -235,20 +290,43 @@ describe('Agent library retrieval integration', () => {
       });
       await runtime.wait(prepared.stream.generationId);
 
-      expect(generations.get(prepared.stream.generationId).status).toBe('complete');
-      expect(faux.state.callCount).toBe(5);
+      expect(
+        generations.get(prepared.stream.generationId).status,
+        generations.get(prepared.stream.generationId).error,
+      ).toBe('complete');
+      expect(faux.state.callCount).toBe(6);
       expect(searched?.sources[0]?.sourceId).toBe(firstChapter.id);
       expect(read?.content).toContain(ending);
       expect(writtenDocumentId).toBeDefined();
+      expect(writtenTaskId).toBeDefined();
+      expect(writtenTaskId).not.toBe(agent.taskId);
       const draft = workflow.getDocument(writtenDocumentId!);
       expect(draft.currentVersion).toMatchObject({
         authorType: 'agent',
-        sourceTaskId: agent.taskId,
+        sourceTaskId: writtenTaskId,
       });
       expect(draft.currentVersion?.contentMarkdown).toContain(opening);
       expect(draft.currentVersion?.contentMarkdown).toContain(ending);
       expect(draft.currentVersion?.contentMarkdown).not.toContain(thirdChapterText);
+      const child = workflow.getTask({ taskId: writtenTaskId! });
+      expect(child.task.status).toBe('waiting_review');
+      expect(child.documents).toEqual([
+        expect.objectContaining({
+          documentId: draft.id,
+          documentVersionId: draft.currentVersion?.id,
+        }),
+      ]);
+      expect(
+        projects.access(false, (database) =>
+          database
+            .prepare(
+              "SELECT json_extract(request_snapshot_json, '$.parentTaskId') AS parentTaskId FROM agent_tasks WHERE id = ?",
+            )
+            .get(writtenTaskId),
+        ),
+      ).toEqual({ parentTaskId: agent.taskId });
       const task = workflow.getTask({ taskId: agent.taskId });
+      expect(task.task.status).toBe('completed');
       expect(task.documents).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

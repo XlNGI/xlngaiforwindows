@@ -110,7 +110,8 @@ describe('scene cast and audio storage', () => {
   it('migrates only explicit valid legacy IDs and dialogue speakers on repeated upgrade', () => {
     const db = fixture();
     try {
-      db.exec(`DROP TRIGGER scene_dialogue_insert_valid;DROP TRIGGER scene_dialogue_update_valid;
+      db.exec(`DROP TRIGGER agent_changes_scenes_update;
+        DROP TRIGGER scene_dialogue_insert_valid;DROP TRIGGER scene_dialogue_update_valid;
         DROP TABLE scene_character_bindings;ALTER TABLE scenes DROP COLUMN dialogue_audio_id;
         ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json;
         DELETE FROM schema_migrations WHERE version>=46;`);

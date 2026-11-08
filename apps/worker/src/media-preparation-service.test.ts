@@ -10,7 +10,11 @@ import { AdapterService } from './adapter-service.js';
 import { AppSettingsService } from './app-settings-service.js';
 import { ContentService } from './content-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
-import { MediaPreparationService, resolveMediaProviderRoute } from './media-preparation-service.js';
+import {
+  MediaPreparationService,
+  parseMediaPrepareArguments,
+  resolveMediaProviderRoute,
+} from './media-preparation-service.js';
 import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { ProductionService } from './production-service.js';
@@ -110,6 +114,125 @@ async function setup(attachments: LlmInputAttachment[] = []) {
 }
 
 describe('MediaPreparationService', () => {
+  it.each(['image', 'video'] as const)(
+    'accepts a verified compressed JPEG with the original PNG label for %s without relaxing attachment binding',
+    async (kind) => {
+      const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 1]);
+      const jpeg = `data:image/jpeg;base64,${bytes.toString('base64')}`;
+      const attachment = { name: 'original.png', mimeType: 'image/png', dataUrl: jpeg };
+      const f = await setup([attachment]);
+      const prompt = '保持全部手动要求和参考图，抽刀时定格。';
+      const context = f.service.selectionContext(kind, { prompt }, f.identity);
+      expect(context.arguments.prompt).toBe(prompt);
+      expect(context.inputAttachmentCount).toBe(1);
+      expect(context.inputAttachments).toEqual([
+        { contentType: 'image/jpeg', sha256: createHash('sha256').update(bytes).digest('hex') },
+      ]);
+      const candidate = context.candidates.find((item) =>
+        item.adapters.some((adapter) => adapter.parameterSchema.properties.images),
+      )!;
+      const adapter = candidate.adapters.find((item) => item.parameterSchema.properties.images)!;
+      const selection = {
+        providerProfileId: candidate.providerProfileId,
+        modelId: candidate.modelId,
+        adapterKey: adapter.key,
+        parameters: { images: [jpeg] },
+      };
+      expect(() =>
+        f.service.prepareSelected(
+          context,
+          { ...selection, parameters: { images: [unboundPng] } },
+          f.identity,
+        ),
+      ).toThrow('not one of the attachments frozen');
+      const draft = f.service.prepareSelected(context, selection, f.identity);
+      expect(draft.normalizedParameters.prompt).toBe(prompt);
+      const job = f.projectsService.access(false, (db) =>
+        createRepositories(db).jobs.get(draft.draftId)!,
+      );
+      const snapshot = JSON.parse(job.taskSnapshotJson!) as {
+        inputs: Array<{ handle: string; contentType: string }>;
+      };
+      expect(snapshot.inputs).toHaveLength(1);
+      expect(snapshot.inputs[0]!.contentType).toBe('image/jpeg');
+      expect(
+        readFileSync(join(f.projectsService.current()!.rootPath, snapshot.inputs[0]!.handle)),
+      ).toEqual(bytes);
+      expect(attachment).toEqual({ name: 'original.png', mimeType: 'image/png', dataUrl: jpeg });
+      expect(job.providerTaskId).toBeUndefined();
+    },
+  );
+
+  it.each([
+    'data:image/png;base64,/9j/',
+    'data:image/jpeg;base64,iVBORw0KGgo=',
+    'data:image/jpeg;base64,YmFk',
+    'data:image/jpeg;base64,%%%',
+  ])(
+    'rejects invalid encoded image content even when the outer MIME matches (%s)',
+    async (dataUrl) => {
+      const f = await setup([{ name: 'reference.png', mimeType: 'image/png', dataUrl }]);
+      expect(() =>
+        f.service.selectionContext('image', { prompt: '保持参考图' }, f.identity),
+      ).toThrow('parameter images is invalid');
+    },
+  );
+
+  it('prepares one composite scene by default but preserves the reviewed count and prompt', async () => {
+    const f = await setup();
+    const doc = new ContentService(f.projectsService).saveDocument({
+      kind: 'scene',
+      title: '旧码头',
+      contentMarkdown: '木栈道与灯塔',
+      scopeType: 'project',
+    });
+    const context = f.service.selectionContext(
+      'image',
+      {
+        prompt: '旧码头',
+        sourceDocumentId: doc.id,
+        parameters: { n: 4 },
+      },
+      f.identity,
+    );
+    expect(context.arguments.assetKind).toBe('scene');
+    expect(context.arguments.parameters.n).toBe(1);
+    expect(context.arguments.prompt).toContain('主图是占画面主要面积');
+    const candidate = context.candidates.find((item) => item.remoteModelId === 'qwen-image')!;
+    const selection = {
+      providerProfileId: candidate.providerProfileId,
+      modelId: candidate.modelId,
+      adapterKey: candidate.adapters[0]!.key,
+      parameters: {},
+    };
+    const initial = f.service.prepareSelected(context, selection, f.identity);
+    const reviewed = f.service.prepareReviewedSelection(
+      context,
+      {
+        ...selection,
+        parameters: { prompt: '用户审核：同版式随机变体', n: 2 },
+      },
+      f.identity,
+    );
+    const snapshots = [initial, reviewed].map((draft) =>
+      f.projectsService.access(
+        false,
+        (db) =>
+          JSON.parse(createRepositories(db).jobs.get(draft.draftId)!.taskSnapshotJson!) as {
+            parameters: { prompt: string; n: number };
+          },
+      ),
+    );
+    expect(snapshots[0]!.parameters.n).toBe(1);
+    expect(snapshots[0]!.parameters.prompt).toContain('一张复合参考图');
+    expect(snapshots[1]!.parameters).toMatchObject({ n: 2, prompt: '用户审核：同版式随机变体' });
+  });
+  it('preserves long Agent-authored prompts through media preparation parsing', () => {
+    const prompt = '当前会话要求：'.padEnd(6_000, '固定约束。');
+
+    expect(parseMediaPrepareArguments('image', { prompt }).prompt).toBe(prompt);
+  });
+
   it('keeps reference descriptions and timed video prose intact when preparing a local video draft', async () => {
     const f = await setup([{ name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng }]);
     const prompt = `输入图片说明：本次输入一张图，图1为本段首帧及人物外观参考。
@@ -244,6 +367,53 @@ describe('MediaPreparationService', () => {
         db.prepare('SELECT count(*) AS count FROM generation_jobs').get(),
       ),
     ).toEqual({ count: 0 });
+  });
+
+  it('prepares a directly edited shot form from API-valid parameters without rerunning fill', async () => {
+    const f = await setup();
+    const content = new ContentService(f.projectsService);
+    const scene = content.saveScene({ title: '空镜场次' });
+    const shot = content.saveShot({ sceneId: scene.id, title: '手动填写', prompt: '' });
+    const parameters = {
+      prompt: '用户在表单中填写的镜头',
+      duration: 5,
+      aspect_ratio: '16:9',
+      resolution: '720p',
+      audio: true,
+    };
+    const adapterKey = 'TEXT_TO_VIDEO:vidu:viduq3-pro:v2';
+    const job = f.service.prepareVideo({
+      shotId: shot.id,
+      adapterKey,
+      parameters,
+      providerRegion: 'global',
+    });
+    const snapshot = f.projectsService.access(
+      false,
+      (db) =>
+        JSON.parse(
+          (
+            db.prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?').get(job.id) as {
+              task_snapshot_json: string;
+            }
+          ).task_snapshot_json,
+        ) as { parameters: typeof parameters; productionSource?: unknown },
+    );
+    expect(snapshot.parameters).toEqual(parameters);
+    expect(snapshot.productionSource).toBeUndefined();
+    expect(() =>
+      f.service.prepareVideo({
+        shotId: shot.id,
+        adapterKey,
+        parameters: { ...parameters, duration: 9999 },
+        providerRegion: 'global',
+      }),
+    ).toThrow('Video generation parameters are invalid');
+    expect(
+      f.projectsService.access(false, (db) =>
+        db.prepare('SELECT count(*) AS count FROM generation_jobs').get(),
+      ),
+    ).toEqual({ count: 1 });
   });
 
   it('uses the production source and authored duration when Agent prepares an existing shot', async () => {
@@ -615,6 +785,54 @@ describe('MediaPreparationService', () => {
     expect(existsSync(join(projectsService.current()!.rootPath, inputHandle))).toBe(true);
   });
 
+  it('freezes local files chosen in a reviewed UI decision without importing them or relaxing Agent inputs', async () => {
+    const { projectsService, service, identity } = await setup([
+      { name: 'original.png', mimeType: 'image/png', dataUrl: tinyPng },
+    ]);
+    const context = service.selectionContext(
+      'video',
+      { prompt: 'Animate the chosen picture' },
+      identity,
+    );
+    const candidate = context.candidates[0]!;
+    const adapter = candidate.adapters[0]!;
+    const selection = {
+      providerProfileId: candidate.providerProfileId,
+      modelId: candidate.modelId,
+      adapterKey: adapter.key,
+      parameters: { images: [unboundPng] },
+    };
+    expect(() => service.prepareSelected(context, selection, identity)).toThrow(
+      'not one of the attachments frozen',
+    );
+    expect(() =>
+      service.prepareReviewedSelection(
+        context,
+        {
+          ...selection,
+          parameters: { images: ['data:image/png;base64,YmFk'] },
+        },
+        identity,
+      ),
+    ).toThrow('parameter images is invalid');
+    const draft = service.prepareReviewedSelection(context, selection, identity);
+    expect(draft.normalizedParameters.images).toEqual(['attachment://omitted']);
+    expect(JSON.stringify(draft)).not.toContain('base64');
+    const saved = projectsService.access(false, (database) => ({
+      assets: database.prepare('SELECT COUNT(*) AS count FROM assets').get(),
+      job: database
+        .prepare('SELECT request_json,task_snapshot_json FROM generation_jobs WHERE id=?')
+        .get(draft.draftId),
+    }));
+    expect(saved.assets).toEqual({ count: 0 });
+    expect(JSON.stringify(saved.job)).not.toContain('base64');
+    expect(JSON.stringify(saved.job)).toContain('controlled_temporary_file');
+    expect(context.inputAttachments).toHaveLength(1);
+    expect(context.inputAttachments[0]?.sha256).not.toBe(
+      createHash('sha256').update(unboundPngBytes).digest('hex'),
+    );
+  });
+
   it('materializes direct UI Data URLs under the Native-controlled shared root', async () => {
     const { directory, projectsService, service } = await setup();
     const nativeRoot = join(directory, 'native-root');
@@ -826,6 +1044,7 @@ describe('MediaPreparationService', () => {
 
   it('only accepts normalized official media Provider routes', async () => {
     const { settings, profile } = await setup();
+    const selectedProfile = settings.getProfile(profile.id)!;
     expect(resolveMediaProviderRoute(settings.getProfile(profile.id)!)).toEqual({
       providerType: 'unicompapi',
       providerRegion: 'unicompapi',
@@ -833,9 +1052,172 @@ describe('MediaPreparationService', () => {
     });
     expect(
       resolveMediaProviderRoute({
-        ...settings.getProfile(profile.id)!,
+        ...selectedProfile,
+        category: 'llm',
+        providerType: 'openai',
+        accessType: 'official',
+        protocol: 'openai-responses',
+        baseUrl: 'https://api.openai.com/v1',
+      }),
+    ).toEqual({
+      providerType: 'openai',
+      providerRegion: 'global',
+      baseUrlCategory: 'official-openai',
+    });
+    expect(
+      resolveMediaProviderRoute({
+        ...selectedProfile,
+        category: 'llm',
+        providerType: 'openai',
+        accessType: 'official',
+        protocol: 'openai-responses',
+        baseUrl: 'https://proxy.example/v1',
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveMediaProviderRoute({
+        ...selectedProfile,
         accessType: 'custom',
       }),
     ).toBeUndefined();
+  });
+
+  it('offers custom OpenAI Images to enabled models without a model binding', async () => {
+    const f = await setup();
+    const customProfile = f.settings.createProfile({
+      name: 'Custom Images',
+      category: 'llm',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-responses',
+      baseUrl: 'https://images.example/v1',
+    });
+    f.settings.completeConnectionTest({
+      profileId: customProfile.id,
+      status: 'ready',
+      models: [{ id: 'vendor-image-model' }, { id: 'vendor-edit-model' }],
+    });
+    const models = f.settings.listModels(customProfile.id);
+    const model = models.find((item) => item.remoteModelId === 'vendor-image-model');
+    const editModel = models.find((item) => item.remoteModelId === 'vendor-edit-model');
+    if (!model || !editModel) throw new Error('expected both custom image models');
+    f.settings.updateModel({
+      profileId: customProfile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: { ...model.capabilities, imageGeneration: true },
+      enabled: true,
+    });
+    f.settings.updateModel({
+      profileId: customProfile.id,
+      modelId: editModel.id,
+      displayName: editModel.displayName,
+      capabilities: { ...editModel.capabilities, imageEditing: true },
+      enabled: true,
+    });
+    expect(
+      f.settings.listModels(customProfile.id).map((item) => item.parameterTemplateKey),
+    ).toEqual([undefined, undefined]);
+
+    const context = f.service.selectionContext('image', { prompt: 'A red fox' }, f.identity);
+    expect(
+      context.candidates
+        .filter((item) => item.providerProfileId === customProfile.id)
+        .map((item) => item.remoteModelId),
+    ).toEqual(['vendor-image-model']);
+    const candidate = context.candidates.find(
+      (item) => item.providerProfileId === customProfile.id,
+    )!;
+    const adapter = candidate.adapters.find(
+      (item) => item.key === 'TEXT_TO_IMAGE:custom:openai-images:v1',
+    )!;
+    expect(candidate.remoteModelId).toBe('vendor-image-model');
+
+    const draft = f.service.prepareSelected(
+      context,
+      {
+        providerProfileId: customProfile.id,
+        modelId: model.id,
+        adapterKey: adapter.key,
+        parameters: { prompt: 'A red fox' },
+      },
+      f.identity,
+    );
+    expect(draft.mediaModelSelection).toMatchObject({
+      providerBaseUrl: 'https://images.example/v1',
+      providerBaseUrlCategory: 'custom-openai-compatible',
+      providerRegion: 'global',
+    });
+    expect(draft.normalizedParameters).toMatchObject({ prompt: 'A red fox' });
+  });
+
+  it('offers custom OpenAI-compatible video models without a model binding', async () => {
+    const f = await setup();
+    const customProfile = f.settings.createProfile({
+      name: 'Custom Video',
+      category: 'multi',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://video.example/v1',
+    });
+    f.settings.completeConnectionTest({
+      profileId: customProfile.id,
+      status: 'ready',
+      models: [{ id: 'vendor-video-model' }],
+    });
+    const model = f.settings.listModels(customProfile.id)[0];
+    if (!model) throw new Error('expected a synchronized custom video model');
+    f.settings.updateModel({
+      profileId: customProfile.id,
+      modelId: model.id,
+      displayName: model.displayName,
+      capabilities: { ...model.capabilities, videoGeneration: true },
+      enabled: true,
+    });
+
+    const textContext = f.service.selectionContext(
+      'video',
+      { prompt: 'A slow camera move' },
+      f.identity,
+    );
+    const candidate = textContext.candidates.find(
+      (item) => item.providerProfileId === customProfile.id,
+    );
+    expect(candidate?.remoteModelId).toBe('vendor-video-model');
+    const textAdapter = candidate?.adapters.find(
+      (item) => item.key === 'TEXT_TO_VIDEO:custom:openai-compatible-video:v1',
+    );
+    expect(textAdapter).toBeDefined();
+
+    const imageContext = f.service.selectionContext(
+      'video',
+      {
+        prompt: 'Animate the reference',
+        parameters: { images: ['https://images.example/reference.png'] },
+      },
+      f.identity,
+    );
+    expect(
+      imageContext.candidates
+        .find((item) => item.providerProfileId === customProfile.id)
+        ?.adapters.map((item) => item.key),
+    ).toContain('IMAGE_TO_VIDEO:custom:openai-compatible-video:v1');
+
+    const draft = f.service.prepareSelected(
+      textContext,
+      {
+        providerProfileId: customProfile.id,
+        modelId: model.id,
+        adapterKey: textAdapter!.key,
+        parameters: { prompt: 'A slow camera move', duration: 8 },
+      },
+      f.identity,
+    );
+    expect(draft.mediaModelSelection).toMatchObject({
+      providerBaseUrl: 'https://video.example/v1',
+      providerBaseUrlCategory: 'custom-openai-compatible',
+      remoteModelId: 'vendor-video-model',
+    });
   });
 });

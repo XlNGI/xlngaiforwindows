@@ -49,6 +49,7 @@ export interface InfrastructureCommandServices {
   dubbingService?: DubbingService;
   fileTaskService?: FileTaskService;
   shotContinuityService?: ShotContinuityService;
+  resumeContextTasks?: () => void;
 }
 
 export interface InfrastructureCommandResult {
@@ -77,7 +78,9 @@ export async function resetRuntime(services: InfrastructureCommandServices): Pro
 export function recoverRuntime(services: InfrastructureCommandServices): void {
   if (services.projectService.current()?.mode !== 'read-write') return;
   services.fileTaskService?.recover();
-  services.partialArtifactService.recoverInterrupted();
+  services.partialArtifactService.recoverInterrupted(
+    services.generationService.recoverableContextTasks().map((task) => task.generationId),
+  );
   services.generationService.recoverInterrupted();
   services.agentProviderLoopService.recoverInterrupted();
   services.agentOrchestrationService.recoverInterruptedPreparations();
@@ -89,6 +92,7 @@ export function recoverRuntime(services: InfrastructureCommandServices): void {
   services.partialArtifactService.expire();
   services.markdownExportService.reconcile();
   services.maintenanceService.cleanupResearchCache();
+  services.resumeContextTasks?.();
 }
 
 export async function executeInfrastructureCommand(
@@ -126,6 +130,11 @@ export async function executeInfrastructureCommand(
       return { handled: true, result: { closed: true } };
     case 'project.current':
       return { handled: true, result: services.projectService.current() ?? null };
+    case 'project.rename':
+      return {
+        handled: true,
+        result: services.projectService.rename(requireString(params, 'name')),
+      };
     case 'project.recent':
       return { handled: true, result: services.projectService.listRecent() };
     case 'project.integrity': {

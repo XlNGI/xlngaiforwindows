@@ -91,7 +91,18 @@ describe('shot prompt revision', () => {
       changedCount: 1,
       paidRequests: 0,
     });
-    expect(f.tools.execute('scene.update_shot_prompts', args, f.identity)).toEqual(result);
+    const replay = f.tools.execute('scene.update_shot_prompts', args, f.identity);
+    const replayExecution = replay.execution as Record<string, unknown>;
+    expect(replayExecution.instruction).toContain('not current resource state');
+    expect(replay).toEqual({
+      ...result,
+      execution: {
+        ...(result.execution as object),
+        replayed: true,
+        receiptScope: 'historical_commit',
+        instruction: replayExecution.instruction,
+      },
+    });
     const shots = f.content.listShots(f.scene.id);
     expect(shots).toHaveLength(1);
     const saved = shots[0]!;

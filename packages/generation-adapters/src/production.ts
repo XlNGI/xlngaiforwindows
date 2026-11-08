@@ -28,6 +28,10 @@ export function resolveProductionDuration(
   const property = structuredClone(schema);
   for (const key of ['title', 'description', 'default']) delete property[key];
   const validate = new Ajv2020({ strict: false }).compile(property);
+  const accepts = (value: number) => validate(schema.type === 'string' ? String(value) : value);
+  if (accepts(seconds)) return seconds;
+  const minimum = Number(schema.minimum);
+  if (Number.isFinite(minimum) && minimum >= seconds && accepts(minimum)) return minimum;
   const choices = schema.enum
     ? schema.enum
         .map(Number)
@@ -42,7 +46,7 @@ export function resolveProductionDuration(
         },
         (_, index) => Math.ceil(seconds) + index,
       );
-  return choices.find((value) => validate(schema.type === 'string' ? String(value) : value));
+  return choices.find(accepts);
 }
 
 /** Compile only the authored prompt and explicit timing/provider fields. */
@@ -167,6 +171,13 @@ export function compileProductionParameters(
         message: `Provider 参数 ${field} 不符合所选模型规则：${ajv.errorsText(validate.errors)}`,
       });
   }
+
+  const requestedDuration = Number(parameters.duration);
+  if (video && storyDuration !== undefined && requestedDuration > storyDuration)
+    notices.push({
+      code: 'MODEL_DURATION_PADDING',
+      message: `内容预计 ${storyDuration} 秒，当前模型请求 ${requestedDuration} 秒。多出的 ${Number((requestedDuration - storyDuration).toFixed(6))} 秒是请求余量；保持原动作节奏，生成后检查并选取完整、自然的片段。`,
+    });
 
   return { parameters, issues, notices };
 }

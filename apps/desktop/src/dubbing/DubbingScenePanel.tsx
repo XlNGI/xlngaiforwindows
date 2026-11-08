@@ -20,6 +20,8 @@ type Props = {
   sceneId: string;
   documents: DocumentSummary[];
   writable: boolean;
+  /** Open the full editor immediately when this panel is used as a production form. */
+  expanded?: boolean;
   onOpenAsset?: (assetId: string) => void;
   characterDocumentIds?: string[];
 };
@@ -87,13 +89,14 @@ function DubbingSceneContent({
   sceneId,
   documents,
   writable,
+  expanded: initiallyExpanded = false,
   onOpenAsset,
   characterDocumentIds,
 }: Props) {
   const callWorker = projectWorker();
   const active = useRef(true);
   const loadSequence = useRef(0);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const [snapshot, setSnapshot] = useState<DubbingSceneSnapshot>();
   const [runtime, setRuntime] = useState<RuntimeInfo>();
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);

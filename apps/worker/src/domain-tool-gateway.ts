@@ -12,7 +12,7 @@ import { ChangeSetService } from './change-set-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import { TaskPlanService } from './task-plan-service.js';
-import { createRepositories } from '@ai-video/persistence';
+import { AgentExecutionStore, createRepositories } from '@ai-video/persistence';
 import type { AgentToolCallRecord } from '@ai-video/domain';
 import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { inferDocumentKindFromDraft } from './document-kind.js';
@@ -30,23 +30,12 @@ export interface PiToolIdentity {
 
 type ToolArguments = Record<string, unknown>;
 
-class DuplicatePiToolCall extends Error {
-  constructor(readonly resultJson: string) {
-    super('This Pi tool call has already completed.');
-  }
-}
-
 /**
  * The only bridge from Pi tools to application services. Tool schemas are
  * copied from the Worker-owned grants and model arguments never provide task,
  * project, chapter, document, or filesystem authority.
  */
 export class DomainToolGateway {
-  private validationFailures = 0;
-  assertRepairBudget(): void {
-    if (this.validationFailures >= 3)
-      throw new Error('TOOL_REPAIR_LIMIT: 参数校验修复达到3次上限，请缩小提交。');
-  }
   constructor(
     private readonly projects: ProjectService,
     private readonly plans: TaskPlanService,
@@ -71,7 +60,6 @@ export class DomainToolGateway {
       executionMode: unifiedAgentToolRegistry.executionMode(definition.name),
       prepareArguments: (args: unknown) => {
         try {
-          this.assertRepairBudget();
           const validated: unknown = validateToolArguments(definition, {
             type: 'toolCall',
             id: 'validation',
@@ -80,7 +68,6 @@ export class DomainToolGateway {
           });
           return validated;
         } catch (error) {
-          this.validationFailures += 1;
           const reason = boundedValidationError(error);
           this.projects.access(true, (db, project) => {
             if (
@@ -116,23 +103,72 @@ export class DomainToolGateway {
     grant: ConversationTaskToolGrant,
     args: ToolArguments,
   ): Promise<AgentToolResult<DomainToolResultV1 | Record<string, unknown>>> {
+    // Replays still require a live task and current project authority.
+    this.projects.access(false, (db, project) => {
+      if (
+        project.id !== this.identity.projectId ||
+        this.projects.currentSessionId() !== this.identity.projectSessionId
+      )
+        throw new Error('Pi execution does not belong to the current project session.');
+      const task = db
+        .prepare('SELECT status FROM agent_tasks WHERE id=? AND project_id=? AND conversation_id=?')
+        .get(this.identity.taskId, project.id, this.identity.conversationId) as
+        { status: string } | undefined;
+      if (!task || task.status !== 'running') throw new Error('Pi task is no longer running.');
+      if (grant.deliverableId) {
+        const bound = db
+          .prepare(
+            `SELECT d.kind,p.status FROM agent_task_deliverables d JOIN agent_task_plans p ON p.id=d.plan_id
+          WHERE d.id=? AND p.task_id=? AND p.project_id=?`,
+          )
+          .get(grant.deliverableId, this.identity.taskId, project.id) as
+          { kind: string; status: string } | undefined;
+        if (!bound || bound.kind !== grant.deliverableKind || bound.status !== 'active')
+          throw new Error('Pi deliverable grant is no longer active.');
+      }
+    });
     const call = this.beginToolCall(toolCallId, grant.tool.name, args);
     try {
-      const result = await this.executeUnlogged(grant, args);
-      this.finishToolCall(call, result);
-      this.validationFailures = 0;
-      return result;
+      return await Promise.resolve(
+        this.projects.access(true, (db, project) =>
+          db.transaction(() => {
+            if (
+              project.id !== this.identity.projectId ||
+              this.projects.currentSessionId() !== this.identity.projectSessionId
+            )
+              throw new Error('Pi execution does not belong to the current project session.');
+            if (call.status === 'succeeded' && call.resultSummaryJson)
+              return resultText(JSON.parse(call.resultSummaryJson) as Record<string, unknown>);
+            let result: AgentToolResult<DomainToolResultV1 | Record<string, unknown>>;
+            if (grant.deliverableId) {
+              const output = new AgentExecutionStore(db).execute(
+                {
+                  projectId: project.id,
+                  taskId: this.identity.taskId,
+                  operationKey: `deliverable:${grant.deliverableId}`,
+                  toolName: grant.tool.name,
+                },
+                args,
+                () => this.executeUnlogged(grant, args).details,
+                (value) => unifiedAgentToolRegistry.serializeResult(value),
+              );
+              result = resultText(JSON.parse(output) as Record<string, unknown>);
+            } else result = this.executeUnlogged(grant, args);
+            this.finishToolCall(call, result);
+            return result;
+          })(),
+        ),
+      );
     } catch (error) {
-      if (!(error instanceof DuplicatePiToolCall)) this.failToolCall(call, error);
+      this.failToolCall(call, error);
       throw error;
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
-  private async executeUnlogged(
+  private executeUnlogged(
     grant: ConversationTaskToolGrant,
     args: ToolArguments,
-  ): Promise<AgentToolResult<DomainToolResultV1 | Record<string, unknown>>> {
+  ): AgentToolResult<DomainToolResultV1 | Record<string, unknown>> {
     switch (grant.tool.name) {
       case 'task.plan.submit': {
         const plan = this.plans.submitPlanOnly({
@@ -189,7 +225,9 @@ export class DomainToolGateway {
     );
     if (existing) {
       if (existing.status === 'succeeded' && existing.resultSummaryJson) {
-        throw new DuplicatePiToolCall(existing.resultSummaryJson);
+        if (existing.normalizedArgumentsHash !== hashAgentToolArguments(args))
+          throw new Error('Pi call identity was reused with different arguments.');
+        return existing;
       }
       throw new Error('This Pi tool call is already executing or has already failed.');
     }
@@ -240,7 +278,7 @@ export class DomainToolGateway {
       createRepositories(database).agentToolCalls.save({
         ...call,
         status: 'failed',
-        errorCode: error instanceof DuplicatePiToolCall ? 'PI_TOOL_DUPLICATE' : 'PI_TOOL_FAILED',
+        errorCode: 'PI_TOOL_FAILED',
         errorMessage: message.slice(0, 500),
         resultSummaryJson: JSON.stringify({ status: 'failed', retryable: false }),
         completedAt: new Date().toISOString(),
@@ -370,7 +408,7 @@ function documentKindFor(
   requested: unknown,
   title: string,
   contentMarkdown: string,
-): 'outline' | 'plan' | 'character' | 'scene' | 'prop' | 'storyboard' | 'note' {
+): 'outline' | 'plan' | 'constraint' | 'character' | 'scene' | 'prop' | 'storyboard' | 'note' {
   if (kind === 'episode-outline') return 'plan';
   if (kind === 'character-prompts') return 'character';
   if (kind === 'scene-prompts') return 'scene';
@@ -378,6 +416,7 @@ function documentKindFor(
   if (
     requested === 'outline' ||
     requested === 'plan' ||
+    requested === 'constraint' ||
     requested === 'character' ||
     requested === 'scene' ||
     requested === 'prop' ||

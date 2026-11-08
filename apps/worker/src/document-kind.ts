@@ -2,7 +2,7 @@ import type { DocumentKind } from '@ai-video/contracts';
 
 /**
  * Infer the project-document page for an Agent draft when the model omits
- * documentKind. Workspace kinds appear under 大纲/计划/角色/场景/道具 filters;
+ * documentKind. Workspace kinds appear under 大纲/计划/约束/角色/场景/道具 filters;
  * unmatched drafts stay `note` so novel chapters and private notes do not
  * flood the project-document list.
  */
@@ -16,6 +16,9 @@ export function inferDocumentKindFromDraft(title: string, contentMarkdown = ''):
   }
   if (/(场景提示词|场景设定|scene bible|scene prompt)/iu.test(text)) {
     return 'scene';
+  }
+  if (/(剧情约束|约束文档|创作约束|写作约束|story constraint|constraint document)/iu.test(text)) {
+    return 'constraint';
   }
   if (/(?:第\s*\d+\s*集|本集|整体把控|制作计划|项目计划|episode overview)/iu.test(text)) {
     return 'plan';

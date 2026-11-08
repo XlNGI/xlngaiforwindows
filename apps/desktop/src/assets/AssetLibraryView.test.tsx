@@ -11,11 +11,79 @@ vi.mock('../worker-client', () => ({
   callWorker: (...args: unknown[]): unknown => callWorker(...args) as unknown,
 }));
 
+async function selectableMedia() {
+  const assets = [0, 1, 2, 3].map((index) => ({
+    id: `media-${index}`,
+    projectId: 'project',
+    kind: index === 0 ? 'generated-image' : 'scene-video',
+    alias: `素材 ${index}`,
+    relativePath: `assets/${index}.${index === 0 ? 'png' : 'mp4'}`,
+    contentHash: `hash-${index}`,
+    sizeBytes: 100,
+    createdAt: '2026-10-28T00:00:00Z',
+  }));
+  callWorker.mockImplementation((method: string, params: { assetId?: string }) => {
+    if (method === 'asset.list') return Promise.resolve(assets);
+    if (method === 'asset.mediaSource')
+      return Promise.resolve({ assetId: params.assetId, path: '/fixture.mp4' });
+    return Promise.resolve([]);
+  });
+  render(<AssetLibraryView writable />);
+  const cards = await within(await screen.findByRole('listbox', { name: '素材' })).findAllByRole(
+    'option',
+  );
+  await waitFor(() => expect(cards[3]!.querySelector('video')).toBeInTheDocument());
+  const selected = () => cards.map((card) => card.getAttribute('aria-selected') === 'true');
+  return { cards, selected };
+}
+
 describe('AssetLibraryView', () => {
   beforeEach(() => {
     cleanup();
     callWorker.mockReset();
     callWorker.mockResolvedValue([]);
+  });
+
+  it('sends selected videos to rough cut or directly exports an XML package', async () => {
+    const video = {
+      id: 'video',
+      projectId: 'p',
+      kind: 'scene-video',
+      alias: '本集视频',
+      relativePath: 'assets/video.mp4',
+      contentHash: 'fixture',
+      sizeBytes: 100,
+      createdAt: '2026-10-28T00:00:00Z',
+    };
+    const job = {
+      id: 'export',
+      status: 'succeeded',
+      format: 'xml',
+      completedClips: 1,
+      totalClips: 1,
+      sequenceVersion: 0,
+    };
+    callWorker.mockImplementation((method: string) =>
+      Promise.resolve(
+        method === 'asset.list'
+          ? [video]
+          : method.startsWith('roughCut.export.')
+            ? job
+            : method === 'asset.mediaSource'
+              ? { path: '/video.mp4', assetId: 'video', contentType: 'video/mp4' }
+              : [],
+      ),
+    );
+    const add = vi.fn();
+    render(<AssetLibraryView writable onAddToRoughCut={add} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: '加入粗剪' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '加入粗剪' }));
+    expect(add).toHaveBeenCalledWith(['video']);
+    fireEvent.click(screen.getByRole('button', { name: '导出到剪辑软件' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('roughCut.export.assets', { assetIds: ['video'] }),
+    );
+    expect(await screen.findByText('XML 剪辑包 · 导出完成')).toBeInTheDocument();
   });
 
   it('opens all assets by default anpnd applies image and video presets', async () => {
@@ -237,6 +305,68 @@ describe('AssetLibraryView', () => {
     );
   });
 
+  it.each(['altKey', 'ctrlKey', 'metaKey'] as const)(
+    'toggles video and image selection with %s on the thumbnail',
+    async (modifier) => {
+      const { cards, selected } = await selectableMedia();
+      const video = cards[1]!.querySelector('video')!;
+      expect(fireEvent.click(video, { [modifier]: true })).toBe(false);
+      expect(selected()).toEqual([true, true, false, false]);
+      fireEvent.click(video, { [modifier]: true });
+      expect(selected()).toEqual([true, false, false, false]);
+      fireEvent.click(cards[2]!.querySelector('video')!);
+      expect(selected()).toEqual([false, false, true, false]);
+      fireEvent.click(cards[0]!.querySelector('img')!, { [modifier]: true });
+      expect(selected()).toEqual([true, false, true, false]);
+    },
+  );
+
+  it('extends and shrinks a video range from the initial selection and checkbox anchor', async () => {
+    const { cards, selected } = await selectableMedia();
+    fireEvent.click(cards[3]!.querySelector('video')!, { shiftKey: true });
+    expect(selected()).toEqual([true, true, true, true]);
+    fireEvent.click(cards[1]!.querySelector('video')!, { shiftKey: true });
+    expect(selected()).toEqual([true, true, false, false]);
+
+    fireEvent.click(cards[3]!.querySelector('video')!);
+    fireEvent.click(cards[1]!.querySelector('video')!, { shiftKey: true });
+    expect(selected()).toEqual([false, true, true, true]);
+    fireEvent.click(cards[0]!.querySelector('img')!, { shiftKey: true, ctrlKey: true });
+    expect(selected()).toEqual([true, true, true, true]);
+
+    fireEvent.click(cards[0]!);
+    fireEvent.click(within(cards[2]!).getByRole('button', { name: '选择' }));
+    fireEvent.click(within(cards[3]!).getByRole('button', { name: '选择' }), { shiftKey: true });
+    expect(selected()).toEqual([false, false, true, true]);
+    fireEvent.click(cards[0]!.querySelector('img')!, { shiftKey: true });
+    expect(selected()).toEqual([true, true, true, false]);
+  });
+
+  it('reserves the native control strip for playback while the video picture selects', async () => {
+    const { cards, selected } = await selectableMedia();
+    const video = cards[2]!.querySelector('video')!;
+    fireEvent.mouseEnter(cards[2]!);
+    vi.spyOn(video, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 200,
+      bottom: 150,
+      width: 200,
+      height: 150,
+      toJSON: () => ({}),
+    });
+    expect(fireEvent.click(video, { clientX: 20, clientY: 140 })).toBe(true);
+    expect(selected()).toEqual([true, false, false, false]);
+    expect(fireEvent.click(video, { clientX: 20, clientY: 140, altKey: true })).toBe(true);
+    expect(selected()).toEqual([true, false, false, false]);
+    expect(fireEvent.click(video, { clientX: 20, clientY: 30, altKey: true })).toBe(false);
+    expect(selected()).toEqual([true, false, true, false]);
+    fireEvent.click(cards[3]!.querySelector('video')!, { shiftKey: true });
+    expect(selected()).toEqual([false, false, true, true]);
+  });
+
   it('creates and assigns a tag from the selected asset inspector input', async () => {
     const asset = {
       id: 'asset-1',
@@ -395,7 +525,7 @@ describe('AssetLibraryView', () => {
     expect(within(dropZone).getByText('asset-2.png')).toBeInTheDocument();
   });
 
-  it('renders complete image previews and inline video playback', async () => {
+  it('renders complete image previews and reveals inline video controls on interaction', async () => {
     const assets = [
       {
         id: 'image-1',
@@ -433,9 +563,22 @@ describe('AssetLibraryView', () => {
     });
     const { container } = render(<AssetLibraryView writable selectedAssetId="video-1" />);
     await waitFor(() => expect(container.querySelector('.asset-thumb img')).toBeInTheDocument());
-    await waitFor(() =>
-      expect(container.querySelector('.asset-thumb video')).toHaveAttribute('controls'),
-    );
+    const videoCard = screen.getByRole('option', { name: '视频素材 2' });
+    const cardVideo = videoCard.querySelector('video');
+    expect(cardVideo).not.toHaveAttribute('controls');
+    Object.defineProperty(cardVideo!, 'duration', { configurable: true, value: 12 });
+    fireEvent.loadedMetadata(cardVideo!);
+    expect(cardVideo).toHaveProperty('currentTime', 1 / 30);
+    fireEvent.mouseEnter(videoCard);
+    expect(cardVideo).toHaveAttribute('controls');
+    fireEvent.mouseLeave(videoCard);
+    expect(cardVideo).not.toHaveAttribute('controls');
+    fireEvent.focus(videoCard);
+    expect(cardVideo).toHaveAttribute('controls');
+    fireEvent.blur(videoCard, { relatedTarget: document.body });
+    expect(cardVideo).not.toHaveAttribute('controls');
+    fireEvent.touchStart(videoCard);
+    expect(cardVideo).toHaveAttribute('controls');
     expect(container.querySelector('.asset-thumb video')).toHaveAttribute(
       'src',
       '/worker-media/video-1',

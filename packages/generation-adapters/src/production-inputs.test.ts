@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   addProductionRoleVoices,
   productionImageSelectionsFromBindings,
+  productionFrameInputConflict,
+  resolveProductionFrameInputs,
   seedProductionInputs,
   supportsProductionAudioUpload,
   type CharacterVoiceReferenceInfo,
@@ -126,7 +128,7 @@ describe('canonical production input projection', () => {
       expect(validateAdapterParameters(adapter.key, changed).valid).toBe(true);
     },
   );
-  it('selects the explicit first frame while preserving the meaning of character boards', () => {
+  it('preserves incompatible flat inputs until the user explicitly keeps the first frame', () => {
     const adapter = getAdapterCatalog().adapters.find(
       (a) => a.contractId === 'cn.happyhorse.1.1.i2v',
     )!;
@@ -135,17 +137,51 @@ describe('canonical production input projection', () => {
       { url: 'asset://location', role: 'scene' as const },
       { url: 'asset://frame', role: 'first-frame' as const },
     ];
-    expect(seedProductionInputs(adapter, {}, '画面', inputs).images).toEqual([
+    const seeded = seedProductionInputs(adapter, {}, '画面', inputs);
+    expect(seeded.images).toEqual([
+      'project-asset://board',
+      'project-asset://location',
       'project-asset://frame',
     ]);
-    expect(
-      validateAdapterParameters(adapter.key, seedProductionInputs(adapter, {}, '画面', inputs))
-        .valid,
-    ).toBe(true);
+    const bindings = [
+      { assetId: 'board', role: 'character' as const },
+      { assetId: 'location', role: 'scene' as const },
+      { assetId: 'frame', role: 'first-frame' as const },
+    ];
+    expect(productionFrameInputConflict(adapter, seeded, bindings)).toMatchObject({
+      canUseReferences: false,
+      firstFrameIndex: 2,
+    });
+    expect(validateAdapterParameters(adapter.key, seeded).valid).toBe(false);
+    const resolved = resolveProductionFrameInputs(adapter, seeded, 'first-frame', bindings);
+    expect(resolved.images).toEqual(['project-asset://frame']);
+    expect(validateAdapterParameters(adapter.key, resolved).valid).toBe(true);
     expect(() => seedProductionInputs(adapter, {}, '画面', inputs.slice(0, 2))).toThrow(
       '不能自动当作首帧',
     );
   });
+  it.each(['cn.qwen.wan3-0-video', 'cn.minimax.h3.video'])(
+    'reads frame/reference exclusivity from the formal %s schema',
+    (id) => {
+      const adapter = model(id);
+      const mixed = seedProductionInputs(adapter, {}, '画面', [
+        { url: 'asset://actor', role: 'character' },
+        { url: 'asset://scene', role: 'scene' },
+        { url: 'asset://frame', role: 'first-frame' },
+      ]);
+      expect(productionFrameInputConflict(adapter, mixed)).toMatchObject({
+        canUseReferences: true,
+        firstFrameIndex: 2,
+      });
+      for (const choice of ['references', 'first-frame'] as const)
+        expect(
+          productionFrameInputConflict(
+            adapter,
+            resolveProductionFrameInputs(adapter, mixed, choice),
+          ),
+        ).toBeUndefined();
+    },
+  );
   it('distinguishes identical model schemas on channels with different audio upload support', () => {
     const official = model('cn.qwen.wan3-0-video');
     const gateway = getAdapterCatalog().adapters.find(

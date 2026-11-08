@@ -197,20 +197,21 @@ export function productionMediaView(
       const character = sceneInputs?.media.characters.find(
         (item) => item.characterDocumentId === binding.characterDocumentId,
       );
+      const imageSelection = imageBindings.find(
+        (item) =>
+          item.role === 'character' && item.sourceDocumentId === binding.characterDocumentId,
+      );
       const selectedId = binding.imageDisabled
         ? undefined
-        : (binding.imageAssetId ?? character?.defaultImage?.id);
+        : (imageSelection?.assetId ?? binding.imageAssetId ?? character?.defaultImage?.id);
       bindings.push({
         role: 'character',
         documentId: binding.characterDocumentId,
         label: sceneInputs?.characterNames[binding.characterDocumentId],
         selectionSource: binding.imageDisabled
           ? 'disabled'
-          : binding.imageAssetId
-            ? 'manual'
-            : selectedId
-              ? 'auto'
-              : 'none',
+          : (imageSelection?.source ??
+            (binding.imageAssetId ? 'manual' : selectedId ? 'auto' : 'none')),
         ...(selectedId ? { selectedAsset: describe(selectedId) } : {}),
         ...(character?.defaultImage ? { defaultAssetId: character.defaultImage.id } : {}),
         ...candidateAssets(binding.characterDocumentId),

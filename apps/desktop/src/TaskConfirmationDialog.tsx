@@ -19,14 +19,21 @@ export function TaskConfirmationDialog({
     onDecide(item.key, value);
   return (
     <div className="dialog-backdrop" role="presentation" style={{ zIndex: MODAL_Z_INDEX }}>
-      <section className="dialog" role="dialog" aria-modal="true" aria-label="任务确认">
-        <p>
+      <section
+        className="task-confirmation-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="任务确认"
+      >
+        <p className="task-confirmation-context">
           {item.label} · {count} 项待确认
         </p>
         {item.kind === 'paid' ? (
           <MediaSubmissionConfirmationCard confirmation={item.request} onDecide={decide} />
         ) : item.kind === 'model' ? (
           <MediaModelSelectionCard
+            key={item.key}
+            projectId={item.projectId}
             request={item.request}
             referenceImageInputs={item.referenceImageInputs}
             onSelect={decide}

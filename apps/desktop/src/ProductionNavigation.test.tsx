@@ -5,7 +5,7 @@ import { ProductionNavigation } from './ProductionNavigation';
 describe('ProductionNavigation', () => {
   afterEach(cleanup);
 
-  it('renders image and video as first-level menus with all six production capabilities', () => {
+  it('renders image and video as first-level menus with their production capabilities', () => {
     const onCapabilityChange = vi.fn();
     render(
       <ProductionNavigation capability="TEXT_TO_IMAGE" onCapabilityChange={onCapabilityChange} />,
@@ -45,6 +45,18 @@ describe('ProductionNavigation', () => {
     const videoHeading = screen.getByRole('button', { name: '视频制作' });
     videoHeading.focus();
     fireEvent.keyDown(videoHeading, { key: 'ArrowDown' });
-    expect(screen.getByRole('button', { name: '图片制作' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: '音频制作' })).toHaveFocus();
+  });
+
+  it('exposes audio generation as a production mode', () => {
+    const onCapabilityChange = vi.fn();
+    render(
+      <ProductionNavigation capability="TEXT_TO_IMAGE" onCapabilityChange={onCapabilityChange} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '音频制作' }));
+    expect(screen.getByRole('button', { name: '音频生成' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '音频生成' }));
+    expect(onCapabilityChange).toHaveBeenCalledWith('TEXT_TO_AUDIO');
   });
 });

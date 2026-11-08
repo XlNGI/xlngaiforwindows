@@ -4,6 +4,12 @@ export interface RequestSchedulerOptions {
   onQueueWait?: (method: WorkerMethod, waitMs: number) => void;
 }
 
+export class WorkerStoppingError extends Error {
+  constructor() {
+    super('WORKER_STOPPING: Worker admission is closed; the request was not executed.');
+  }
+}
+
 const concurrentReadMethods = new Set<WorkerMethod>([
   'project.runtime.list',
   'project.runtime.registrations',
@@ -105,6 +111,9 @@ const backgroundMethods = new Set<WorkerMethod>([
   'novel.batch.cancel',
   'task.schedule.cancel',
   'audio.import',
+  'audio.sample.confirm',
+  'characterVoiceReference.generate',
+  'characterVoiceReference.confirm',
   'dubbing.job.submit',
   'project.backup',
   'project.export',
@@ -125,6 +134,8 @@ export function isSerializedWorkerMethod(method: WorkerMethod): boolean {
 
 export class RequestScheduler {
   private readonly mutationQueues = new Map<string, Promise<void>>();
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private stopping = false;
   private readonly onQueueWait?: (method: WorkerMethod, waitMs: number) => void;
 
   constructor(options: RequestSchedulerOptions = {}) {
@@ -132,9 +143,19 @@ export class RequestScheduler {
   }
 
   run<T>(method: WorkerMethod, task: () => Promise<T>, queueKey = 'application'): Promise<T> {
-    if (!isSerializedWorkerMethod(method)) return task();
+    if (this.stopping) return Promise.reject(new WorkerStoppingError());
+    const tracked = (result: Promise<T>): Promise<T> => {
+      this.inFlight.add(result);
+      void result.then(
+        () => this.inFlight.delete(result),
+        () => this.inFlight.delete(result),
+      );
+      return result;
+    };
+    if (!isSerializedWorkerMethod(method)) return tracked(Promise.resolve().then(task));
     const queuedAt = performance.now();
     const execute = (): Promise<T> => {
+      if (this.stopping) throw new WorkerStoppingError();
       this.onQueueWait?.(method, performance.now() - queuedAt);
       return task();
     };
@@ -147,6 +168,14 @@ export class RequestScheduler {
     void tail.then(() => {
       if (this.mutationQueues.get(queueKey) === tail) this.mutationQueues.delete(queueKey);
     });
-    return result;
+    return tracked(result);
+  }
+
+  closeAdmission(): void {
+    this.stopping = true;
+  }
+
+  async drain(): Promise<void> {
+    await Promise.allSettled([...this.inFlight]);
   }
 }

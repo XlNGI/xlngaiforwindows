@@ -472,13 +472,14 @@ describe('ContentService', () => {
         expectedRowVersion: 0,
       }),
     ).toThrow('CONVERSATION_PROMPT_TEMPLATE_ROW_VERSION_CONFLICT');
-    expect(() =>
-      content.saveConversationPromptTemplate({
-        conversationId: conversation.id,
-        content: 'x'.repeat(20_001),
-        expectedRowVersion: 1,
-      }),
-    ).toThrow('at most 20000');
+    const longTemplate = 'x'.repeat(100_001);
+    const longSaved = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: longTemplate,
+      expectedRowVersion: 1,
+    });
+    expect(longSaved.content).toBe(longTemplate);
+    expect(content.getConversationPromptTemplate(conversation.id).content).toBe(longTemplate);
     expect(() =>
       content.saveConversationPromptTemplate({
         conversationId: 'missing-conversation',
@@ -489,9 +490,9 @@ describe('ContentService', () => {
     const cleared = content.saveConversationPromptTemplate({
       conversationId: conversation.id,
       content: '',
-      expectedRowVersion: 1,
+      expectedRowVersion: 2,
     });
-    expect(cleared).toMatchObject({ content: '', rowVersion: 2 });
+    expect(cleared).toMatchObject({ content: '', rowVersion: 3 });
     const other = await setup();
     expect(() => other.content.getConversationPromptTemplate(conversation.id)).toThrow(
       'Conversation was not found.',
@@ -506,7 +507,7 @@ describe('ContentService', () => {
     content.archiveConversation({ conversationId: conversation.id });
     expect(content.getConversationPromptTemplate(conversation.id)).toMatchObject({
       content: '',
-      rowVersion: 2,
+      rowVersion: 3,
     });
     expect(() =>
       content.saveConversationPromptTemplate({

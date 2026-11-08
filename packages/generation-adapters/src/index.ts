@@ -12,7 +12,7 @@ import {
   officialVideoAudioContracts,
   officialImageContracts,
   mediaModelBindings,
-  isWanMediaAdapter,
+  isStructuredVideoAdapter,
   isUniCompApiMediaTemplateKey,
   uniCompApiTemplateAdapterKey,
   type AdapterCatalogResult,
@@ -122,9 +122,15 @@ function contractProperty(key: string, value: unknown): AdapterParameterProperty
     title:
       typeof source.title === 'string'
         ? source.title
-        : (({ media: '参考素材', audio: '生成音频', prompt: '提示词' } as Record<string, string>)[
-            key
-          ] ?? key),
+        : ((
+            {
+              media: '参考素材',
+              content: '参考素材',
+              audio: '生成音频',
+              generate_audio: '生成音频',
+              prompt: '提示词',
+            } as Record<string, string>
+          )[key] ?? key),
   };
   for (const field of [
     'description',
@@ -170,6 +176,7 @@ function contractControl(key: string, property: AdapterParameterProperty): Adapt
 
 function capabilityLabel(capability: GenerationCapability): string {
   return {
+    TEXT_TO_AUDIO: '音频生成',
     TEXT_TO_IMAGE: '文生图',
     REFERENCE_TO_IMAGE: '参考生图',
     TEXT_TO_VIDEO: '文生视频',
@@ -183,6 +190,7 @@ function capabilityLabel(capability: GenerationCapability): string {
 const imageAspectRatios = ['16:9', '9:16', '1:1', '3:4', '4:3'] as const;
 const q2ImageAspectRatios = ['auto', ...imageAspectRatios, '21:9', '2:3', '3:2'] as const;
 const capabilityOrder: GenerationCapability[] = [
+  'TEXT_TO_AUDIO',
   'TEXT_TO_IMAGE',
   'REFERENCE_TO_IMAGE',
   'TEXT_TO_VIDEO',
@@ -191,6 +199,64 @@ const capabilityOrder: GenerationCapability[] = [
   'START_END_TO_VIDEO',
   'VIDEO_TO_VIDEO',
 ];
+
+const speechAdapters: AdapterDescriptor[] = ['speech-2.8-hd', 'speech-2.8-turbo'].map((model) => ({
+  key: `TEXT_TO_AUDIO:minimax-speech:${model}:v1`,
+  capability: 'TEXT_TO_AUDIO',
+  capabilityLabel: '音频生成',
+  provider: 'minimax-speech',
+  providerLabel: 'MiniMax 配音',
+  model,
+  modelLabel: model === 'speech-2.8-hd' ? 'Speech 2.8 HD' : 'Speech 2.8 Turbo',
+  apiVersion: 'v1',
+  schemaVersion: 1,
+  endpoint: 'https://api.minimax.cn/v1/t2a_v2',
+  documentationUrl: 'https://platform.minimaxi.com/docs/api-reference/speech-t2a-http',
+  credentialProvider: 'minimax-speech',
+  parameterSchema: {
+    $schema: schemaUri,
+    type: 'object',
+    additionalProperties: false,
+    required: ['text', 'voice_setting'],
+    properties: {
+      text: {
+        type: 'string',
+        title: '合成文本',
+        description: '将合成为音频样本的文本。',
+        minLength: 1,
+        maxLength: 4000,
+      },
+      voice_setting: {
+        type: 'object',
+        title: '音色设置',
+        default: { speed: 1, pitch: 0 },
+        additionalProperties: false,
+        required: ['voice_id', 'speed', 'pitch'],
+        properties: {
+          voice_id: {
+            type: 'string',
+            title: '音色 ID',
+            minLength: 1,
+            maxLength: 256,
+          },
+          speed: { type: 'number', title: '语速', minimum: 0.5, maximum: 2, default: 1 },
+          pitch: { type: 'integer', title: '音高', minimum: -12, maximum: 12, default: 0 },
+          emotion: {
+            type: 'string',
+            title: '情绪',
+            enum: ['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm'],
+          },
+        },
+      },
+    },
+  },
+  uiSchema: {
+    fields: [
+      { key: 'text', control: 'textarea', group: 'basic', order: 10 },
+      { key: 'voice_setting', control: 'structured', group: 'basic', order: 20 },
+    ],
+  },
+}));
 
 const baseAdapters: AdapterDescriptor[] = [
   {
@@ -878,6 +944,217 @@ const unicompTextToImageSchema: AdapterParameterSchema = {
   },
 };
 
+const openAiImagesSchema: AdapterParameterSchema = {
+  $schema: schemaUri,
+  type: 'object',
+  additionalProperties: false,
+  required: ['prompt'],
+  properties: {
+    prompt: { type: 'string', title: '提示词', minLength: 1, maxLength: 32000 },
+    size: {
+      type: 'string',
+      title: '尺寸',
+      enum: ['auto', '1024x1024', '1536x1024', '1024x1536'],
+      default: 'auto',
+    },
+    quality: {
+      type: 'string',
+      title: '质量',
+      enum: ['auto', 'low', 'medium', 'high'],
+      default: 'auto',
+    },
+    background: {
+      type: 'string',
+      title: '背景',
+      enum: ['auto', 'opaque', 'transparent'],
+      default: 'auto',
+    },
+    output_format: {
+      type: 'string',
+      title: '输出格式',
+      enum: ['png', 'jpeg', 'webp'],
+      default: 'png',
+    },
+    output_compression: {
+      type: 'integer',
+      title: '输出压缩',
+      minimum: 0,
+      maximum: 100,
+    },
+    moderation: {
+      type: 'string',
+      title: '内容审核',
+      enum: ['auto', 'low'],
+      default: 'auto',
+    },
+    n: { type: 'integer', title: '生成数量', minimum: 1, maximum: 4, default: 1 },
+  },
+};
+
+const customOpenAiImagesSchema: AdapterParameterSchema = {
+  $schema: schemaUri,
+  type: 'object',
+  additionalProperties: false,
+  required: ['prompt'],
+  properties: {
+    prompt: { type: 'string', title: '提示词', minLength: 1, maxLength: 32000 },
+    size: { type: 'string', title: '尺寸', maxLength: 64 },
+    quality: {
+      type: 'string',
+      title: '质量',
+      enum: ['auto', 'low', 'medium', 'high', 'standard', 'hd'],
+    },
+    style: { type: 'string', title: '风格', enum: ['standard', 'vivid'] },
+    response_format: {
+      type: 'string',
+      title: '返回格式',
+      enum: ['url', 'b64_json'],
+    },
+    background: {
+      type: 'string',
+      title: '背景',
+      enum: ['auto', 'opaque', 'transparent'],
+    },
+    output_format: { type: 'string', title: '输出格式', enum: ['png', 'jpeg', 'webp'] },
+    output_compression: {
+      type: 'integer',
+      title: '输出压缩',
+      minimum: 0,
+      maximum: 100,
+    },
+    moderation: { type: 'string', title: '内容审核', enum: ['auto', 'low'] },
+    n: { type: 'integer', title: '生成数量', minimum: 1, maximum: 10 },
+  },
+};
+
+function openAiImagesAdapters(): AdapterDescriptor[] {
+  return ['openai', 'custom'].map((provider) => {
+    const isCustom = provider === 'custom';
+    return {
+      key: `TEXT_TO_IMAGE:${provider}:openai-images:v1`,
+      capability: 'TEXT_TO_IMAGE',
+      capabilityLabel: '文生图',
+      provider,
+      providerLabel: isCustom ? '自定义 OpenAI 兼容' : 'OpenAI',
+      model: 'openai-images',
+      modelLabel: isCustom ? 'OpenAI 兼容 Images API' : 'OpenAI Images API',
+      apiVersion: 'v1',
+      schemaVersion: 1,
+      endpoint: 'https://api.openai.com/v1/images/generations',
+      documentationUrl: 'https://platform.openai.com/docs/api-reference/images/create',
+      credentialProvider: provider,
+      parameterSchema: isCustom ? customOpenAiImagesSchema : openAiImagesSchema,
+      uiSchema: {
+        fields: isCustom
+          ? [
+              { key: 'prompt', control: 'textarea' as const, group: 'basic' as const, order: 10 },
+              { key: 'size', control: 'text' as const, group: 'basic' as const, order: 20 },
+              { key: 'n', control: 'number' as const, group: 'basic' as const, order: 30 },
+              {
+                key: 'response_format',
+                control: 'select' as const,
+                group: 'basic' as const,
+                order: 40,
+              },
+              { key: 'quality', control: 'select' as const, group: 'basic' as const, order: 50 },
+              { key: 'style', control: 'select' as const, group: 'basic' as const, order: 60 },
+              {
+                key: 'background',
+                control: 'select' as const,
+                group: 'advanced' as const,
+                order: 70,
+              },
+              {
+                key: 'output_format',
+                control: 'select' as const,
+                group: 'advanced' as const,
+                order: 80,
+              },
+              {
+                key: 'output_compression',
+                control: 'number' as const,
+                group: 'advanced' as const,
+                order: 90,
+              },
+              {
+                key: 'moderation',
+                control: 'select' as const,
+                group: 'advanced' as const,
+                order: 100,
+              },
+            ]
+          : [
+              { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+              { key: 'size', control: 'select', group: 'basic', order: 20 },
+              { key: 'quality', control: 'select', group: 'basic', order: 30 },
+              { key: 'n', control: 'number', group: 'basic', order: 40 },
+              { key: 'background', control: 'select', group: 'advanced', order: 50 },
+              { key: 'output_format', control: 'select', group: 'advanced', order: 60 },
+              { key: 'output_compression', control: 'number', group: 'advanced', order: 70 },
+              { key: 'moderation', control: 'select', group: 'advanced', order: 80 },
+            ],
+      },
+    };
+  });
+}
+
+function openAiCompatibleVideoAdapters(): AdapterDescriptor[] {
+  return (['TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO'] as const).map((capability) => ({
+    key: `${capability}:custom:openai-compatible-video:v1`,
+    capability,
+    capabilityLabel: capability === 'TEXT_TO_VIDEO' ? '文生视频' : '图生视频',
+    provider: 'custom',
+    providerLabel: '自定义 OpenAI 兼容',
+    model: 'openai-compatible-video',
+    modelLabel: 'OpenAI 兼容视频 API',
+    apiVersion: 'v1',
+    schemaVersion: 1,
+    endpoint: 'https://api.openai.com/v1/videos',
+    documentationUrl: 'https://platform.openai.com/docs/api-reference/videos',
+    credentialProvider: 'custom',
+    parameterSchema: {
+      $schema: schemaUri,
+      type: 'object',
+      additionalProperties: false,
+      required: capability === 'IMAGE_TO_VIDEO' ? ['images', 'prompt'] : ['prompt'],
+      properties: {
+        ...(capability === 'IMAGE_TO_VIDEO'
+          ? {
+              images: {
+                type: 'array' as const,
+                title: '参考图片',
+                minItems: 1,
+                maxItems: 1,
+                items: { type: 'string' as const, format: 'uri' },
+              },
+            }
+          : {}),
+        prompt: { type: 'string', title: '视频提示词', minLength: 1, maxLength: 5000 },
+        size: { type: 'string', title: '尺寸', maxLength: 32 },
+        duration: { type: 'integer', title: '时长（秒）', minimum: 1, maximum: 60, default: 5 },
+      },
+    },
+    uiSchema: {
+      fields: [
+        ...(capability === 'IMAGE_TO_VIDEO'
+          ? [
+              {
+                key: 'images',
+                control: 'url-list' as const,
+                group: 'basic' as const,
+                order: 10,
+                placeholder: '选择或输入一张参考图片',
+              },
+            ]
+          : []),
+        { key: 'prompt', control: 'textarea' as const, group: 'basic' as const, order: 20 },
+        { key: 'duration', control: 'number' as const, group: 'basic' as const, order: 30 },
+        { key: 'size', control: 'text' as const, group: 'basic' as const, order: 40 },
+      ],
+    },
+  }));
+}
+
 const unicompImageEditSchema: AdapterParameterSchema = {
   $schema: schemaUri,
   type: 'object',
@@ -896,8 +1173,7 @@ const unicompImageEditSchema: AdapterParameterSchema = {
     response_format: {
       type: 'string',
       title: '返回格式',
-      enum: ['b64_json'],
-      default: 'b64_json',
+      const: 'b64_json',
     },
   },
 };
@@ -923,7 +1199,11 @@ const unicompVideoSchema = (imageRequired: boolean): AdapterParameterSchema => (
     size: { type: 'string', title: '尺寸', maxLength: 32 },
     resolution: { type: 'string', title: '分辨率', maxLength: 16 },
     duration: { type: 'integer', title: '时长（秒）', minimum: 1, maximum: 60, default: 5 },
-    seconds: { type: 'string', title: '时长（兼容格式）', maxLength: 16 },
+    seconds: {
+      type: 'string',
+      title: '时长（兼容格式）',
+      maxLength: 16,
+    },
     ratio: { type: 'string', title: '画幅比例', maxLength: 16 },
     generate_audio: { type: 'boolean', title: '生成音频' },
     watermark: { type: 'boolean', title: '添加水印' },
@@ -1078,9 +1358,10 @@ function unicompVideoAdapter(
         { key: 'duration', control: 'number', group: 'basic', order: 30 },
         { key: 'size', control: 'text', group: 'basic', order: 40 },
         { key: 'resolution', control: 'text', group: 'basic', order: 50 },
-        { key: 'ratio', control: 'text', group: 'advanced', order: 60 },
-        { key: 'generate_audio', control: 'toggle', group: 'advanced', order: 70 },
-        { key: 'watermark', control: 'toggle', group: 'advanced', order: 80 },
+        { key: 'seconds', control: 'text', group: 'advanced', order: 60, hidden: true },
+        { key: 'ratio', control: 'text', group: 'advanced', order: 70 },
+        { key: 'generate_audio', control: 'toggle', group: 'advanced', order: 80 },
+        { key: 'watermark', control: 'toggle', group: 'advanced', order: 90 },
       ],
     },
   };
@@ -1226,7 +1507,10 @@ const officialModeAdapters = contractAdapters.flatMap((adapter) => {
     );
 });
 const catalogAdapters = [
+  ...speechAdapters,
   ...adapters,
+  ...openAiImagesAdapters(),
+  ...openAiCompatibleVideoAdapters(),
   ...unicompAdapters,
   ...contractAdapters,
   ...officialModeAdapters,
@@ -1346,7 +1630,7 @@ export function validateAdapterParameters(
             )
           : value;
   const validationParameters =
-    isWanMediaAdapter(adapter) ||
+    isStructuredVideoAdapter(adapter) ||
     ['wan-video', 'seedance-video', 'minimax-video'].includes(adapter.provider)
       ? normalizeReferences(parameters)
       : Array.isArray(parameters.images)

@@ -65,6 +65,19 @@ export function useProductionAuthoring(input: {
     },
     [contextKey, adapter],
   );
+  const refreshKeepingEdits = useCallback(() => setRefresh((value) => value + 1), []);
+  const changed = useCallback(
+    (field: string, value: AdapterParameters[string] | undefined) => {
+      const values = overrides.current.get(contextKey) ?? {};
+      values[field] = value;
+      overrides.current.set(contextKey, values);
+    },
+    [contextKey],
+  );
+  const refill = useCallback(() => {
+    overrides.current.set(contextKey, {});
+    setRefresh((value) => value + 1);
+  }, [contextKey]);
 
   useEffect(() => {
     let active = true;
@@ -159,19 +172,12 @@ export function useProductionAuthoring(input: {
   return {
     preserveEdits,
     overriddenFields: Object.keys(overrides.current.get(contextKey) ?? {}),
-    refreshKeepingEdits: () => setRefresh((value) => value + 1),
+    refreshKeepingEdits,
     result,
     loading,
     error,
-    changed: (field: string, value: AdapterParameters[string] | undefined) => {
-      const values = overrides.current.get(contextKey) ?? {};
-      values[field] = value;
-      overrides.current.set(contextKey, values);
-    },
-    refill: () => {
-      overrides.current.set(contextKey, {});
-      setRefresh((value) => value + 1);
-    },
+    changed,
+    refill,
     beforeSubmit: (): Promise<ProductionSource | undefined> => {
       if (!target) return Promise.resolve(undefined);
       if (

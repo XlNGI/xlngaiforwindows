@@ -43,7 +43,6 @@ import { ProjectService, resolveProjectRelativePath } from './project-service.js
 import { assertStorageCapacity } from './storage-capacity.js';
 import { multiplyDecimalStrings } from './usage-cost.js';
 import { withNetworkResponse } from './network-transfer.js';
-import { ProductionService } from './production-service.js';
 import { ExecutionPool } from './execution-pool.js';
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -136,13 +135,6 @@ export class VideoGenerationService {
 
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
-      if (params.sceneId || params.shotId)
-        new ProductionService(this.projects).assertSource(
-          params.productionSource,
-          { kind: params.sceneId ? 'scene' : 'shot', id: (params.sceneId ?? params.shotId)! },
-          params.adapterKey,
-          { parameters: params.parameters, inputs: params.mediaInputReferences },
-        );
       if (params.productionSource && !params.sceneId && !params.shotId)
         throw new Error('制作来源缺少目标对象。');
       if (params.shotId) {

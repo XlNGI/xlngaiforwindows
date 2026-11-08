@@ -21,7 +21,7 @@ export function prepareAgentGeneration(
 ): LlmGenerationPrepareResult & { agentTaskId: string } {
   let prepared: LlmGenerationPrepareResult | undefined;
   try {
-    prepared = services.generations.prepare(params);
+    prepared = services.generations.prepare(params, 'agent');
     const agent = services.loop.prepare(
       prepared.stream,
       params.prompt,
@@ -32,6 +32,7 @@ export function prepareAgentGeneration(
       params.selectedChapterIds,
       params.targetPlatform,
       provenance,
+      params.productionSkillId,
     );
     services.generations.configureAgentTools(prepared.stream, agent.tools);
     return { ...prepared, agentTaskId: agent.taskId };

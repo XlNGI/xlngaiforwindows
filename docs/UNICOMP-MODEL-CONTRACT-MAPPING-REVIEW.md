@@ -123,8 +123,10 @@ viduq3 -> 确认 / 拒绝 / 修改为 xxx
 | `MiniMax-H3` | `cn.minimax.h3` |
 | `qwen-image` | `cn.qwen.image.latest` |
 | `viduq3` | `vidu.q3.reference-video` |
+| `doubao-seedance-2-0-260128` | `cn.bytedance.seedance2-0.video` revision 2 |
+| `doubao-seedance-2-5-260628` | `cn.bytedance.seedance2-5.video` revision 2 |
 
-Qwen、豆包、Kling、Seedance、Hailuo 的占位项没有被伪造为具体远程 ID，仍需等 UniComp `/v1/models` 返回精确 ID 后再新增 Binding。
+两个 Seedance ID 来自用户提供的 UniComp 模型目录截图，已按精确 ID 绑定已有官方合同。Binding 只对远程同步或用户手动导入的匹配目录行生效，不会伪造模型行或自动启用模型。其他未提供精确 ID 的 Qwen、豆包、Kling、Seedance、Hailuo 项仍待目录发现。
 
 ## 8. HappyHorse 官方合同扩展（2026-10-11）
 

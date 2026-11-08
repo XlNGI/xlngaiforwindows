@@ -24,7 +24,10 @@ const drop = (projectId = 'project', count = 1) => ({
       JSON.stringify({
         version: 1,
         projectId,
-        assets: Array.from({ length: count }, () => ({ id: image.id, kind: 'character' })),
+        assets: Array.from({ length: count }, (_, index) => ({
+          id: index ? 'other-image' : image.id,
+          kind: 'character',
+        })),
       }),
   },
 });
@@ -60,12 +63,14 @@ describe('reference cards', () => {
     await waitFor(() => expect(onDropAsset).toHaveBeenCalledWith(image));
     expect(callWorker).toHaveBeenCalledWith('asset.mediaSource', { assetId: image.id });
   });
-  it('rejects cross-project and multi-image payloads and ignores drops in read-only views', () => {
+  it('rejects cross-project and multi-image payloads and ignores drops in read-only views', async () => {
     const { onDropAsset, unmount } = mount();
     fireEvent.drop(screen.getByLabelText('角色参考卡片'), drop('other'));
-    expect(screen.getByRole('status')).toHaveTextContent('当前项目');
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('当前项目'));
     fireEvent.drop(screen.getByLabelText('角色参考卡片'), drop('project', 2));
-    expect(screen.getByRole('status')).toHaveTextContent('一张图片');
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent('最多可拖入 1 项素材'),
+    );
     expect(callWorker).not.toHaveBeenCalled();
     expect(onDropAsset).not.toHaveBeenCalled();
     unmount();

@@ -1,7 +1,15 @@
 import { PromptReferenceEditor } from './PromptReferenceEditor';
+import { ImageListParameterField } from './ImageListParameterField';
+import { readAssetDrop, useAssetDrop } from './assets/use-asset-drop';
+import { StructuredAssetDrop } from './assets/StructuredAssetDrop';
+import { imageAssetId } from './ParameterImagePreview';
 import { MediaReviewQueue } from './MediaReviewQueue';
 import { AgentQuestionForm } from './AgentQuestionForm';
-import { conversationTimeline, newerAgentTaskDetail } from './conversation-timeline';
+import {
+  conversationProcessGroups,
+  conversationTimeline,
+  newerAgentTaskDetail,
+} from './conversation-timeline';
 import {
   canonicalPromptParameters,
   promptReferences,
@@ -33,7 +41,10 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AssistantReply } from './AssistantReply';
 import { ComposerTextarea } from './ComposerTextarea';
-import { SCENE_PROMPT_CONSTRAINT_TEMPLATE } from './conversation-prompt-template';
+import {
+  SCENE_PROMPT_CONSTRAINT_TEMPLATE,
+  splitComposedConversationPrompt,
+} from './conversation-prompt-template';
 import type {
   AgentResearchMode,
   AgentInputSubmitResult,
@@ -175,7 +186,9 @@ interface ChatPanelProps {
     targetGenerationId?: string,
   ) => void;
   attachments?: ChatAttachment[];
+  attachmentsPending?: boolean;
   onAddAttachments?: (files: FileList | File[]) => void;
+  onAddAssetAttachments?: (serialized: string) => void;
   onRemoveAttachment?: (id: string) => void;
   agentModelSelection?: UnifiedAgentModelSelectionRequest;
   onSelectAgentModel?: (providerProfileId: string, modelId: string) => void;
@@ -262,7 +275,9 @@ export function ChatPanel({
   batchRunning = false,
   onSendMessage,
   attachments = [],
+  attachmentsPending = false,
   onAddAttachments,
+  onAddAssetAttachments,
   onRemoveAttachment,
   agentModelSelection,
   onSelectAgentModel,
@@ -288,6 +303,10 @@ export function ChatPanel({
    * chat remains focused on messages.
    */
   const [modelControlsOpen, setModelControlsOpen] = useState(false);
+  const [expandedProcesses, setExpandedProcesses] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    setExpandedProcesses(new Set());
+  }, [conversation?.projectId, conversation?.id]);
   /**
    * Conversation management and archive filters are infrequent. Keep them in
    * the overflow menu so the bar stays focused on picking and creating chats.
@@ -319,22 +338,33 @@ export function ChatPanel({
         ? '禁止联网'
         : undefined;
   const isArchived = Boolean(conversation?.archivedAt);
+  const canAttach = Boolean(conversation && writable && scopeAvailable && !isArchived);
+  const assetDrop = useAssetDrop<HTMLDivElement>({
+    enabled: canAttach && Boolean(onAddAssetAttachments),
+    onDrop: (raw) => onAddAssetAttachments?.(raw),
+  });
   const generationLocked =
     batchRunning || generation?.status === 'prepared' || generation?.status === 'streaming';
-  const conversationBusy =
-    !allowConcurrentTasks &&
-    (generationLocked ||
-      [agentTask, ...(agentTasks ?? [])].some(
-        (detail) =>
-          detail?.task.conversationId === conversation?.id &&
-          (detail?.task.status === 'queued' || detail?.task.status === 'running') &&
-          !(
-            generation &&
-            generation.userMessage.id === detail.task.userMessageId &&
-            !['prepared', 'streaming'].includes(generation.status)
-          ),
-      ));
-  const send = () => onSendMessage();
+  const conversationRunning =
+    generationLocked ||
+    [agentTask, ...(agentTasks ?? [])].some(
+      (detail) =>
+        detail?.task.conversationId === conversation?.id &&
+        (detail?.task.status === 'queued' || detail?.task.status === 'running') &&
+        !(
+          generation &&
+          generation.userMessage.id === detail.task.userMessageId &&
+          !['prepared', 'streaming'].includes(generation.status)
+        ),
+    );
+  const conversationBusy = !allowConcurrentTasks && conversationRunning;
+  const showStatusMessage =
+    statusMessage &&
+    generation?.status !== 'failed' &&
+    !/^(生成完成|生成已完成)$/.test(statusMessage);
+  const send = () => {
+    if (!attachmentsPending) onSendMessage();
+  };
   const messageListRef = useRef<HTMLDivElement>(null);
   const followLatestMessageRef = useRef(true);
   /**
@@ -406,157 +436,252 @@ export function ChatPanel({
     forms: MediaReviewSummary[] = [],
     renderForm?: (form: MediaReviewSummary) => ReactNode,
     queueError?: ReactNode,
-  ) => (
-    <>
-      {canLoadEarlierMessages && (
-        <div
-          className="load-earlier-container"
-          style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
-        >
-          <button
-            className="button subtle"
-            type="button"
-            disabled={loadingEarlierMessages}
-            onClick={onLoadEarlierMessages}
+  ) => {
+    const timeline = conversationTimeline(
+      messages,
+      timelineByMessageId,
+      generationLocked ? generation?.assistantMessage.id : undefined,
+      forms,
+    );
+    const processByItemId = new Map(
+      conversationProcessGroups(timeline, timelineByMessageId).flatMap((group) =>
+        group.itemIds.map((id) => [id, group] as const),
+      ),
+    );
+    const lastReplyByMessage = new Map(
+      timeline.filter((item) => item.kind === 'message').map((item) => [item.message.id, item.id]),
+    );
+    return (
+      <>
+        {canLoadEarlierMessages && (
+          <div
+            className="load-earlier-container"
+            style={{ display: 'flex', justifyContent: 'center', padding: '8px' }}
           >
-            {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
-          </button>
-        </div>
-      )}
-      {messages.length === 0 && forms.length === 0 ? (
-        <div className="chat-empty">
-          <Bot size={22} />
-          <strong>项目 AI 助手</strong>
-          <span>直接描述任务。需要时会检索项目里的草稿和已发布资料。</span>
-        </div>
-      ) : null}
-      {conversationTimeline(
-        messages,
-        timelineByMessageId,
-        generationLocked ? generation?.assistantMessage.id : undefined,
-        forms,
-      ).map((item) => {
-        if (item.kind === 'question')
-          return (
-            <AgentQuestionForm
-              key={`${conversation?.projectId}:${item.form.id}`}
-              form={item.form}
-              projectId={conversation!.projectId}
-              writable={writable}
-              onContinue={onAnswerQuestions}
-            />
-          );
-        if (item.kind === 'form')
-          return <Fragment key={item.id}>{renderForm?.(item.form)}</Fragment>;
-        if (item.kind === 'tools')
-          return (
-            <AgentToolTimeline
-              key={item.id}
-              detail={item.detail}
-              stage={item.staged}
-              generationStatus={
-                !item.tail
-                  ? 'complete'
-                  : generation?.assistantMessage.id === item.messageId
-                    ? generation.status
-                    : undefined
-              }
-              generationError={
-                item.tail && generation?.assistantMessage.id === item.messageId
-                  ? generation.error
-                  : undefined
-              }
-              liveActions={
-                item.live
-                  ? item.staged
-                    ? liveAgentActions?.filter((action) => action.status === 'running')
-                    : liveAgentActions
-                  : undefined
-              }
-              runningPlaceholder={item.live}
-              onOpenLibrarySource={onOpenLibrarySource}
-            />
-          );
-        const message = item.message;
-        return (
-          <article
-            key={item.id}
-            className={`message ${message.role}${item.staged ? ' assistant-phase' : ''}`}
-          >
-            <header>
-              {!item.staged && (
-                <span>
-                  {message.role === 'user'
-                    ? '你'
-                    : message.role === 'assistant'
-                      ? '助手'
-                      : message.role}
-                </span>
-              )}
-              <button
-                className="icon-button subtle"
-                type="button"
-                title="复制"
-                onClick={() => void navigator.clipboard.writeText(item.content)}
-              >
-                <Copy size={12} />
-              </button>
-            </header>
-            {message.role === 'assistant' ? (
-              <AssistantReply content={item.content} streaming={item.streaming} />
-            ) : (
-              <p>{item.content}</p>
-            )}
-            {message.role === 'assistant' &&
+            <button
+              className="button subtle"
+              type="button"
+              disabled={loadingEarlierMessages}
+              onClick={onLoadEarlierMessages}
+            >
+              {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早历史消息'}
+            </button>
+          </div>
+        )}
+        {messages.length === 0 && forms.length === 0 ? (
+          <div className="chat-empty">
+            <Bot size={22} />
+            <strong>项目 AI 助手</strong>
+            <span>直接描述任务。需要时会检索项目里的草稿和已发布资料。</span>
+          </div>
+        ) : null}
+        {timeline.map((item) => {
+          const renderItem = () => {
+            if (item.kind === 'question')
+              return (
+                <AgentQuestionForm
+                  key={`${conversation?.projectId}:${item.form.id}`}
+                  form={item.form}
+                  projectId={conversation!.projectId}
+                  writable={writable}
+                  onContinue={onAnswerQuestions}
+                />
+              );
+            if (item.kind === 'form')
+              return <Fragment key={item.id}>{renderForm?.(item.form)}</Fragment>;
+            if (item.kind === 'tools')
+              return (
+                <AgentToolTimeline
+                  key={item.id}
+                  detail={item.detail}
+                  stage={item.staged}
+                  generationStatus={
+                    !item.tail
+                      ? 'complete'
+                      : generation?.assistantMessage.id === item.messageId
+                        ? generation.status
+                        : undefined
+                  }
+                  generationError={
+                    item.tail && generation?.assistantMessage.id === item.messageId
+                      ? generation.error
+                      : undefined
+                  }
+                  liveActions={
+                    item.live
+                      ? item.staged
+                        ? liveAgentActions?.filter((action) => action.status === 'running')
+                        : liveAgentActions
+                      : undefined
+                  }
+                  runningPlaceholder={item.live}
+                  onOpenLibrarySource={onOpenLibrarySource}
+                />
+              );
+            const message = item.message;
+            const resultDetail = timelineByMessageId.get(message.id);
+            const resultLabel =
+              message.role === 'assistant' && lastReplyByMessage.get(message.id) === item.id
+                ? (taskResultLabel(resultDetail) ??
+                  (generation?.assistantMessage.id === message.id &&
+                  generation.status === 'complete'
+                    ? '回复结束'
+                    : undefined))
+                : undefined;
+            const standaloneError =
+              message.role === 'assistant' &&
               message.status === 'failed' &&
               !timelineByMessageId.has(message.id) &&
-              (generation?.assistantMessage.id !== message.id || generation.retryable !== false) &&
-              (llmStatus?.configured || llmProfiles.length > 0) && (
-                <footer>
-                  {generation?.assistantMessage.id === message.id && statusMessage ? (
-                    <small className="chat-status">{statusMessage}</small>
-                  ) : null}
-                  <button type="button" onClick={() => onRetryGeneration(message.id)}>
-                    <RefreshCw size={11} />
-                    重试
+              ((generation?.assistantMessage.id === message.id &&
+                item.content.trim() === generation.error?.trim()) ||
+                /^Provider HTTP \d{3}\b[^\r\n]*$/i.test(item.content.trim()))
+                ? item.content
+                : undefined;
+            const composedPrompt =
+              message.role === 'user' ? splitComposedConversationPrompt(item.content) : undefined;
+            return (
+              <article
+                key={item.id}
+                className={`message ${message.role}${item.staged ? ' assistant-phase' : ''}`}
+              >
+                <header>
+                  {!item.staged && (
+                    <span>
+                      {message.role === 'user'
+                        ? '你'
+                        : message.role === 'assistant'
+                          ? '助手'
+                          : message.role}
+                    </span>
+                  )}
+                  <button
+                    className="icon-button subtle"
+                    type="button"
+                    title="复制"
+                    onClick={() => void navigator.clipboard.writeText(item.content)}
+                  >
+                    <Copy size={12} />
                   </button>
-                </footer>
+                </header>
+                {standaloneError ? (
+                  <AgentTaskError error={standaloneError} />
+                ) : message.role === 'assistant' ? (
+                  <AssistantReply content={item.content} streaming={item.streaming} />
+                ) : composedPrompt ? (
+                  <>
+                    <p className="message-user-input">{composedPrompt.request}</p>
+                    <details className="message-session-constraints">
+                      <summary>约束 · {composedPrompt.constraints.length} 字</summary>
+                      <p>{composedPrompt.constraints}</p>
+                    </details>
+                  </>
+                ) : (
+                  <p>{item.content}</p>
+                )}
+                {resultLabel && (
+                  <footer className="chat-task-result" role="status">
+                    <small>{resultLabel}</small>
+                    {resultDetail?.task.completionState === 'partial' &&
+                      resultDetail.task.errorMessage && (
+                        <small>{resultDetail.task.errorMessage}</small>
+                      )}
+                  </footer>
+                )}
+                {message.role === 'assistant' &&
+                  message.status === 'failed' &&
+                  !timelineByMessageId.has(message.id) &&
+                  (generation?.assistantMessage.id !== message.id ||
+                    generation.retryable !== false) &&
+                  (llmStatus?.configured || llmProfiles.length > 0) && (
+                    <footer>
+                      {generation?.assistantMessage.id === message.id && statusMessage ? (
+                        <small className="chat-status">{statusMessage}</small>
+                      ) : null}
+                      <button type="button" onClick={() => onRetryGeneration(message.id)}>
+                        <RefreshCw size={11} />
+                        重试
+                      </button>
+                    </footer>
+                  )}
+              </article>
+            );
+          };
+          const process = processByItemId.get(item.id);
+          if (!process) return renderItem();
+          const expanded = expandedProcesses.has(process.messageId);
+          return (
+            <Fragment key={item.id}>
+              {process.itemIds[0] === item.id && (
+                <div className="conversation-process-heading">
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
+                    aria-controls={process.itemIds
+                      .map((id) => `conversation-process-${id}`)
+                      .join(' ')}
+                    title={expanded ? '收起执行过程' : '展开执行过程'}
+                    onClick={() =>
+                      setExpandedProcesses((current) => {
+                        const next = new Set(current);
+                        if (next.has(process.messageId)) next.delete(process.messageId);
+                        else next.add(process.messageId);
+                        return next;
+                      })
+                    }
+                  >
+                    <span>{process.label}</span>
+                    {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  </button>
+                </div>
               )}
-          </article>
-        );
-      })}
-      {queueError}
-      {generationLocked &&
-        !unmatchedLiveTask &&
-        messages.some((message) => message.id === generation?.assistantMessage.id) &&
-        !timelineByMessageId.has(generation?.assistantMessage.id ?? '') && (
+              <div
+                id={`conversation-process-${item.id}`}
+                className="conversation-process-item"
+                hidden={!expanded}
+              >
+                {renderItem()}
+              </div>
+            </Fragment>
+          );
+        })}
+        {queueError}
+        {generationLocked &&
+          !unmatchedLiveTask &&
+          messages.some((message) => message.id === generation?.assistantMessage.id) &&
+          !timelineByMessageId.has(generation?.assistantMessage.id ?? '') && (
+            <AgentToolTimeline
+              generationStatus={generation?.status}
+              liveActions={liveAgentActions}
+              runningPlaceholder
+            />
+          )}
+        {unmatchedLiveTask ? (
+          <AgentToolTimeline
+            detail={unmatchedLiveTask}
+            generationStatus={generation?.status}
+            generationError={generation?.error}
+            liveActions={liveAgentActions}
+            runningPlaceholder={generationLocked}
+            onOpenLibrarySource={onOpenLibrarySource}
+          />
+        ) : generationLocked &&
+          !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
           <AgentToolTimeline
             generationStatus={generation?.status}
             liveActions={liveAgentActions}
             runningPlaceholder
           />
-        )}
-      {unmatchedLiveTask ? (
-        <AgentToolTimeline
-          detail={unmatchedLiveTask}
-          generationStatus={generation?.status}
-          generationError={generation?.error}
-          liveActions={liveAgentActions}
-          runningPlaceholder={generationLocked}
-          onOpenLibrarySource={onOpenLibrarySource}
-        />
-      ) : generationLocked &&
-        !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
-        <AgentToolTimeline
-          generationStatus={generation?.status}
-          liveActions={liveAgentActions}
-          runningPlaceholder
-        />
-      ) : null}
-    </>
-  );
+        ) : null}
+      </>
+    );
+  };
   return (
-    <section ref={panelRef} className="chat-panel panel-border" aria-label="项目 AI 助手">
+    <section
+      ref={panelRef}
+      className="chat-panel panel-border"
+      aria-label="项目 AI 助手"
+      data-asset-drop-disabled={!writable || isArchived}
+    >
       {showHeading && (
         <div className="panel-heading">
           <span>项目 AI 助手</span>
@@ -739,9 +864,7 @@ export function ChatPanel({
           renderMessageItems()
         )}
       </div>
-      {statusMessage && generation?.status !== 'failed' && (
-        <small className="chat-status">{statusMessage}</small>
-      )}
+      {showStatusMessage && <small className="chat-status">{statusMessage}</small>}
       {agentModelSelection && (
         <div
           className="agent-model-selection"
@@ -947,20 +1070,45 @@ export function ChatPanel({
           )}
         </div>
       )}
-      {agentTask?.task.status === 'failed' && agentTask.task.retryable && (
-        <div className="agent-recovery-notice" role="status">
-          <span>
-            {agentTask.task.errorCode === 'interrupted'
-              ? '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或在任务日志中恢复未完成产物。'
-              : '上次 Agent 任务未完成；可以重新提交请求以创建新任务，或先在任务日志中恢复未完成产物。'}
-          </span>
-          {onOpenTaskLog && (
-            <button type="button" className="button secondary" onClick={onOpenTaskLog}>
-              查看任务日志
-            </button>
-          )}
-        </div>
-      )}
+      {agentTask?.task.status === 'failed' &&
+        (agentTask.task.retryable || !!agentTask.savedProductionReceipts?.receipts.length) && (
+          <div className="agent-recovery-notice" role="status">
+            <div className="agent-recovery-copy">
+              {!!agentTask.savedProductionReceipts?.receipts.length && (
+                <strong>
+                  已确认保存{' '}
+                  {agentTask.savedProductionReceipts.nextOffset !== undefined ? '至少 ' : ''}
+                  {agentTask.savedProductionReceipts.receipts.length} 次制作修改；整轮任务尚未完成。
+                </strong>
+              )}
+              <span>
+                {agentTask.task.errorCode === 'interrupted'
+                  ? '应用退出时任务中断；已保存的草稿会保留，可以重新提交创作请求以创建新任务，或在任务日志中恢复未完成产物。'
+                  : '上次 Agent 任务未完成；已保存产物会保留，可以重新提交未完成部分以创建新任务。'}
+              </span>
+              {agentTask.task.usage && (
+                <small>
+                  模型请求 {agentTask.task.usage.providerRequestsUsed} 次；工具调用{' '}
+                  {agentTask.task.usage.toolCallsUsed} 次
+                </small>
+              )}
+            </div>
+            <div className="agent-recovery-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => onComposerChange(taskRecoveryInstruction(agentTask))}
+              >
+                填写继续指令
+              </button>
+              {onOpenTaskLog && (
+                <button type="button" className="button secondary" onClick={onOpenTaskLog}>
+                  查看任务日志
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       {activeVideoTaskCount > 0 && (
         <div className="agent-recovery-notice" role="status">
           <span>项目后台正在处理 {activeVideoTaskCount} 个视频任务。</span>
@@ -972,12 +1120,24 @@ export function ChatPanel({
         </div>
       )}
       <div
-        className="composer"
+        ref={assetDrop.ref}
+        {...assetDrop.handlers}
+        className={`composer ${assetDrop.hovering ? 'is-asset-drag-over' : ''}`}
         onDragOver={(event) => {
-          if (onAddAttachments) event.preventDefault();
+          assetDrop.handlers.onDragOver(event);
+          if (
+            canAttach &&
+            onAddAttachments &&
+            Array.from(event.dataTransfer.types ?? []).includes('Files')
+          )
+            event.preventDefault();
         }}
         onDrop={(event) => {
-          if (!onAddAttachments || event.dataTransfer.files.length === 0) return;
+          if (readAssetDrop(event.dataTransfer)) {
+            assetDrop.handlers.onDrop(event);
+            return;
+          }
+          if (!canAttach || !onAddAttachments || !event.dataTransfer.files?.length) return;
           event.preventDefault();
           onAddAttachments(event.dataTransfer.files);
         }}
@@ -1094,46 +1254,17 @@ export function ChatPanel({
               </small>
             </summary>
             <div className="conversation-prompt-template-body">
-              <small>
-                每次发送前自动保存并附加此处最新内容。可修改时间、风格、连续性和输出要求；清空后发送将不携带约束。已保存的约束保留你的编辑，不会随模板更新自动替换。
-              </small>
+              <small>发送前自动保存并附加；清空后不携带约束。</small>
               <textarea
                 aria-label="本会话要求约束"
                 value={promptTemplate}
                 onChange={(event) => onPromptTemplateChange(event.target.value)}
                 placeholder="例如：固定故事时间与视觉风格；每个镜头写清时间、地点、动作、景别、运镜、对白和连续性；不要为了凑时长改变剧情逻辑。"
                 rows={5}
-                maxLength={20_000}
                 disabled={!conversation || !writable || isArchived || promptTemplateBusy}
               />
-              <details>
-                <summary>查看最新版分镜制作模板（可与上方当前约束对照）</summary>
-                <textarea
-                  aria-label="最新版分镜制作模板"
-                  value={SCENE_PROMPT_CONSTRAINT_TEMPLATE}
-                  readOnly
-                  rows={8}
-                />
-                <small>点击“载入分镜制作模板”将替换上方编辑内容；保存或发送后生效。</small>
-              </details>
               <div className="conversation-prompt-template-actions">
-                <small>{promptTemplate.length}/20000</small>
-                <button
-                  className="button secondary"
-                  type="button"
-                  onClick={() => onPromptTemplateChange(SCENE_PROMPT_CONSTRAINT_TEMPLATE)}
-                  disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-                >
-                  载入分镜制作模板
-                </button>
-                <button
-                  className="button secondary"
-                  type="button"
-                  onClick={() => onPromptTemplateChange('')}
-                  disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-                >
-                  清空约束
-                </button>
+                {promptTemplateDirty && <small role="status">有未保存修改</small>}
                 {onSavePromptTemplate && (
                   <button
                     className="button secondary"
@@ -1148,23 +1279,49 @@ export function ChatPanel({
                         : '保存会话约束'}
                   </button>
                 )}
+                <details className="conversation-prompt-template-tools">
+                  <summary>模板与清理</summary>
+                  <div className="conversation-prompt-template-tools-body">
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={() => onPromptTemplateChange(SCENE_PROMPT_CONSTRAINT_TEMPLATE)}
+                      disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+                    >
+                      套用最新版分镜模板
+                    </button>
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={() => onPromptTemplateChange('')}
+                      disabled={!conversation || !writable || isArchived || promptTemplateBusy}
+                    >
+                      清空约束
+                    </button>
+                    {onReloadPromptTemplate && (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        disabled={promptTemplateBusy}
+                        onClick={onReloadPromptTemplate}
+                      >
+                        重新加载已保存约束
+                      </button>
+                    )}
+                    <details>
+                      <summary>查看最新版分镜制作模板</summary>
+                      <textarea
+                        aria-label="最新版分镜制作模板"
+                        value={SCENE_PROMPT_CONSTRAINT_TEMPLATE}
+                        readOnly
+                        rows={8}
+                      />
+                      <small>套用模板会替换当前编辑内容。</small>
+                    </details>
+                  </div>
+                </details>
               </div>
-              <small role="status">
-                {promptTemplateDirty
-                  ? '有未保存修改，发送时会自动保存并带上。'
-                  : '当前内容将在发送时附加。'}
-              </small>
               {promptTemplateError && <small role="alert">{promptTemplateError}</small>}
-              {onReloadPromptTemplate && (
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={promptTemplateBusy}
-                  onClick={onReloadPromptTemplate}
-                >
-                  重新加载已保存约束（替换当前编辑）
-                </button>
-              )}
             </div>
           </details>
         )}
@@ -1251,9 +1408,16 @@ export function ChatPanel({
                 <button
                   className="icon-button send-button"
                   type="button"
-                  title={conversationBusy ? '上一轮仍在执行' : '发送消息'}
+                  title={
+                    attachmentsPending
+                      ? '正在读取附件'
+                      : conversationBusy
+                        ? '上一轮仍在执行'
+                        : '发送消息'
+                  }
                   onClick={send}
                   disabled={
+                    attachmentsPending ||
                     conversationBusy ||
                     promptTemplateBusy ||
                     !writable ||
@@ -1284,7 +1448,15 @@ function toolNamesFromStartedSummary(summary: string): string[] {
 }
 
 function agentToolActionLabel(name: string): string {
-  return AGENT_TOOL_ACTION_LABELS[name] ?? `调用 ${name}`;
+  return AGENT_TOOL_ACTION_LABELS[name] ?? '执行项目操作';
+}
+
+function readableToolReceipt(summary: string): string {
+  const completed = summary.match(/^已完成：(.+)$/);
+  const names = completed?.[1]?.split('、');
+  return names?.every((name) => /^[a-z][\w-]*(?:\.[\w-]+)+$/.test(name))
+    ? `已完成：${names.map(agentToolActionLabel).join('、')}`
+    : summary;
 }
 
 function policyRejectionDetail(summary: string): string {
@@ -1297,15 +1469,38 @@ function policyRejectionDetail(summary: string): string {
 
 function readableAgentTaskError(error: string | undefined): string | undefined {
   if (!error) return undefined;
+  const httpStatus = error.match(/Provider HTTP (\d{3})\b/i)?.[1];
+  // Some gateways report billing failures as HTTP 401/403; use their explicit reason first.
+  if (
+    httpStatus &&
+    /\binsufficient[ _-]+(?:balance|quota|credits?|funds)\b|\b(?:balance|credits?|funds)[ _-]+(?:insufficient|exhausted)\b|余额不足|额度不足|欠费/i.test(
+      error,
+    )
+  )
+    return '模型服务余额或额度不足，本次任务未完成。请检查供应商账户并补足额度，或切换可用的模型连接后继续。已保存的内容会保留。';
+  if (httpStatus && /^5\d{2}$/.test(httpStatus))
+    return `模型服务暂时异常（HTTP ${httpStatus}），本次任务未完成。已保存的内容会保留，可稍后继续或切换模型后继续。`;
+  if (httpStatus === '429')
+    return '模型服务请求过多或额度不足，本次任务未完成。请稍后继续，或检查供应商额度。';
+  if (httpStatus === '401' || httpStatus === '403')
+    return '模型服务拒绝了访问，本次任务未完成。请检查供应商密钥和模型权限后继续。';
   if (/AGENT_SCENE_NOT_SAVED|AGENT_PRODUCTION_NOT_SAVED/.test(error))
     return (
       error.replace(/^AGENT_(?:SCENE|PRODUCTION)_NOT_SAVED:\s*/, '') +
       ' 已保存的草稿和分段会保留，可以继续处理。'
     );
+  if (/TOOL_REPAIR_LIMIT/.test(error))
+    return '参数校验连续失败后任务停止，本次未通过校验的操作没有执行；这不表示提交过大。请根据校验详情修正请求，再在当前会话重新提交未完成部分。已保存的草稿和分段会保留。';
+  if (error.startsWith('AGENT_OUTPUT_REPAIR_STALLED:'))
+    return '自动修复检测到相同的无效提交重复出现，任务已停止；重复的这次提交没有执行。已保存的草稿和分段会保留，可以继续完成。';
+  if (error.startsWith('AGENT_REPEATED_READ_STALLED:'))
+    return '模型反复读取同一版本、同一范围的资料且没有推进任务，已停止无效循环。已保存的内容会保留，可在当前会话继续完成未完成部分。';
   if (/AGENT_TOOL_QUOTA_EXHAUSTED/.test(error))
-    return '本轮工具调用额度已用完，任务未完成。已保存的草稿和分段会保留，可以继续处理。';
+    return '本任务的工具调用预算已用完，任务未完成。已保存的草稿和分段会保留；请在任务日志核对进度，再于当前会话提交未完成部分。';
+  if (/AGENT_TURN_QUOTA_EXHAUSTED/.test(error))
+    return '本任务的模型请求预算已用完，任务未完成。已保存的草稿和分段会保留；请在任务日志核对进度，再于当前会话提交未完成部分。';
   if (
-    /^(TOOL_OUTPUT_REPAIR_LIMIT|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
+    /^(TOOL_REPAIR_LIMIT|TOOL_OUTPUT_REPAIR_LIMIT|AGENT_OUTPUT_REPAIR_STALLED|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
       error,
     )
   ) {
@@ -1331,6 +1526,21 @@ function readableAgentTaskError(error: string | undefined): string | undefined {
     return '本次生成已取消。';
   }
   return error;
+}
+
+function AgentTaskError({ error, message }: { error: string; message?: string }) {
+  const readable = message ?? readableAgentTaskError(error);
+  return (
+    <div className="agent-task-error">
+      <p className="agent-tool-timeline-error">{readable}</p>
+      {readable !== error && /Provider HTTP \d{3}\b/i.test(error) && (
+        <details className="agent-task-error-details">
+          <summary>技术详情</summary>
+          <pre>{error}</pre>
+        </details>
+      )}
+    </div>
+  );
 }
 
 type AgentActionRow = {
@@ -1384,7 +1594,62 @@ const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
   'task.package.complete': '完成任务包',
   'settings.get': '读取设置',
   'adapter.schema.get': '查看适配器结构',
+  'adapter.schema.propose': '提交适配器配置',
+  'adapter.schema.audit.list': '查看适配器变更',
+  'novel.structure.get': '查看小说结构',
+  'novel.chapter.list': '查看小说章节',
+  'novel.chapter.update_metadata': '更新章节目录',
+  'novel.chapter.archive': '归档章节',
+  'novel.chapter.restore': '恢复章节',
+  'novel.chapter.submit_draft': '保存章节草稿',
+  'novel.chapter.write_draft': '撰写章节草稿',
+  'novel.reference.submit_draft': '保存小说设定',
+  'novel.episode.submit_draft': '保存分集大纲',
+  'novel.episode.submit_structure': '保存分集场次与镜头',
+  'novel.adaptation.submit_proposal': '保存改编方案',
+  'novel.chapter.batch.submit': '开始章节批量创作',
+  'novel.chapter.batch.source.read': '读取批量创作资料',
+  'novel.chapter.batch.get': '查看章节创作进度',
+  'scene.update_shot_prompts': '更新镜头提示词',
+  'scene.update_shot_timings': '更新镜头时长',
+  'shot.continuity.read': '查看镜头衔接资料',
+  'shot.continuity.save': '保存镜头衔接提示词',
+  'production.defaults.get': '查看制作默认设置',
+  'production.read': '读取制作内容',
+  'conversation.task.route': '准备创作任务',
+  'project.backup.prepare': '准备项目备份',
+  'project.export.prepare': '准备项目导出',
+  'project.restore.prepare': '准备项目恢复',
+  'asset.update_alias': '修改素材名称',
+  'asset.update_tags': '更新素材标签',
+  'settings.propose_update': '准备设置变更',
+  'settings.apply_update': '保存设置变更',
+  'maintenance.status': '检查维护状态',
+  'maintenance.clear_cache': '清理缓存',
+  'maintenance.cleanup_research_cache': '清理资料检索缓存',
+  'maintenance.cleanup_context_snapshots': '清理上下文快照',
+  'maintenance.diagnostics.prepare': '准备诊断信息',
 };
+
+function taskRecoveryInstruction(detail: AgentTaskDetail): string {
+  const generationId =
+    detail.savedProductionReceipts?.receipts[0]?.generationId ??
+    detail.providerSteps.at(-1)?.generationId;
+  return `${generationId ? `请先调用 conversation.task.route，decision=inspect，targetGenerationId=${generationId}，核对持久化保存回执，按 nextOffset 查询其余回执。` : '请先核对刚才任务日志、已保存草稿和分段进度。'}保留原请求、全部会话要求、现有内容与 ID，只补完未完成部分；已经保存的修改不要重复执行。如果所需修改已全部保存，请直接确认结果。`;
+}
+
+function taskResultLabel(detail: AgentTaskDetail | undefined): string | undefined {
+  if (!detail) return undefined;
+  const task = detail.task;
+  if (task.status === 'cancelled') return '任务已停止';
+  if (task.status === 'failed') return '任务失败 · 未完成';
+  if (task.status !== 'completed') return undefined;
+  if (task.completionState === 'partial')
+    return task.outcome === 'read-only' ? '未完成 · 未执行保存' : '部分完成';
+  const hasSaves =
+    detail.documents.length > 0 || Boolean(detail.savedProductionReceipts?.receipts.length);
+  return hasSaves ? '回复结束 · 已有保存记录' : '回复结束';
+}
 
 function agentTaskForAssistantMessage(
   messageId: string,
@@ -1468,7 +1733,7 @@ function agentActionRows(
       event.eventType === 'agent.tool.succeeded' ||
       event.eventType === 'agent.research.completed'
     ) {
-      flushPending('ok', event.summary);
+      flushPending('ok', readableToolReceipt(event.summary));
       continue;
     }
     if (event.eventType === 'document.draft.created') {
@@ -1536,7 +1801,12 @@ function mergeLiveAgentActions(
   running: boolean,
 ): AgentActionRow[] {
   const merged = [...rows];
+  const latestModelRequest = liveActions
+    ?.slice()
+    .reverse()
+    .find((action) => action.toolName === 'model.request');
   for (const live of liveActions ?? []) {
+    if (live.toolName === 'model.request' && live !== latestModelRequest) continue;
     if (
       merged.some(
         (row) =>
@@ -1578,6 +1848,7 @@ function mergeLiveAgentActions(
                     complete: '本轮接收完成',
                     failed: '本轮请求失败',
                     cancelled: '已取消',
+                    retry_wait: '模型服务暂时异常，稍后自动重试',
                   } as Record<string, string>
                 )[live.phase]
               : undefined,
@@ -1634,6 +1905,20 @@ function AgentToolTimeline({
     liveActions,
     running && !generationFailed,
   );
+  const completedActionCount = actions.filter((action) => action.status === 'ok').length;
+  const attentionActionCount = actions.filter(
+    (action) => action.status === 'warn' || action.status === 'error',
+  ).length;
+  const activeTool = actions.some(
+    (action) =>
+      action.toolName && action.toolName !== 'model.request' && action.status === 'running',
+  );
+  const composingReply = liveActions?.some(
+    (action) => action.toolName === 'model.request' && action.phase === 'visible_text',
+  );
+  const retryingRequest = liveActions?.some(
+    (action) => action.phase === 'retry_wait' && action.status === 'running',
+  );
   const rawError = generationError ?? detail?.task.errorMessage;
   const readableError = readableAgentTaskError(rawError);
   // A completed request may still contain a rejected read. Only persisted
@@ -1644,7 +1929,7 @@ function AgentToolTimeline({
   const errorMessage =
     readableError &&
     readCompleted &&
-    /^(TOOL_OUTPUT_REPAIR_LIMIT|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
+    /^(TOOL_REPAIR_LIMIT|TOOL_OUTPUT_REPAIR_LIMIT|AGENT_OUTPUT_REPAIR_STALLED|INVALID_TOOL_ARGUMENTS|INCOMPLETE_PROVIDER_OUTPUT|INCOMPLETE_TOOL_OUTPUT):/.test(
       rawError ?? '',
     )
       ? `资料已读取；${readableError}`
@@ -1679,15 +1964,26 @@ function AgentToolTimeline({
             <Terminal size={12} />
             <span>
               {running
-                ? actions.some((action) => action.toolName && action.status === 'running')
-                  ? '正在调用工具'
-                  : '等待助手回复'
+                ? retryingRequest
+                  ? '模型服务暂时异常，正在准备重试'
+                  : activeTool
+                    ? '正在调用工具'
+                    : composingReply
+                      ? '正在回复'
+                      : '等待助手回复'
                 : stage
                   ? `已调用 ${actions.filter((action) => action.toolName).length} 个工具`
                   : '调用了工具'}
             </span>
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
+          <small className="agent-tool-timeline-progress">
+            {running
+              ? `${completedActionCount} 项已完成${activeTool ? ' · 正在执行下一步' : ''}`
+              : attentionActionCount > 0
+                ? `${completedActionCount} 项完成 · ${attentionActionCount} 项需关注`
+                : `${completedActionCount} 项操作完成`}
+          </small>
           {expanded ? (
             <ul className="agent-tool-timeline-calls">
               {actions.map((action) => (
@@ -1700,10 +1996,10 @@ function AgentToolTimeline({
                   <span>
                     <strong>{action.title}</strong>
                     {action.toolName ? (
-                      <>
-                        {' '}
+                      <details className="agent-tool-result">
+                        <summary>技术详情</summary>
                         <code>{action.toolName}</code>
-                      </>
+                      </details>
                     ) : null}
                     {action.detail ? (
                       <details className="agent-tool-result">
@@ -1715,7 +2011,15 @@ function AgentToolTimeline({
                 </li>
               ))}
               {(detail?.librarySources ?? []).map((source) => (
-                <li key={`${source.citationLabel}-${source.sourceId}`}>
+                <li
+                  key={JSON.stringify([
+                    source.sourceType,
+                    source.sourceId,
+                    source.versionId,
+                    source.status,
+                    source.structureNodeId,
+                  ])}
+                >
                   <BookOpen size={12} />
                   {onOpenLibrarySource ? (
                     <button type="button" onClick={() => onOpenLibrarySource(source)}>
@@ -1737,7 +2041,7 @@ function AgentToolTimeline({
           ) : null}
         </>
       ) : null}
-      {errorMessage ? <p className="agent-tool-timeline-error">{errorMessage}</p> : null}
+      {errorMessage && rawError ? <AgentTaskError error={rawError} message={errorMessage} /> : null}
     </section>
   );
 }
@@ -1756,6 +2060,18 @@ export function MediaModelSelectionCard({
   onCancel?: () => void;
 }) {
   const [candidateKey, setCandidateKey] = useState('');
+  const selectionRef = useRef<HTMLDivElement>(null);
+  // Request assets remain present even when the caller supplies an empty attachment list.
+  const referenceInputsKey = JSON.stringify([
+    ...request.inputAssetIds.map((id) => `asset://${id}`),
+    ...(referenceImageInputs ?? [])
+      .filter((url) => !imageAssetId(url))
+      .slice(0, request.inputAttachmentCount),
+  ]);
+  const requestReferenceInputs = useMemo<string[]>(
+    () => JSON.parse(referenceInputsKey) as string[],
+    [referenceInputsKey],
+  );
   const candidate = request.candidates.find(
     (item) => `${item.providerProfileId}:${item.modelId}` === candidateKey,
   );
@@ -1764,9 +2080,14 @@ export function MediaModelSelectionCard({
     setCandidateKey('');
   }, [request.selectionToken]);
 
+  useEffect(() => {
+    if (selectionRef.current) selectionRef.current.scrollTop = 0;
+  }, [candidateKey]);
+
   return (
     <div
       className="agent-model-selection media-model-selection"
+      ref={selectionRef}
       role="dialog"
       aria-label={`选择${request.kind === 'image' ? '图片' : '视频'}生成模型`}
     >
@@ -1815,7 +2136,7 @@ export function MediaModelSelectionCard({
               modelName: candidate.modelName,
               adapters: candidate.adapters,
               affectsCost: candidate.costNotice.required,
-              referenceImageInputs,
+              referenceImageInputs: requestReferenceInputs,
               proposedParameters: request.proposedParameters,
             }}
             onSubmit={(adapterKey, parameters) =>
@@ -1864,6 +2185,12 @@ function AgentParameterCard({
       }
     }
     const existingImages = productionImagesFromParameters(adapter, values);
+    const images = [...existingImages];
+    for (const url of request.referenceImageInputs ?? []) {
+      const identity = imageAssetId(url) ?? url;
+      if (!images.some((image) => (imageAssetId(image.url) ?? image.url) === identity))
+        images.push({ url, role: 'reference' });
+    }
     return seedProductionInputs(
       adapter,
       values,
@@ -1876,15 +2203,14 @@ function AgentParameterCard({
             )
           ? undefined
           : request.prompt,
-      existingImages.length
-        ? undefined
-        : request.referenceImageInputs?.map((url) => ({ url, role: 'reference' })),
+      images.length ? images : undefined,
     );
   }, [adapter, request.proposedParameters, request.referenceImageInputs, request.prompt]);
   const [parameters, setParameters] = useState<AdapterParameters>(initialValues);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const submittedRef = useRef(false);
+  const [pendingFields, setPendingFields] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     if (!adapter) return;
@@ -1909,21 +2235,47 @@ function AgentParameterCard({
     setParameters((current) => updatePromptParameter(adapter, current, key, value));
   };
   const submit = () => {
-    if (submittedRef.current || !onSubmit) return;
+    if (submittedRef.current || !onSubmit || pendingFields.size) return;
     const missing = adapter.parameterSchema.required.filter((key) => {
       const value = parameters[key];
-      return value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
+      return (
+        value === undefined ||
+        value === '' ||
+        (Array.isArray(value) && (value.length === 0 || value.every((item) => item === '')))
+      );
     });
     if (missing.length > 0) {
-      setError(`请填写必填参数：${missing.join('、')}`);
+      setError(
+        `请填写必填参数：${missing.map((key) => adapter.parameterSchema.properties[key]?.title || key).join('、')}`,
+      );
       return;
+    }
+    const imageProperty = adapter.parameterSchema.properties.images;
+    if (imageProperty?.type === 'array' && Array.isArray(parameters.images)) {
+      const count = parameters.images.filter(
+        (item) => typeof item === 'string' && item.trim(),
+      ).length;
+      if (count < (imageProperty.minItems ?? 0) || count > (imageProperty.maxItems ?? Infinity)) {
+        setError(
+          `请检查${imageProperty.title || '参考图片'}数量：至少 ${imageProperty.minItems ?? 0} 张${imageProperty.maxItems === undefined ? '' : `，最多 ${imageProperty.maxItems} 张`}。`,
+        );
+        return;
+      }
     }
     setError('');
     submittedRef.current = true;
     setSubmitted(true);
     onSubmit(
       adapter.key,
-      canonicalPromptParameters(parameters, promptReferences(adapter, parameters)),
+      canonicalPromptParameters(
+        Array.isArray(parameters.images)
+          ? {
+              ...parameters,
+              images: parameters.images.filter((item) => typeof item === 'string' && item.trim()),
+            }
+          : parameters,
+        promptReferences(adapter, parameters),
+      ),
     );
   };
 
@@ -1964,19 +2316,30 @@ function AgentParameterCard({
             value={parameters[key]}
             references={promptReferences(adapter, parameters)}
             projectId={projectId}
+            onPendingChange={(pending) =>
+              setPendingFields((current) => {
+                if (current.has(key) === pending) return current;
+                const next = new Set(current);
+                if (pending) next.add(key);
+                else next.delete(key);
+                return next;
+              })
+            }
             onChange={(value) => update(key, value)}
           />
         ))}
       </div>
-      {error && <small className="agent-parameter-error">{error}</small>}
-      <button
-        className="button primary"
-        type="button"
-        onClick={submit}
-        disabled={submitted || !onSubmit}
-      >
-        {submitted ? '正在提交…' : '提交生成'}
-      </button>
+      <div className="agent-parameter-actions">
+        {error && <small className="agent-parameter-error">{error}</small>}
+        <button
+          className="button primary"
+          type="button"
+          onClick={submit}
+          disabled={submitted || !onSubmit || pendingFields.size > 0}
+        >
+          {submitted ? '正在提交…' : '提交生成'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1989,6 +2352,7 @@ function AgentParameterField({
   required,
   value,
   onChange,
+  onPendingChange,
 }: {
   references: PromptReference[];
   projectId?: string;
@@ -1997,6 +2361,7 @@ function AgentParameterField({
   required: boolean;
   value?: AdapterParameters[string];
   onChange: (value: AdapterParameters[string] | undefined) => void;
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const id = `agent-parameter-${name}`;
   const label = `${property.title || name}${required ? ' *' : ''}`;
@@ -2038,7 +2403,7 @@ function AgentParameterField({
           checked={value === true}
           onChange={(e) => onChange(e.target.checked)}
         />
-        {label}
+        <span>{label}</span>
         {metadata}
       </label>
     );
@@ -2064,6 +2429,20 @@ function AgentParameterField({
     );
   }
   if (property.type === 'array') {
+    if (name === 'images' && property.items?.type === 'string')
+      return (
+        <ImageListParameterField
+          field={{ key: name }}
+          inputId={id}
+          label={<label htmlFor={id}>{label}</label>}
+          description={metadata}
+          property={property}
+          value={value}
+          projectId={projectId}
+          onChange={onChange}
+          onPendingChange={onPendingChange}
+        />
+      );
     const list = Array.isArray(value)
       ? value.filter((item): item is string => typeof item === 'string').join('\n')
       : '';
@@ -2114,25 +2493,35 @@ function AgentParameterField({
     );
   const numeric = property.type === 'integer';
   return (
-    <label className="parameter-field" htmlFor={id}>
-      <span>{label}</span>
-      <input
-        id={id}
-        type={numeric ? 'number' : 'text'}
-        value={parameterScalarText(value)}
-        min={property.minimum}
-        max={property.maximum}
-        onChange={(e) =>
-          onChange(
-            numeric
-              ? e.target.value === ''
-                ? undefined
-                : Number(e.target.value)
-              : e.target.value || undefined,
-          )
-        }
-      />
-      {metadata}
-    </label>
+    <StructuredAssetDrop
+      schema={property}
+      value={value}
+      projectId={projectId}
+      onChange={onChange}
+      mediaKind={
+        ['video', 'video_url'].includes(name) && property.type === 'string' ? 'video' : undefined
+      }
+    >
+      <label className="parameter-field" htmlFor={id}>
+        <span>{label}</span>
+        <input
+          id={id}
+          type={numeric ? 'number' : 'text'}
+          value={parameterScalarText(value)}
+          min={property.minimum}
+          max={property.maximum}
+          onChange={(e) =>
+            onChange(
+              numeric
+                ? e.target.value === ''
+                  ? undefined
+                  : Number(e.target.value)
+                : e.target.value || undefined,
+            )
+          }
+        />
+        {metadata}
+      </label>
+    </StructuredAssetDrop>
   );
 }

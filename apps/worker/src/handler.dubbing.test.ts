@@ -431,6 +431,15 @@ describe('dubbing Worker RPC integration', () => {
       }),
     ).rejects.toThrow();
     await expect(
+      rpc('characterVoiceReference.generate', {
+        characterDocumentId: f.character.id,
+        expectedVoiceVersionId: f.voice.versionId,
+        expectedRowVersion: 0,
+        text: '你好，很高兴认识你。',
+        costAcknowledged: false,
+      }),
+    ).rejects.toThrow();
+    await expect(
       rpc('dubbing.take.generate', {
         cueId: f.cue.id,
         expectedRowVersion: f.cue.rowVersion,

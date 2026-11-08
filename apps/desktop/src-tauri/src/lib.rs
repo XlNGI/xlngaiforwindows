@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod context_e2e;
+#[cfg(test)]
 use std::sync::mpsc::Receiver;
 use std::{
     borrow::Cow,
@@ -7,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
         Arc, Mutex,
     },
@@ -39,10 +41,7 @@ use credential_store::{
 use credential_store::{
     credential_target, ensure_credential_subject, validate_credential_provider,
 };
-use llm_stream::{
-    agent_runtime_cancel, agent_runtime_confirm, agent_runtime_start, agent_runtime_subscribe,
-    llm_stream, llm_stream_cancel, LlmStreamState,
-};
+use llm_stream::{llm_stream, llm_stream_cancel, LlmStreamState};
 use novel_import::novel_import;
 use provider_connector::provider_test_connection;
 use provider_http::{
@@ -52,7 +51,9 @@ use provider_http::{
 use research_bridge::NativeResearchBridge;
 
 const WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(13 * 60);
 static MODEL_INPUT_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static OPENAI_VIDEO_MULTIPART_ID: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn model_input_root() -> Option<PathBuf> {
     MODEL_INPUT_ROOT.get().cloned().or_else(|| {
         std::env::var("AI_VIDEO_MEDIA_INPUT_ROOT")
@@ -62,6 +63,7 @@ pub(crate) fn model_input_root() -> Option<PathBuf> {
 }
 const MEDIA_WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(12 * 60);
 const SIDECAR_ENVELOPE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const MODEL_REQUEST_ENVELOPE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 16 * 1024;
 const PROVIDER_REQUEST_BODY_LIMIT: usize = 32 * 1024 * 1024;
 const PROVIDER_RESPONSE_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -76,7 +78,7 @@ const PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PROVIDER_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_TASK_ID_LIMIT: usize = 256;
 const MARKDOWN_IMPORT_LIMIT: u64 = 5 * 1024 * 1024;
-const NATIVE_AGENT_EXIT_GRACE: Duration = Duration::from_secs(2);
+const RUNTIME_EXIT_GRACE: Duration = Duration::from_secs(10);
 const UNICOMPAPI_HOST: &str = "unicompapi.com";
 const UNICOMPAPI_AUTHORIZATION_SCHEME: &str = "Bearer";
 #[cfg(any(not(debug_assertions), test))]
@@ -244,13 +246,13 @@ fn unicompapi_submit_template<'a>(adapter_key: &'a str) -> Result<(&'a str, &'a 
     Ok((parsed.capability, template))
 }
 
-fn validate_unicompapi_remote_model_id(remote_model_id: &str) -> Result<(), String> {
+fn validate_remote_model_id(remote_model_id: &str) -> Result<(), String> {
     if remote_model_id.is_empty()
         || remote_model_id.len() > 256
         || remote_model_id.trim() != remote_model_id
         || remote_model_id.chars().any(char::is_control)
     {
-        return Err("UniCompAPI remote model ID is invalid".to_string());
+        return Err("Provider remote model ID is invalid".to_string());
     }
     Ok(())
 }
@@ -356,6 +358,32 @@ struct MediaCredentialSelection {
     credential_subject: String,
     provider_region: String,
     remote_model_id: String,
+    base_url: String,
+}
+
+fn openai_images_provider(adapter_key: &str) -> Option<&'static str> {
+    let parts = adapter_key.split(':').collect::<Vec<_>>();
+    if parts.len() != 4
+        || parts[0] != "TEXT_TO_IMAGE"
+        || parts[2] != "openai-images"
+        || parts[3] != "v1"
+    {
+        return None;
+    }
+    match parts[1] {
+        "openai" => Some("openai"),
+        "custom" => Some("custom"),
+        _ => None,
+    }
+}
+
+fn is_custom_openai_video_adapter(adapter_key: &str) -> bool {
+    let parts = adapter_key.split(':').collect::<Vec<_>>();
+    parts.len() == 4
+        && matches!(parts[0], "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO")
+        && parts[1] == "custom"
+        && parts[2] == "openai-compatible-video"
+        && parts[3] == "v1"
 }
 
 fn resolve_media_selection(
@@ -393,6 +421,12 @@ fn resolve_media_selection(
         .get("protocol")
         .and_then(serde_json::Value::as_str)
         .ok_or("Provider profile is missing a protocol")?;
+    let access_type = profile
+        .get("accessType")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Provider profile is missing its access type")?;
+    let openai_images = openai_images_provider(adapter_key);
+    let custom_openai_video = is_custom_openai_video_adapter(adapter_key);
     let official_video_profile = matches!(
         (provider_type, protocol),
         ("wan-video", "dashscope-video")
@@ -401,7 +435,15 @@ fn resolve_media_selection(
     );
     if !((provider_type == "vidu" && protocol == "vidu-v2")
         || official_video_profile
-        || (provider_type == "unicompapi" && protocol == "openai-chat-completions"))
+        || (provider_type == "unicompapi" && protocol == "openai-chat-completions")
+        || (provider_type == "openai"
+            && protocol == "openai-responses"
+            && access_type == "official"
+            && openai_images == Some("openai"))
+        || (provider_type == "custom"
+            && access_type == "custom"
+            && matches!(protocol, "openai-responses" | "openai-chat-completions")
+            && (openai_images == Some("custom") || custom_openai_video)))
     {
         return Err("Provider profile is not a supported media connection".to_string());
     }
@@ -424,6 +466,12 @@ fn resolve_media_selection(
         | ("seedance-video", Some("https://ark.cn-beijing.volces.com"))
         | ("minimax-video", Some("https://api.minimax.cn")) => "cn",
         ("wan-video", Some(url)) if provider_http::wan_video_host(url).is_some() => "cn",
+        ("openai", Some("https://api.openai.com/v1")) => "global",
+        ("custom", Some(url)) if access_type == "custom" => {
+            let target = openai_images_target(url, "custom")?;
+            provider_http::assert_provider_api_host(&target.host)?;
+            "global"
+        }
         _ => return Err("Provider profile uses an unsupported media Base URL".to_string()),
     };
     if let Some(requested_region) = provider_region.filter(|value| !value.is_empty()) {
@@ -446,7 +494,9 @@ fn resolve_media_selection(
     } else {
         None
     };
-    let adapter_model = if let Some(contract) = official_contract.as_ref() {
+    let adapter_model = if openai_images.is_some() || custom_openai_video {
+        ""
+    } else if let Some(contract) = official_contract.as_ref() {
         contract["officialModelName"]
             .as_str()
             .ok_or("Official model name is missing")?
@@ -504,6 +554,15 @@ fn resolve_media_selection(
                         .and_then(serde_json::Value::as_str)
                         == Some(parts.token)
                 }
+            } else if openai_images == Some("openai") {
+                model
+                    .get("remoteModelId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.to_ascii_lowercase().starts_with("gpt-image-"))
+            } else if openai_images == Some("custom") {
+                true
+            } else if custom_openai_video {
+                true
             } else {
                 model
                     .get("remoteModelId")
@@ -523,6 +582,11 @@ fn resolve_media_selection(
         credential_subject: normalized_profile_id,
         provider_region: region.to_string(),
         remote_model_id: remote_model_id.to_string(),
+        base_url: profile
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Provider profile is missing its Base URL")?
+            .to_string(),
     })
 }
 
@@ -574,6 +638,443 @@ fn provider_payload(target: ProviderTarget, payload: serde_json::Value) -> Resul
     Ok(encoded)
 }
 
+struct OpenAiImagesTarget {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+struct OpenAiVideoPayload {
+    body: Vec<u8>,
+    multipart_boundary: Option<String>,
+}
+
+fn openai_images_target(base_url: &str, provider_type: &str) -> Result<OpenAiImagesTarget, String> {
+    openai_compatible_target(base_url, provider_type, "/images/generations")
+}
+
+fn openai_compatible_video_target(base_url: &str) -> Result<OpenAiImagesTarget, String> {
+    openai_compatible_target(base_url, "custom", "/videos")
+}
+
+fn openai_compatible_target(
+    base_url: &str,
+    provider_type: &str,
+    endpoint: &str,
+) -> Result<OpenAiImagesTarget, String> {
+    if !matches!(endpoint, "/images/generations" | "/videos") {
+        return Err("OpenAI-compatible endpoint is not allowed".into());
+    }
+    let url = tauri::Url::parse(base_url).map_err(|_| "Provider Base URL is invalid")?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("OpenAI Images API requires a credential-free HTTPS Base URL".into());
+    }
+    let host = url.host_str().ok_or("Provider Base URL has no host")?;
+    let base_path = url.path().trim_end_matches('/');
+    if base_path.ends_with(endpoint)
+        || base_path.split('/').any(|part| matches!(part, "." | ".."))
+        || base_path.contains('%')
+    {
+        return Err("Provider Base URL must be an API root, not an endpoint URL".into());
+    }
+    if provider_type == "openai"
+        && (endpoint != "/images/generations"
+            || host != "api.openai.com"
+            || base_path != "/v1"
+            || url.port().is_some())
+    {
+        return Err("Official OpenAI Images requests require the OpenAI API Base URL".into());
+    }
+    if !matches!(provider_type, "openai" | "custom") {
+        return Err("Provider is not allowed to use the OpenAI Images protocol".into());
+    }
+    let prefix = if base_path.is_empty() { "" } else { base_path };
+    Ok(OpenAiImagesTarget {
+        host: host.to_string(),
+        port: url.port().unwrap_or(443),
+        path: format!("{prefix}{endpoint}"),
+    })
+}
+
+fn openai_images_payload(
+    adapter_key: &str,
+    remote_model_id: &str,
+    payload: serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    let provider = openai_images_provider(adapter_key)
+        .ok_or("Selected adapter is not an OpenAI Images generation adapter")?;
+    if provider != "openai" && provider != "custom" {
+        return Err("Selected adapter is not an OpenAI Images generation adapter".into());
+    }
+    let is_custom = provider == "custom";
+    validate_remote_model_id(remote_model_id)?;
+    let mut object = payload
+        .as_object()
+        .cloned()
+        .ok_or("Provider payload must be a JSON object")?;
+    validate_payload_fields(
+        &object,
+        if is_custom {
+            &[
+                "prompt",
+                "size",
+                "quality",
+                "style",
+                "response_format",
+                "background",
+                "output_format",
+                "output_compression",
+                "moderation",
+                "n",
+            ]
+        } else {
+            &[
+                "prompt",
+                "size",
+                "quality",
+                "background",
+                "output_format",
+                "output_compression",
+                "moderation",
+                "n",
+            ]
+        },
+    )?;
+    let prompt = object
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.chars().count() <= 32_000)
+        .ok_or("OpenAI Images requires a non-empty prompt")?;
+    let _ = prompt;
+    let valid_enum = |field: &str, values: &[&str]| {
+        object
+            .get(field)
+            .is_none_or(|value| value.as_str().is_some_and(|value| values.contains(&value)))
+    };
+    let valid_string = |field: &str, max_chars: usize| {
+        object.get(field).is_none_or(|value| {
+            value.as_str().is_some_and(|value| {
+                !value.trim().is_empty()
+                    && value.chars().count() <= max_chars
+                    && !value.contains(['\r', '\n'])
+            })
+        })
+    };
+    if (if is_custom {
+        !valid_string("size", 64)
+    } else {
+        !valid_enum("size", &["auto", "1024x1024", "1536x1024", "1024x1536"])
+    }) || (if is_custom {
+        !valid_enum(
+            "quality",
+            &["auto", "low", "medium", "high", "standard", "hd"],
+        ) || !valid_enum("style", &["standard", "vivid"])
+            || !valid_enum("response_format", &["url", "b64_json"])
+    } else {
+        !valid_enum("quality", &["auto", "low", "medium", "high"])
+    }) || !valid_enum("background", &["auto", "opaque", "transparent"])
+        || !valid_enum("output_format", &["png", "jpeg", "webp"])
+        || !valid_enum("moderation", &["auto", "low"])
+    {
+        return Err("OpenAI Images payload contains an unsupported option".into());
+    }
+    if object.get("n").is_some_and(|value| {
+        value.as_u64().is_none_or(|count| {
+            if is_custom {
+                !(1..=10).contains(&count)
+            } else {
+                !(1..=4).contains(&count)
+            }
+        })
+    }) {
+        return Err(if is_custom {
+            "OpenAI-compatible Images result count must be between 1 and 10".into()
+        } else {
+            "OpenAI Images result count must be between 1 and 4".into()
+        });
+    }
+    if object.get("output_compression").is_some_and(|value| {
+        value.as_u64().is_none_or(|compression| compression > 100)
+            || !object
+                .get("output_format")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|format| matches!(format, "jpeg" | "webp"))
+    }) {
+        return Err("Output compression requires JPEG or WebP and a value from 0 to 100".into());
+    }
+    if object.get("background").and_then(serde_json::Value::as_str) == Some("transparent")
+        && object
+            .get("output_format")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|format| format == "jpeg")
+    {
+        return Err("Transparent backgrounds require PNG or WebP output".into());
+    }
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(remote_model_id.to_string()),
+    );
+    let encoded = serde_json::to_vec(&object)
+        .map_err(|error| format!("Unable to encode OpenAI Images parameters: {error}"))?;
+    if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
+        return Err("Provider payload exceeds the native transport limit".into());
+    }
+    Ok(encoded)
+}
+
+fn openai_compatible_video_payload(
+    adapter_key: &str,
+    remote_model_id: &str,
+    payload: serde_json::Value,
+) -> Result<OpenAiVideoPayload, String> {
+    if !is_custom_openai_video_adapter(adapter_key) {
+        return Err("Selected adapter is not a custom OpenAI-compatible video adapter".into());
+    }
+    validate_remote_model_id(remote_model_id)?;
+    let mut object = payload
+        .as_object()
+        .cloned()
+        .ok_or("Provider payload must be a JSON object")?;
+    validate_payload_fields(
+        &object,
+        &["images", "prompt", "size", "duration", "seconds"],
+    )?;
+    let prompt = object
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.chars().count() <= 5000)
+        .ok_or("OpenAI-compatible video requires a non-empty prompt")?;
+    let prompt = prompt.to_string();
+    let images = object
+        .remove("images")
+        .and_then(|value| value.as_array().cloned());
+    let image_to_video = adapter_key.starts_with("IMAGE_TO_VIDEO:");
+    let image = images
+        .as_deref()
+        .and_then(|images| (images.len() == 1).then(|| images[0].as_str()).flatten());
+    if (image_to_video && image.is_none()) || (!image_to_video && images.is_some()) {
+        return Err("OpenAI-compatible video image inputs do not match the selected mode".into());
+    }
+
+    let mut wire = serde_json::Map::new();
+    wire.insert(
+        "model".to_string(),
+        serde_json::Value::String(remote_model_id.to_string()),
+    );
+    wire.insert(
+        "prompt".to_string(),
+        serde_json::Value::String(prompt.clone()),
+    );
+    if let Some(size) = object.remove("size") {
+        let size = size
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 32 && !value.contains(['\r', '\n']))
+            .ok_or("OpenAI-compatible video size is invalid")?;
+        wire.insert(
+            "size".to_string(),
+            serde_json::Value::String(size.to_string()),
+        );
+    }
+    let seconds = object.remove("seconds");
+    let duration = object.remove("duration");
+    if seconds.is_some() && duration.is_some() {
+        return Err("Specify either duration or seconds, not both".into());
+    }
+    if let Some(value) = seconds.or(duration) {
+        let value = value
+            .as_u64()
+            .filter(|value| (1..=60).contains(value))
+            .map(|value| value.to_string())
+            .or_else(|| {
+                value
+                    .as_str()
+                    .filter(|value| value.parse::<u8>().is_ok_and(|n| (1..=60).contains(&n)))
+                    .map(str::to_string)
+            })
+            .ok_or("OpenAI-compatible video seconds must be between 1 and 60")?;
+        wire.insert("seconds".to_string(), serde_json::Value::String(value));
+    }
+
+    if let Some(image) = image {
+        if image.starts_with("https://") {
+            parse_public_https_url(image)?;
+            wire.insert(
+                "input_reference".to_string(),
+                serde_json::json!({ "image_url": image }),
+            );
+            let encoded = serde_json::to_vec(&wire).map_err(|error| {
+                format!("Unable to encode OpenAI-compatible video parameters: {error}")
+            })?;
+            if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
+                return Err("Provider payload exceeds the native transport limit".into());
+            }
+            return Ok(OpenAiVideoPayload {
+                body: encoded,
+                multipart_boundary: None,
+            });
+        }
+        if !image.starts_with("data:image/") {
+            return Err(
+                "OpenAI-compatible video references must be HTTPS URLs or image data URLs".into(),
+            );
+        }
+        let (image_bytes, content_type, extension) =
+            decode_embedded_image(image, "input_reference")?;
+        return openai_video_multipart_payload(
+            wire,
+            &prompt,
+            &image_bytes,
+            content_type,
+            extension,
+        );
+    }
+
+    let encoded = serde_json::to_vec(&wire)
+        .map_err(|error| format!("Unable to encode OpenAI-compatible video parameters: {error}"))?;
+    if encoded.len() > PROVIDER_REQUEST_BODY_LIMIT {
+        return Err("Provider payload exceeds the native transport limit".into());
+    }
+    Ok(OpenAiVideoPayload {
+        body: encoded,
+        multipart_boundary: None,
+    })
+}
+
+fn openai_video_multipart_payload(
+    fields: serde_json::Map<String, serde_json::Value>,
+    prompt: &str,
+    image: &[u8],
+    content_type: &str,
+    extension: &str,
+) -> Result<OpenAiVideoPayload, String> {
+    let mut boundary_id = OPENAI_VIDEO_MULTIPART_ID.fetch_add(1, Ordering::Relaxed);
+    let boundary = loop {
+        let candidate = format!("xln-video-{}-{boundary_id}", std::process::id());
+        let marker = format!("--{candidate}");
+        let collides = image
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+            || prompt.contains(&marker);
+        if !collides {
+            break candidate;
+        }
+        boundary_id = OPENAI_VIDEO_MULTIPART_ID.fetch_add(1, Ordering::Relaxed);
+    };
+
+    let mut body = Vec::new();
+    for key in ["model", "prompt", "size", "seconds"] {
+        let Some(value) = fields.get(key).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"input_reference\"; filename=\"reference.{extension}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(image);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    if body.len() > PROVIDER_REQUEST_BODY_LIMIT {
+        return Err("Provider payload exceeds the native transport limit".into());
+    }
+    Ok(OpenAiVideoPayload {
+        body,
+        multipart_boundary: Some(boundary),
+    })
+}
+
+fn openai_compatible_video_task_path(
+    target: &OpenAiImagesTarget,
+    task_id: &str,
+) -> Result<String, String> {
+    provider_task_path(task_id)?;
+    if !target.path.ends_with("/videos") {
+        return Err("OpenAI-compatible video endpoint is invalid".into());
+    }
+    Ok(format!("{}/{task_id}", target.path))
+}
+
+fn openai_video_reference_host(payload: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(image) = payload
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|images| (images.len() == 1).then(|| images[0].as_str()).flatten())
+    else {
+        return Ok(None);
+    };
+    if image.starts_with("https://") {
+        return Ok(Some(parse_public_https_url(image)?.host));
+    }
+    Ok(None)
+}
+
+fn provider_openai_images_submit_blocking(
+    adapter_key: &str,
+    provider_type: &str,
+    base_url: &str,
+    credential_subject: &str,
+    payload: serde_json::Value,
+    remote_model_id: &str,
+) -> Result<ProviderHttpResponse, OpenAiImagesSubmitFailure> {
+    if openai_images_provider(adapter_key) != Some(provider_type) {
+        return Err(OpenAiImagesSubmitFailure::not_sent(
+            "Provider and OpenAI Images adapter do not match",
+        ));
+    }
+    let target = openai_images_target(base_url, provider_type)
+        .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    if provider_type == "custom" {
+        provider_http::assert_provider_api_host(&target.host)
+    } else {
+        provider_http::assert_public_host(&target.host)
+    }
+    .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let body = openai_images_payload(adapter_key, remote_model_id, payload)
+        .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let secret =
+        credential_read(credential_subject).map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let secret = secret
+        .as_str()
+        .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let response = provider_http::request_json_with_receive_timeout(
+        JsonHttpRequest {
+            host: &target.host,
+            port: target.port,
+            secure: true,
+            method: "POST",
+            path: &target.path,
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret,
+            body: Some(&body),
+            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+            response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
+        },
+        Duration::from_secs(5 * 60),
+    )
+    .map_err(OpenAiImagesSubmitFailure::after_transport)?;
+    let mut response = ProviderHttpResponse {
+        status: response.status,
+        body: response.body,
+        retry_after_ms: response.retry_after_ms,
+    };
+    externalize_provider_images(&mut response)
+        .map_err(OpenAiImagesSubmitFailure::after_submission)?;
+    Ok(response)
+}
+
 fn validate_payload_fields(
     object: &serde_json::Map<String, serde_json::Value>,
     allowed_fields: &[&str],
@@ -602,7 +1103,7 @@ fn unicompapi_payload(
     payload: serde_json::Value,
     remote_model_id: &str,
 ) -> Result<Vec<u8>, String> {
-    validate_unicompapi_remote_model_id(remote_model_id)?;
+    validate_remote_model_id(remote_model_id)?;
     if model_contract::is_contract_adapter(adapter_key) {
         let capability = adapter_key.split(':').next().unwrap_or_default();
         if matches!(capability, "TEXT_TO_IMAGE" | "REFERENCE_TO_IMAGE") {
@@ -618,7 +1119,7 @@ fn unicompapi_payload(
         }
         return Ok(encoded);
     }
-    let (capability, _template) = unicompapi_submit_template(adapter_key)?;
+    let (capability, template) = unicompapi_submit_template(adapter_key)?;
     if capability == "REFERENCE_TO_IMAGE" {
         return unicompapi_qwen_image_edit_payload(remote_model_id, payload);
     }
@@ -634,6 +1135,22 @@ fn unicompapi_payload(
         _ => return Err("UniCompAPI adapter capability is not supported".to_string()),
     };
     validate_payload_fields(&object, allowed_fields)?;
+
+    if template == "openai-compatible-video" {
+        if object.contains_key("seconds") && object.contains_key("duration") {
+            return Err("Specify either duration or seconds, not both".into());
+        }
+        if let Some(duration) = object.remove("duration") {
+            let seconds = duration
+                .as_u64()
+                .filter(|value| (1..=60).contains(value))
+                .ok_or("OpenAI-compatible video duration must be between 1 and 60 seconds")?;
+            object.insert(
+                "seconds".to_string(),
+                serde_json::Value::String(seconds.to_string()),
+            );
+        }
+    }
 
     if capability == "TEXT_TO_VIDEO" && object.contains_key("images") {
         return Err("UniCompAPI text-to-video does not accept an input image".to_string());
@@ -804,6 +1321,47 @@ struct ProviderHttpResponse {
     retry_after_ms: Option<u64>,
 }
 
+struct OpenAiImagesSubmitFailure {
+    message: String,
+    request_may_have_been_sent: bool,
+}
+
+impl OpenAiImagesSubmitFailure {
+    fn not_sent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            request_may_have_been_sent: false,
+        }
+    }
+
+    fn after_transport(error: provider_http::JsonHttpError) -> Self {
+        Self {
+            message: error.to_string(),
+            request_may_have_been_sent: error.request_may_have_been_sent(),
+        }
+    }
+
+    fn after_submission(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            request_may_have_been_sent: true,
+        }
+    }
+
+    fn into_host_error(self) -> serde_json::Value {
+        let code = if self.request_may_have_been_sent {
+            "PROVIDER_FAILED"
+        } else {
+            "REQUEST_NOT_SENT"
+        };
+        host_error(code, self.message, false)
+    }
+
+    fn into_message(self) -> String {
+        self.message
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderTaskSubmitResponse {
@@ -859,6 +1417,9 @@ fn unicompapi_video_content_path(task_id: &str) -> Result<String, String> {
 fn ensure_video_adapter(adapter_key: &str) -> Result<(), String> {
     if official_video::family(adapter_key).is_some() {
         model_contract::contract(adapter_key)?;
+        return Ok(());
+    }
+    if is_custom_openai_video_adapter(adapter_key) {
         return Ok(());
     }
     match adapter_key {
@@ -1611,13 +2172,25 @@ async fn provider_submit(
     )?;
     tauri::async_runtime::spawn_blocking(move || {
         let _dispatch = dispatch;
-        provider_submit_blocking(
-            &adapter_key,
-            &selection.provider_region,
-            &selection.credential_subject,
-            payload,
-            &selection.remote_model_id,
-        )
+        if let Some(provider_type) = openai_images_provider(&adapter_key) {
+            provider_openai_images_submit_blocking(
+                &adapter_key,
+                provider_type,
+                &selection.base_url,
+                &selection.credential_subject,
+                payload,
+                &selection.remote_model_id,
+            )
+            .map_err(OpenAiImagesSubmitFailure::into_message)
+        } else {
+            provider_submit_blocking(
+                &adapter_key,
+                &selection.provider_region,
+                &selection.credential_subject,
+                payload,
+                &selection.remote_model_id,
+            )
+        }
     })
     .await
     .map_err(|error| format!("Native provider task failed: {error}"))?
@@ -1643,6 +2216,7 @@ async fn provider_submit_task(
         provider_submit_task_blocking(
             &adapter_key,
             &selection.provider_region,
+            &selection.base_url,
             &selection.credential_subject,
             payload,
             &selection.remote_model_id,
@@ -1655,6 +2229,7 @@ async fn provider_submit_task(
 fn provider_submit_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    base_url: &str,
     credential_subject: &str,
     payload: serde_json::Value,
     remote_model_id: &str,
@@ -1677,6 +2252,52 @@ fn provider_submit_task_blocking(
         let task_id = provider_task_id(&response.body)
             .ok_or("Provider response did not contain a video task id")?;
         unicompapi_video_task_path(task_id)?;
+        return Ok(ProviderTaskSubmitResponse {
+            status: response.status,
+            task_id: Some(task_id.to_string()),
+            state: provider_state(&response.body).map(str::to_string),
+            error_code: None,
+            error_message: None,
+        });
+    }
+    if is_custom_openai_video_adapter(adapter_key) {
+        let target = openai_compatible_video_target(base_url)?;
+        provider_http::assert_provider_api_host(&target.host)?;
+        if let Some(host) = openai_video_reference_host(&payload)? {
+            provider_http::assert_public_host(&host)?;
+        }
+        let request_body = openai_compatible_video_payload(adapter_key, remote_model_id, payload)?;
+        let secret = credential_read(credential_subject)?;
+        let response = if let Some(boundary) = request_body.multipart_boundary.as_deref() {
+            request_openai_compatible_multipart_json(
+                &target,
+                &secret,
+                &target.path,
+                &request_body.body,
+                boundary,
+            )?
+        } else {
+            request_openai_compatible_json(
+                &target,
+                &secret,
+                "POST",
+                &target.path,
+                Some(&request_body.body),
+            )?
+        };
+        if response.status < 200 || response.status >= 300 {
+            let (error_code, error_message) = provider_submit_error(&response.body);
+            return Ok(ProviderTaskSubmitResponse {
+                status: response.status,
+                task_id: None,
+                state: provider_state(&response.body).map(str::to_string),
+                error_code,
+                error_message,
+            });
+        }
+        let task_id = provider_task_id(&response.body)
+            .ok_or("Provider response did not contain a video task id")?;
+        openai_compatible_video_task_path(&target, task_id)?;
         return Ok(ProviderTaskSubmitResponse {
             status: response.status,
             task_id: Some(task_id.to_string()),
@@ -1731,6 +2352,7 @@ async fn provider_poll_task(
         provider_poll_task_blocking(
             &adapter_key,
             &selection.provider_region,
+            &selection.base_url,
             &selection.credential_subject,
             &task_id,
         )
@@ -1742,6 +2364,7 @@ async fn provider_poll_task(
 fn provider_poll_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    base_url: &str,
     credential_subject: &str,
     task_id: &str,
 ) -> Result<ProviderHttpResponse, String> {
@@ -1751,6 +2374,13 @@ fn provider_poll_task_blocking(
         let path = unicompapi_video_task_path(task_id)?;
         let secret = credential_read(credential_subject)?;
         return request_unicompapi_json(&secret, "GET", &path, None);
+    }
+    if is_custom_openai_video_adapter(adapter_key) {
+        let target = openai_compatible_video_target(base_url)?;
+        provider_http::assert_provider_api_host(&target.host)?;
+        let path = openai_compatible_video_task_path(&target, task_id)?;
+        let secret = credential_read(credential_subject)?;
+        return request_openai_compatible_json(&target, &secret, "GET", &path, None);
     }
     let target = provider_target(adapter_key, provider_region)?;
     let path = provider_task_path(task_id)?;
@@ -1778,6 +2408,7 @@ async fn provider_download_task(
         provider_download_task_blocking(
             &adapter_key,
             &selection.provider_region,
+            &selection.base_url,
             &selection.credential_subject,
             &task_id,
         )
@@ -1789,10 +2420,34 @@ async fn provider_download_task(
 fn provider_download_task_blocking(
     adapter_key: &str,
     provider_region: &str,
+    base_url: &str,
     credential_subject: &str,
     task_id: &str,
 ) -> Result<ProviderBinaryDownloadResponse, String> {
     ensure_video_adapter(adapter_key)?;
+    if is_custom_openai_video_adapter(adapter_key) {
+        let target = openai_compatible_video_target(base_url)?;
+        provider_http::assert_provider_api_host(&target.host)?;
+        let task_path = openai_compatible_video_task_path(&target, task_id)?;
+        let path = format!("{task_path}/content");
+        let secret = credential_read(credential_subject)?;
+        let response = request_openai_compatible_bytes(&target, &secret, &path)?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "Provider video download failed with HTTP {}",
+                response.status
+            ));
+        }
+        if response.body.is_empty() {
+            return Err("Provider video download returned an empty body".to_string());
+        }
+        let extension = openai_compatible_video_extension(response.content_type.as_deref())?;
+        return store_native_video_output(
+            &response.body,
+            extension,
+            response.content_type.as_deref(),
+        );
+    }
     if provider_region != "unicompapi" {
         return Err(
             "This provider does not use the authenticated video download bridge".to_string(),
@@ -1867,6 +2522,20 @@ fn provider_video_extension(
     Err("Downloaded result is not a supported MP4 or WebM video".to_string())
 }
 
+fn openai_compatible_video_extension(content_type: Option<&str>) -> Result<&'static str, String> {
+    let content_type = content_type
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(content_type.as_str(), "" | "application/octet-stream") {
+        return Ok(".mp4");
+    }
+    provider_video_extension(Some(&content_type), "/v1/videos/task/content")
+}
+
 fn store_native_video_output(
     bytes: &[u8],
     extension: &str,
@@ -1923,6 +2592,13 @@ fn provider_cancel_task_blocking(
     task_id: &str,
 ) -> Result<ProviderCancelResponse, String> {
     ensure_video_adapter(adapter_key)?;
+    if is_custom_openai_video_adapter(adapter_key) {
+        return Ok(ProviderCancelResponse {
+            supported: false,
+            cancelled: false,
+            status: 0,
+        });
+    }
     if provider_region == "unicompapi" {
         unicompapi_adapter_model(adapter_key)?;
         unicompapi_video_task_path(task_id)?;
@@ -2104,6 +2780,120 @@ fn request_unicompapi_json(
     })
 }
 
+fn request_openai_compatible_json(
+    target: &OpenAiImagesTarget,
+    secret: &CredentialSecret,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<ProviderHttpResponse, String> {
+    if path != target.path
+        && !path
+            .strip_prefix(&format!("{}/", target.path))
+            .is_some_and(|task_id| {
+                openai_compatible_video_task_path(target, task_id).as_deref() == Ok(path)
+            })
+    {
+        return Err("OpenAI-compatible provider request path is not allowed".to_string());
+    }
+    let timeout = if method == "POST" {
+        Duration::from_secs(5 * 60)
+    } else {
+        provider_http::DEFAULT_RECEIVE_TIMEOUT
+    };
+    let response = provider_http::request_json_with_receive_timeout(
+        JsonHttpRequest {
+            host: &target.host,
+            port: target.port,
+            secure: true,
+            method,
+            path,
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret: secret.as_str()?,
+            body,
+            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+            response_body_limit: PROVIDER_RESPONSE_BODY_LIMIT,
+        },
+        timeout,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ProviderHttpResponse {
+        status: response.status,
+        body: response.body,
+        retry_after_ms: response.retry_after_ms,
+    })
+}
+
+fn request_openai_compatible_multipart_json(
+    target: &OpenAiImagesTarget,
+    secret: &CredentialSecret,
+    path: &str,
+    body: &[u8],
+    boundary: &str,
+) -> Result<ProviderHttpResponse, String> {
+    if path != target.path || !target.path.ends_with("/videos") {
+        return Err("OpenAI-compatible video submission path is not allowed".to_string());
+    }
+    let response = provider_http::request_multipart_json_with_receive_timeout(
+        JsonHttpRequest {
+            host: &target.host,
+            port: target.port,
+            secure: true,
+            method: "POST",
+            path,
+            authorization_scheme: "Bearer",
+            accept: "application/json",
+            secret: secret.as_str()?,
+            body: Some(body),
+            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+            response_body_limit: PROVIDER_RESPONSE_BODY_LIMIT,
+        },
+        Duration::from_secs(5 * 60),
+        boundary,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ProviderHttpResponse {
+        status: response.status,
+        body: response.body,
+        retry_after_ms: response.retry_after_ms,
+    })
+}
+
+fn request_openai_compatible_bytes(
+    target: &OpenAiImagesTarget,
+    secret: &CredentialSecret,
+    path: &str,
+) -> Result<provider_http::RawHttpResponse, String> {
+    let task_path = path
+        .strip_suffix("/content")
+        .ok_or("OpenAI-compatible video content path is not allowed")?;
+    let task_id = task_path
+        .strip_prefix(&format!("{}/", target.path))
+        .ok_or("OpenAI-compatible video content path is not allowed")?;
+    if format!(
+        "{}/content",
+        openai_compatible_video_task_path(target, task_id)?
+    ) != path
+    {
+        return Err("OpenAI-compatible video content path is not allowed".to_string());
+    }
+    request_bytes(JsonHttpRequest {
+        host: &target.host,
+        port: target.port,
+        secure: true,
+        method: "GET",
+        path,
+        authorization_scheme: "Bearer",
+        accept: "video/mp4, video/webm",
+        secret: secret.as_str()?,
+        body: None,
+        request_body_limit: 1,
+        response_body_limit: NATIVE_VIDEO_OUTPUT_LIMIT,
+    })
+    .map_err(|error| error.to_string())
+}
+
 fn request_unicompapi_bytes(
     secret: &CredentialSecret,
     path: &str,
@@ -2148,6 +2938,8 @@ struct WorkerProcess {
     responses: Mutex<Receiver<Result<String, String>>>,
     replies: Arc<Mutex<WorkerReplies>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
+    available: Arc<AtomicBool>,
+    host_streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
 }
 
 #[derive(Default)]
@@ -2168,26 +2960,26 @@ fn route_worker_reply(
     replies: &Mutex<WorkerReplies>,
     line: String,
     unclaimed: &Sender<Result<String, String>>,
-) {
+) -> bool {
     let response = match serde_json::from_str::<serde_json::Value>(&line) {
         Ok(value) => value,
         Err(error) => {
             fail_worker_replies(replies, &format!("Worker returned invalid JSON: {error}"));
-            return;
+            return false;
         }
     };
     let mut replies = match replies.lock() {
         Ok(replies) => replies,
-        Err(_) => return,
+        Err(_) => return false,
     };
     if let Some(id) = response.get("id").and_then(serde_json::Value::as_str) {
         if let Some(sender) = replies.pending.remove(id) {
             let _ = sender.send(Ok(line));
-            return;
+            return true;
         }
         // A timed-out or completed request must not consume another request's response.
         if replies.recent_ids.iter().any(|seen| seen == id) {
-            return;
+            return true;
         }
     }
     if replies.pending.is_empty() {
@@ -2198,11 +2990,18 @@ fn route_worker_reply(
                 "Worker returned a response with a mismatched correlation ID".to_string(),
             ));
         }
+        return false;
     }
+    true
 }
 
 fn worker_request_timeout(request: &serde_json::Value) -> Duration {
     match request.get("method").and_then(serde_json::Value::as_str) {
+        Some(
+            "characterVoiceReference.generate"
+            | "characterVoiceReference.confirm"
+            | "audio.sample.confirm",
+        ) => VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT,
         Some(
             "media.generation.confirmSubmission"
             | "media.review.submit"
@@ -2220,6 +3019,23 @@ fn worker_request_timeout(request: &serde_json::Value) -> Duration {
 struct ActiveHostStream {
     project_session_id: String,
     cancellation: Arc<llm_stream::LlmCancellation>,
+}
+
+fn cancel_worker_host_streams(
+    streams: &Mutex<std::collections::HashMap<String, ActiveHostStream>>,
+) {
+    let cancellations = streams
+        .lock()
+        .map(|mut streams| {
+            streams
+                .drain()
+                .map(|(_, stream)| stream.cancellation)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for cancellation in cancellations {
+        cancellation.cancel();
+    }
 }
 
 impl WorkerProcess {
@@ -2262,6 +3078,8 @@ impl WorkerProcess {
         let host_streams = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let host_writer = Arc::clone(&stdin);
         let stdout_host_streams = Arc::clone(&host_streams);
+        let available = Arc::new(AtomicBool::new(true));
+        let stdout_available = Arc::clone(&available);
         let (response_tx, responses) = mpsc::channel();
         let replies = Arc::new(Mutex::new(WorkerReplies::default()));
         let stdout_replies = Arc::clone(&replies);
@@ -2280,7 +3098,7 @@ impl WorkerProcess {
                         break;
                     }
                     Ok(_) => {
-                        if line.len() > SIDECAR_ENVELOPE_MAX_BYTES {
+                        if line.len() > MODEL_REQUEST_ENVELOPE_MAX_BYTES {
                             fail_worker_replies(
                                 &stdout_replies,
                                 "Worker message exceeds the 2 MiB sidecar limit",
@@ -2302,10 +3120,20 @@ impl WorkerProcess {
                                 value,
                                 Arc::clone(&host_writer),
                                 Arc::clone(&stdout_host_streams),
+                                Arc::clone(&stdout_available),
                             );
                             continue;
                         }
-                        route_worker_reply(&stdout_replies, line, &response_tx);
+                        if line.len() > SIDECAR_ENVELOPE_MAX_BYTES {
+                            fail_worker_replies(
+                                &stdout_replies,
+                                "Worker reply exceeds sidecar limit",
+                            );
+                            break;
+                        }
+                        if !route_worker_reply(&stdout_replies, line, &response_tx) {
+                            break;
+                        }
                     }
                     Err(error) => {
                         fail_worker_replies(
@@ -2318,6 +3146,9 @@ impl WorkerProcess {
                     }
                 }
             }
+            stdout_available.store(false, Ordering::Release);
+            cancel_worker_host_streams(&stdout_host_streams);
+            fail_worker_replies(&stdout_replies, "Worker transport closed");
         });
 
         let stderr_tail = Arc::new(Mutex::new(Vec::new()));
@@ -2348,6 +3179,8 @@ impl WorkerProcess {
             responses: Mutex::new(responses),
             replies,
             stderr_tail,
+            available,
+            host_streams,
         })
     }
 
@@ -2360,6 +3193,18 @@ impl WorkerProcess {
         request: &serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
+        if !self.available.load(Ordering::Acquire) {
+            return Err("WORKER_UNAVAILABLE: Worker transport is closed".to_string());
+        }
+        // Validate before touching the transport. A caller error never poisons the process.
+        if serde_json::to_vec(request)
+            .map_err(|error| error.to_string())?
+            .len()
+            + 1
+            > SIDECAR_ENVELOPE_MAX_BYTES
+        {
+            return Err("Sidecar message exceeds the 2 MiB limit".to_string());
+        }
         let request_id = request
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -2380,13 +3225,16 @@ impl WorkerProcess {
             }
         }
         let result = (|| {
-            write_sidecar_value(&self.stdin, request)?;
+            if let Err(error) = write_sidecar_value(&self.stdin, request) {
+                self.available.store(false, Ordering::Release);
+                return Err(error);
+            }
             let line = match response.recv_timeout(timeout) {
                 Ok(Ok(line)) => line,
                 Ok(Err(error)) => return Err(self.with_diagnostics(error)),
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(format!(
-                        "Worker request timed out after {} ms; the Worker will be restarted",
+                        "WORKER_REQUEST_TIMEOUT: Worker request timed out after {} ms; execution may still be in progress. The request was not replayed and the Worker was retained",
                         timeout.as_millis()
                     ));
                 }
@@ -2421,6 +3269,52 @@ impl WorkerProcess {
             format!("{message}: {diagnostics}")
         }
     }
+
+    fn stop(&self) {
+        self.available.store(false, Ordering::Release);
+        cancel_worker_host_streams(&self.host_streams);
+        fail_worker_replies(&self.replies, "WORKER_UNAVAILABLE: Worker is stopping");
+        if let Ok(mut child) = self.child.lock() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+
+    fn shutdown(&self) {
+        if self.available.load(Ordering::Acquire) {
+            let acknowledged = self.request_with_timeout(
+                &serde_json::json!({
+                    "id": format!("host-shutdown-{}", std::process::id()),
+                    "kind": "host.control", "version": 1,
+                    "method": "worker.shutdown", "reason": "host_shutdown"
+                }),
+                Duration::from_secs(8),
+            );
+            if acknowledged
+                .as_ref()
+                .is_ok_and(|reply| reply["ok"] == true && reply["result"]["stopped"] == true)
+            {
+                // The acknowledgement follows durable flush. Allow normal exit
+                // before using the fallback kill/reap path.
+                let deadline = std::time::Instant::now() + Duration::from_millis(500);
+                while std::time::Instant::now() < deadline {
+                    if self
+                        .child
+                        .lock()
+                        .ok()
+                        .and_then(|mut child| child.try_wait().ok().flatten())
+                        .is_some()
+                    {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        self.stop();
+    }
 }
 
 fn write_sidecar_value(
@@ -2446,7 +3340,11 @@ fn dispatch_host_request(
     value: serde_json::Value,
     writer: Arc<Mutex<ChildStdin>>,
     streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+    available: Arc<AtomicBool>,
 ) {
+    if !available.load(Ordering::Acquire) {
+        return;
+    }
     let request_id = value
         .get("requestId")
         .and_then(serde_json::Value::as_str)
@@ -2561,7 +3459,7 @@ fn dispatch_host_request(
                 .to_string();
             let cancellation = Arc::new(llm_stream::LlmCancellation::default());
             let inserted = streams.lock().ok().is_some_and(|mut active| {
-                if active.contains_key(&request_id) {
+                if !available.load(Ordering::Acquire) || active.contains_key(&request_id) {
                     false
                 } else {
                     active.insert(
@@ -2726,6 +3624,7 @@ fn provider_media_submit_blocking(
     let provider_profile_id = params["providerProfileId"].as_str().unwrap_or_default();
     let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
     let provider_region = params["providerRegion"].as_str().unwrap_or_default();
+    let base_url = params["baseUrl"].as_str().unwrap_or_default();
     let mut parameters = params["parameters"].clone();
     if official_video::family(adapter_key).is_some() {
         return official_video::submit(params);
@@ -2734,20 +3633,47 @@ fn provider_media_submit_blocking(
     let kind = params["kind"].as_str().unwrap_or_default();
     let remote_model_id = params["remoteModelId"].as_str().unwrap_or_default();
     if kind == "image" {
-        let response = provider_submit_blocking(
-            adapter_key,
-            provider_region,
-            provider_profile_id,
-            parameters,
-            remote_model_id,
-        )
-        .map_err(|error| provider_transport_host_error(&error, false))?;
+        let response = if let Some(provider_type) = openai_images_provider(adapter_key) {
+            let base_url = params["baseUrl"].as_str().ok_or_else(|| {
+                host_error(
+                    "INVALID_PARAMETERS",
+                    "OpenAI Images requires the frozen provider Base URL",
+                    false,
+                )
+            })?;
+            if provider_region != "global" {
+                return Err(host_error(
+                    "INVALID_PARAMETERS",
+                    "OpenAI Images uses the global provider route",
+                    false,
+                ));
+            }
+            provider_openai_images_submit_blocking(
+                adapter_key,
+                provider_type,
+                base_url,
+                provider_profile_id,
+                parameters,
+                remote_model_id,
+            )
+            .map_err(OpenAiImagesSubmitFailure::into_host_error)?
+        } else {
+            provider_submit_blocking(
+                adapter_key,
+                provider_region,
+                provider_profile_id,
+                parameters,
+                remote_model_id,
+            )
+            .map_err(|error| provider_transport_host_error(&error, false))?
+        };
         return serde_json::to_value(response)
             .map_err(|error| host_error("INTERNAL_ERROR", error.to_string(), true));
     }
     let response = provider_submit_task_blocking(
         adapter_key,
         provider_region,
+        base_url,
         provider_profile_id,
         parameters,
         remote_model_id,
@@ -2982,11 +3908,13 @@ fn provider_media_poll_blocking(
     }
     let adapter_key = params["adapterKey"].as_str().unwrap_or_default();
     let provider_region = params["providerRegion"].as_str().unwrap_or_default();
+    let base_url = params["baseUrl"].as_str().unwrap_or_default();
     let provider_profile_id = params["providerProfileId"].as_str().unwrap_or_default();
     let provider_task_id = params["providerTaskId"].as_str().unwrap_or_default();
     let response = provider_poll_task_blocking(
         adapter_key,
         provider_region,
+        base_url,
         provider_profile_id,
         provider_task_id,
     )
@@ -3008,10 +3936,13 @@ fn provider_media_poll_blocking(
                     && unicompapi_video_content_path(provider_task_id)
                         .is_ok_and(|path| url.path() == path)
             });
-        if provider_region == "unicompapi" && (source.is_none() || authenticated_content) {
+        if is_custom_openai_video_adapter(adapter_key)
+            || (provider_region == "unicompapi" && (source.is_none() || authenticated_content))
+        {
             Some(provider_download_task_blocking(
                 adapter_key,
                 provider_region,
+                base_url,
                 provider_profile_id,
                 provider_task_id,
             ))
@@ -3147,6 +4078,8 @@ fn run_host_provider_stream(
             message,
             retryable: true,
             cancelled: false,
+            provider_status: None,
+            provider_error_code: None,
             usage: None,
             guard_outcome: request_guard::Outcome::Neutral,
             admission_rejected: false,
@@ -3185,14 +4118,26 @@ fn run_host_provider_stream(
             } else {
                 serde_json::json!({
                     "type": "failed",
-                    "error": host_error(code, &failure.message, failure.retryable),
+                    "error": provider_host_error(
+                        code,
+                        &failure.message,
+                        failure.retryable,
+                        failure.provider_status,
+                        failure.provider_error_code.as_deref(),
+                    ),
                 })
             };
             let _ = emit(terminal);
             let _ = send_host_response(
                 writer,
                 request_id,
-                Err(host_error(code, failure.message, failure.retryable)),
+                Err(provider_host_error(
+                    code,
+                    failure.message,
+                    failure.retryable,
+                    failure.provider_status,
+                    failure.provider_error_code.as_deref(),
+                )),
             );
         }
     }
@@ -3213,6 +4158,7 @@ where
             received_bytes,
             request_body_hash,
             request_body_bytes,
+            wire_context,
         } => {
             let mut value = serde_json::json!({ "type": "request_progress", "stage": stage });
             if let Some(bytes) = argument_bytes {
@@ -3226,6 +4172,9 @@ where
             }
             if let Some(hash) = request_body_hash {
                 value["requestBodyHash"] = serde_json::json!(hash);
+            }
+            if let Some(wire) = wire_context {
+                value["wireContext"] = wire;
             }
             if let Some(bytes) = request_body_bytes {
                 value["requestBodyBytes"] = serde_json::json!(bytes);
@@ -3250,6 +4199,8 @@ where
                     message: "Provider tool call could not be serialized".to_string(),
                     retryable: false,
                     cancelled: false,
+                    provider_status: None,
+                    provider_error_code: None,
                     usage: None,
                     guard_outcome: request_guard::Outcome::Neutral,
                     admission_rejected: false,
@@ -3304,6 +4255,8 @@ where
         llm_stream::LlmStreamEvent::Failed {
             error,
             retryable,
+            provider_status,
+            provider_error_code,
             usage,
         } => {
             if let Some(usage) = usage {
@@ -3311,18 +4264,16 @@ where
             }
             emit(serde_json::json!({
                 "type": "failed",
-                "error": host_error("PROVIDER_FAILED", error, retryable),
+                "error": provider_host_error(
+                    "PROVIDER_FAILED",
+                    error,
+                    retryable,
+                    provider_status,
+                    provider_error_code.as_deref(),
+                ),
             }))
         }
         llm_stream::LlmStreamEvent::Cancelled => emit(serde_json::json!({ "type": "cancelled" })),
-        llm_stream::LlmStreamEvent::Confirmation { .. } => emit(serde_json::json!({
-            "type": "failed",
-            "error": host_error(
-                "PROVIDER_FAILED",
-                "Provider emitted an unexpected confirmation event",
-                false,
-            ),
-        })),
     }
 }
 
@@ -3384,7 +4335,11 @@ fn validate_host_request_envelope(value: &serde_json::Value) -> Result<(), Strin
     if serde_json::to_vec(value)
         .map_err(|_| "Host request cannot be serialized".to_string())?
         .len()
-        > SIDECAR_ENVELOPE_MAX_BYTES
+        > if value["method"].as_str() == Some("provider.stream.start") {
+            MODEL_REQUEST_ENVELOPE_MAX_BYTES
+        } else {
+            SIDECAR_ENVELOPE_MAX_BYTES
+        }
     {
         return Err("Host request exceeds the 2 MiB limit".to_string());
     }
@@ -3398,6 +4353,8 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
     let allowed = [
         "generationId",
         "inferenceSettings",
+        "modelCapabilities",
+        "contextTurns",
         "attemptId",
         "projectId",
         "projectSessionId",
@@ -3486,6 +4443,23 @@ fn host_error(code: &str, message: impl AsRef<str>, retryable: bool) -> serde_js
     })
 }
 
+fn provider_host_error(
+    code: &str,
+    message: impl AsRef<str>,
+    retryable: bool,
+    provider_status: Option<u32>,
+    provider_error_code: Option<&str>,
+) -> serde_json::Value {
+    let mut error = host_error(code, message, retryable);
+    if let Some(status) = provider_status {
+        error["providerStatus"] = serde_json::json!(status);
+    }
+    if let Some(provider_code) = provider_error_code {
+        error["providerErrorCode"] = serde_json::json!(provider_code);
+    }
+    error
+}
+
 fn provider_transport_host_error(message: &str, retryable: bool) -> serde_json::Value {
     if request_guard::is_admission_error(message) {
         host_error("REQUEST_NOT_SENT", message, true)
@@ -3512,16 +4486,29 @@ fn send_host_response(
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
-        dubbing_provider::cancel_all();
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.stop();
     }
 }
 
 #[cfg(debug_assertions)]
 fn worker_command() -> Result<Command, String> {
+    // Opt-in acceptance runs freeze their own Worker without replacing a live desktop build.
+    #[cfg(test)]
+    if let Some(entry) = std::env::var_os("AI_VIDEO_CONTEXT_E2E_WORKER_ENTRY") {
+        let entry = PathBuf::from(entry);
+        if !entry.is_absolute() || !entry.is_file() {
+            return Err("Acceptance Worker entry must be an existing absolute file path".into());
+        }
+        let mut command = Command::new("node");
+        command
+            .current_dir(
+                entry
+                    .parent()
+                    .ok_or("Acceptance Worker directory is missing")?,
+            )
+            .arg(entry);
+        return Ok(command);
+    }
     let worker_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../worker")
         .canonicalize()
@@ -3551,6 +4538,7 @@ fn bundled_worker_path(application_dir: &Path) -> PathBuf {
 
 struct WorkerState {
     process: Mutex<Option<Arc<WorkerProcess>>>,
+    stopping: AtomicBool,
     app_data_dir: PathBuf,
     research_bridge: NativeResearchBridge,
 }
@@ -3575,7 +4563,7 @@ struct LegacyProviderMigrationReport {
 struct LegacyProviderMigrationState(LegacyProviderMigrationReport);
 
 #[derive(Clone, Default)]
-struct NativeRuntimeExitState {
+struct RuntimeExitState {
     started: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
 }
@@ -3646,14 +4634,37 @@ impl WorkerState {
     fn new(app_data_dir: PathBuf) -> Result<Self, String> {
         Ok(Self {
             process: Mutex::new(None),
+            stopping: AtomicBool::new(false),
             app_data_dir,
             research_bridge: NativeResearchBridge::start()?,
         })
     }
 
     fn request(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.request_with_timeout(request, worker_request_timeout(request))
+    }
+
+    fn request_with_timeout(
+        &self,
+        request: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err("WORKER_STOPPING: The application is closing".into());
+        }
         let worker = {
             let mut guard = self.process.lock().map_err(|_| "Worker lock is poisoned")?;
+            if self.stopping.load(Ordering::Acquire) {
+                return Err("WORKER_STOPPING: The application is closing".into());
+            }
+            if let Some(worker) = guard
+                .as_ref()
+                .filter(|worker| !worker.available.load(Ordering::Acquire))
+            {
+                // Reap under the supervisor lock, even while old callers retain an Arc.
+                worker.stop();
+                *guard = None;
+            }
             if guard.is_none() {
                 *guard = Some(Arc::new(WorkerProcess::spawn_for_app(
                     &self.app_data_dir,
@@ -3662,17 +4673,27 @@ impl WorkerState {
             }
             Arc::clone(guard.as_ref().ok_or("Worker failed to start")?)
         };
-        let result = worker.request(request);
-        if result.is_err() {
+        let result = worker.request_with_timeout(request, timeout);
+        if !worker.available.load(Ordering::Acquire) {
             let mut guard = self.process.lock().map_err(|_| "Worker lock is poisoned")?;
             if guard
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &worker))
             {
+                worker.stop();
                 *guard = None;
             }
         }
         result
+    }
+
+    fn shutdown(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.process.lock() {
+            if let Some(worker) = guard.take() {
+                worker.shutdown();
+            }
+        }
     }
 }
 
@@ -3708,6 +4729,8 @@ async fn worker_request(
                     | "image/gif"
                     | "video/mp4"
                     | "video/webm"
+                    | "video/quicktime"
+                    | "video/x-matroska"
                     | "audio/mpeg"
                     | "audio/wav"
                     | "audio/x-wav"
@@ -3728,65 +4751,20 @@ async fn worker_request(
     Ok(response)
 }
 
-fn interrupt_native_agent_runtimes(app: tauri::AppHandle, exit_state: NativeRuntimeExitState) {
-    dubbing_provider::cancel_all();
-    let identities = app.state::<LlmStreamState>().interrupt_agent_runtimes();
-    if identities.is_empty() {
-        exit_state.completed.store(true, Ordering::Release);
-        app.exit(0);
-        return;
-    }
-
+fn shutdown_runtimes(app: tauri::AppHandle, exit_state: RuntimeExitState) {
     let worker_app = app.clone();
     let worker_exit_state = exit_state.clone();
     thread::spawn(move || {
-        let worker = worker_app.state::<WorkerState>();
-        for mut identity in identities {
-            let Some(generation_id) = identity
-                .get("generationId")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let content = worker
-                .request(&serde_json::json!({
-                    "id": format!("native-agent-exit-read-{generation_id}"),
-                    "protocolVersion": 1,
-                    "method": "llm.generation.get",
-                    "params": { "generationId": generation_id },
-                }))
-                .ok()
-                .and_then(|response| response.get("result").cloned())
-                .and_then(|result| result.get("assistantMessage").cloned())
-                .and_then(|message| {
-                    message
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default();
-            identity["content"] = serde_json::Value::String(content);
-            identity["error"] = serde_json::Value::String(
-                "Generation was interrupted because the application is closing.".to_string(),
-            );
-            identity["retryable"] = serde_json::Value::Bool(true);
-            identity["failureKind"] = serde_json::Value::String("interrupted".to_string());
-            identity["usage"] = serde_json::Value::Null;
-            let _ = worker.request(&serde_json::json!({
-                "id": format!("native-agent-exit-{generation_id}"),
-                "protocolVersion": 1,
-                "method": "llm.generation.fail",
-                "params": identity,
-            }));
-        }
+        // Worker owns Pi checkpoints; stop it before cancelling native transport resources.
+        worker_app.state::<WorkerState>().shutdown();
+        worker_app.state::<LlmStreamState>().interrupt_all();
+        dubbing_provider::cancel_all();
         if !worker_exit_state.completed.swap(true, Ordering::AcqRel) {
             worker_app.exit(0);
         }
     });
-
     thread::spawn(move || {
-        thread::sleep(NATIVE_AGENT_EXIT_GRACE);
+        thread::sleep(RUNTIME_EXIT_GRACE);
         if !exit_state.completed.swap(true, Ordering::AcqRel) {
             app.exit(0);
         }
@@ -3942,7 +4920,7 @@ pub fn run() {
             app.manage(LegacyProviderMigrationState(migration_report));
             app.manage(worker_state);
             app.manage(LlmStreamState::default());
-            app.manage(NativeRuntimeExitState::default());
+            app.manage(RuntimeExitState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3956,10 +4934,6 @@ pub fn run() {
             provider_test_connection,
             llm_stream,
             llm_stream_cancel,
-            agent_runtime_start,
-            agent_runtime_cancel,
-            agent_runtime_confirm,
-            agent_runtime_subscribe,
             provider_submit,
             provider_submit_task,
             provider_poll_task,
@@ -3970,12 +4944,14 @@ pub fn run() {
         .expect("error while building unicomp")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let exit_state = app.state::<NativeRuntimeExitState>().inner().clone();
-                if exit_state.started.swap(true, Ordering::AcqRel) {
+                let exit_state = app.state::<RuntimeExitState>().inner().clone();
+                if exit_state.completed.load(Ordering::Acquire) {
                     return;
                 }
                 api.prevent_exit();
-                interrupt_native_agent_runtimes(app.clone(), exit_state);
+                if !exit_state.started.swap(true, Ordering::AcqRel) {
+                    shutdown_runtimes(app.clone(), exit_state);
+                }
             }
         });
 }
@@ -3985,17 +4961,18 @@ mod tests {
     use super::{
         bundled_worker_path, contains_image_source, credential_target, ensure_credential_subject,
         ensure_video_adapter, externalize_provider_images, is_profile_id,
-        normalize_provider_media_poll, provider_cancel_path, provider_payload, provider_state,
-        provider_submit_error, provider_target, provider_task_error, provider_task_id,
-        provider_task_path, provider_video_extension, resolve_controlled_media_inputs,
-        resolve_controlled_media_inputs_at_root, resolve_media_selection, unicompapi_adapter_model,
-        unicompapi_payload, unicompapi_video_content_path, unicompapi_video_task_path,
-        validate_credential_provider, validate_host_request_envelope,
-        validate_provider_media_cancel_params, validate_provider_stream_params,
-        ProviderBinaryDownloadResponse, ProviderHttpResponse, WorkerProcess, WorkerState,
-        BASE64_STANDARD, BUNDLED_WORKER_FILENAME, MARKDOWN_IMPORT_LIMIT,
-        PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES, UNICOMPAPI_AUTHORIZATION_SCHEME,
-        UNICOMPAPI_HOST,
+        normalize_provider_media_poll, openai_compatible_video_extension, openai_images_payload,
+        openai_images_provider, openai_images_target, provider_cancel_path, provider_payload,
+        provider_state, provider_submit_error, provider_target, provider_task_error,
+        provider_task_id, provider_task_path, provider_video_extension,
+        resolve_controlled_media_inputs, resolve_controlled_media_inputs_at_root,
+        resolve_media_selection, unicompapi_adapter_model, unicompapi_payload,
+        unicompapi_video_content_path, unicompapi_video_task_path, validate_credential_provider,
+        validate_host_request_envelope, validate_provider_media_cancel_params,
+        validate_provider_stream_params, ProviderBinaryDownloadResponse, ProviderHttpResponse,
+        WorkerProcess, WorkerState, BASE64_STANDARD, BUNDLED_WORKER_FILENAME,
+        MARKDOWN_IMPORT_LIMIT, PROVIDER_REQUEST_BODY_LIMIT, SIDECAR_ENVELOPE_MAX_BYTES,
+        UNICOMPAPI_AUTHORIZATION_SCHEME, UNICOMPAPI_HOST,
     };
     use base64::Engine as _;
     use serde_json::json;
@@ -4003,6 +4980,7 @@ mod tests {
         fs::{create_dir_all, remove_dir_all, write},
         path::Path,
         process::Command,
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -4083,6 +5061,66 @@ mod tests {
     }
 
     #[test]
+    fn seedance_gateway_submit_encodes_integer_durations_as_strings_in_all_modes() {
+        #[derive(serde::Deserialize)]
+        struct GatewayVideoRequest {
+            seconds: String,
+        }
+
+        for (id, model, max_duration) in [
+            (
+                "cn.bytedance.seedance2-0.video",
+                "doubao-seedance-2-0-260128",
+                15,
+            ),
+            (
+                "cn.bytedance.seedance2-5.video",
+                "doubao-seedance-2-5-260628",
+                30,
+            ),
+        ] {
+            for mode in [
+                "TEXT_TO_VIDEO",
+                "IMAGE_TO_VIDEO",
+                "REFERENCE_TO_VIDEO",
+                "START_END_TO_VIDEO",
+            ] {
+                let key = format!("{mode}:unicompapi:{id}:contract-2");
+                let mut content = vec![json!({"type":"text","text":"人物在雨中回头"})];
+                let roles: &[&str] = match mode {
+                    "IMAGE_TO_VIDEO" => &["first_frame"],
+                    "REFERENCE_TO_VIDEO" => {
+                        &["reference_image", "reference_image", "reference_image"]
+                    }
+                    "START_END_TO_VIDEO" => &["first_frame", "last_frame"],
+                    _ => &[],
+                };
+                for (index, role) in roles.iter().enumerate() {
+                    content.push(json!({"type":"image_url","role":role,"image_url":{"url":format!("https://example.com/image-{index}.png")}}));
+                }
+                for duration in [7, -1, 4, max_duration] {
+                    let parameters =
+                        json!({"content":content,"duration":duration,"generate_audio":false});
+                    let body = unicompapi_payload(&key, parameters.clone(), model).unwrap();
+                    let request: GatewayVideoRequest = serde_json::from_slice(&body)
+                        .expect("UniComp /v1/videos requires string seconds");
+                    assert_eq!(request.seconds, duration.to_string());
+                    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        parsed,
+                        json!({"model":model,"prompt":"人物在雨中回头","seconds":duration.to_string(),"metadata":{"content":content,"generate_audio":false}})
+                    );
+                    assert_eq!(parameters["duration"], duration);
+                }
+                assert!(
+                    unicompapi_payload(&key, json!({"content":content,"duration":"7"}), model)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn official_wan3_contract_projects_qwen_video_parameters() {
         let adapter_key = "TEXT_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-1";
         let body = unicompapi_payload(
@@ -4160,6 +5198,35 @@ mod tests {
         }
         let ambiguous = super::provider_transport_host_error("Connection reset after send", false);
         assert_eq!(ambiguous["code"], "PROVIDER_FAILED");
+    }
+
+    #[test]
+    fn openai_images_preflight_errors_are_distinguished_from_transport_ambiguity() {
+        let preflight = super::OpenAiImagesSubmitFailure::not_sent(
+            "Provider API hostname is outside the network boundary",
+        )
+        .into_host_error();
+        assert_eq!(preflight["code"], "REQUEST_NOT_SENT");
+
+        let before_send = super::OpenAiImagesSubmitFailure::after_transport(
+            super::provider_http::JsonHttpError::dubbing_test_error(
+                super::provider_http::JsonHttpErrorKind::Transport,
+                false,
+                None,
+            ),
+        )
+        .into_host_error();
+        assert_eq!(before_send["code"], "REQUEST_NOT_SENT");
+
+        let after_send = super::OpenAiImagesSubmitFailure::after_transport(
+            super::provider_http::JsonHttpError::dubbing_test_error(
+                super::provider_http::JsonHttpErrorKind::Transport,
+                true,
+                None,
+            ),
+        )
+        .into_host_error();
+        assert_eq!(after_send["code"], "PROVIDER_FAILED");
     }
 
     #[test]
@@ -4741,6 +5808,91 @@ mod tests {
     }
 
     #[test]
+    fn openai_images_resolution_uses_image_capability_without_a_model_binding() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after Unix epoch")
+            .as_nanos();
+        let app_data_dir = std::env::temp_dir().join(format!(
+            "ai-video-rust-openai-images-profile-{}-{nonce}",
+            std::process::id()
+        ));
+        create_dir_all(&app_data_dir).expect("temporary app data directory should be created");
+
+        {
+            let state = WorkerState::new(app_data_dir.clone()).expect("worker bridge should start");
+            let created = state
+                .request(&json!({
+                    "id": "rust-openai-images-profile-create",
+                    "protocolVersion": 1,
+                    "method": "provider.profile.create",
+                    "params": {
+                        "name": "OpenAI Images Rust",
+                        "category": "llm",
+                        "providerType": "openai",
+                        "accessType": "official",
+                        "protocol": "openai-responses",
+                        "baseUrl": "https://api.openai.com/v1"
+                    }
+                }))
+                .expect("profile create response should be valid");
+            let profile_id = created["result"]["id"]
+                .as_str()
+                .expect("created profile should have an ID");
+            let completed = state
+                .request(&json!({
+                    "id": "rust-openai-images-profile-ready",
+                    "protocolVersion": 1,
+                    "method": "provider.connection.complete",
+                    "params": {
+                        "profileId": profile_id,
+                        "status": "ready",
+                        "models": [{ "id": "dall-e-3" }, { "id": "gpt-image-1" }]
+                    }
+                }))
+                .expect("connection completion response should be valid");
+            assert_eq!(completed["ok"], true);
+            let models = completed["result"]["models"]
+                .as_array()
+                .expect("synced model list");
+            for model in models {
+                let mut capabilities = model["capabilities"].clone();
+                capabilities["imageGeneration"] = json!(true);
+                let updated = state
+                    .request(&json!({
+                        "id": format!(
+                            "rust-openai-images-enable-{}",
+                            model["remoteModelId"].as_str().expect("remote model ID")
+                        ),
+                        "protocolVersion": 1,
+                        "method": "provider.model.update",
+                        "params": {
+                            "profileId": profile_id,
+                            "modelId": model["id"],
+                            "displayName": model["displayName"],
+                            "capabilities": capabilities,
+                            "enabled": true
+                        }
+                    }))
+                    .expect("model update response should be valid");
+                assert_eq!(updated["ok"], true);
+            }
+
+            let selection = resolve_media_selection(
+                "TEXT_TO_IMAGE:openai:openai-images:v1",
+                Some(profile_id),
+                Some("global"),
+                &state,
+            )
+            .expect("enabled GPT Image model should resolve without a binding");
+            assert_eq!(selection.remote_model_id, "gpt-image-1");
+            assert_eq!(selection.base_url, "https://api.openai.com/v1");
+        }
+
+        remove_dir_all(&app_data_dir).expect("temporary app data directory should be removed");
+    }
+
+    #[test]
     fn provider_bridge_is_bound_to_an_exact_adapter_and_injects_its_model() {
         let target = provider_target("START_END_TO_VIDEO:vidu:viduq3-pro:v2", "global")
             .expect("known adapter should resolve");
@@ -5059,6 +6211,99 @@ mod tests {
     }
 
     #[test]
+    fn openai_images_builds_only_supported_generation_fields() {
+        assert_eq!(
+            openai_images_provider("TEXT_TO_IMAGE:openai:openai-images:v1"),
+            Some("openai")
+        );
+        assert_eq!(
+            openai_images_provider("TEXT_TO_IMAGE:custom:openai-images:v1"),
+            Some("custom")
+        );
+        assert_eq!(
+            openai_images_provider("TEXT_TO_IMAGE:unicompapi:openai-images:v1"),
+            None
+        );
+
+        let official = openai_images_target("https://api.openai.com/v1", "openai")
+            .expect("official OpenAI Base URL should resolve");
+        assert_eq!(official.host, "api.openai.com");
+        assert_eq!(official.path, "/v1/images/generations");
+        let custom = openai_images_target("https://images.example/gateway/v1/", "custom")
+            .expect("custom API root should resolve");
+        assert_eq!(custom.path, "/gateway/v1/images/generations");
+        for base_url in [
+            "http://images.example/v1",
+            "https://user:secret@images.example/v1",
+            "https://images.example/v1/images/generations",
+            "https://images.example/v1?token=secret",
+        ] {
+            assert!(
+                openai_images_target(base_url, "custom").is_err(),
+                "{base_url}"
+            );
+        }
+
+        let body = openai_images_payload(
+            "TEXT_TO_IMAGE:openai:openai-images:v1",
+            "gpt-image-1",
+            json!({
+                "prompt": "A mountain lake at sunrise",
+                "size": "1536x1024",
+                "quality": "high",
+                "background": "transparent",
+                "output_format": "webp",
+                "output_compression": 80,
+                "moderation": "auto",
+                "n": 1
+            }),
+        )
+        .expect("valid GPT Image payload should serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(parsed["model"], "gpt-image-1");
+        assert_eq!(parsed["output_compression"], 80);
+        assert!(parsed.get("response_format").is_none());
+        assert!(openai_images_payload(
+            "TEXT_TO_IMAGE:openai:openai-images:v1",
+            "gpt-image-1",
+            json!({ "prompt": "A lake", "response_format": "url" }),
+        )
+        .is_err());
+        assert!(openai_images_payload(
+            "TEXT_TO_IMAGE:openai:openai-images:v1",
+            "gpt-image-1",
+            json!({ "prompt": "A lake", "output_format": "png", "output_compression": 80 }),
+        )
+        .is_err());
+
+        let custom_body = openai_images_payload(
+            "TEXT_TO_IMAGE:custom:openai-images:v1",
+            "vendor-image-model",
+            json!({
+                "prompt": "A mountain lake at sunrise",
+                "size": "1792x1024",
+                "response_format": "url",
+                "quality": "hd",
+                "style": "vivid"
+            }),
+        )
+        .expect("valid generic OpenAI-compatible image payload should serialize");
+        let custom_json: serde_json::Value =
+            serde_json::from_slice(&custom_body).expect("valid custom image JSON");
+        assert_eq!(custom_json["model"], "vendor-image-model");
+        assert_eq!(custom_json["response_format"], "url");
+        assert_eq!(custom_json["style"], "vivid");
+        assert!(custom_json.get("background").is_none());
+        assert!(custom_json.get("output_format").is_none());
+        assert!(openai_images_payload(
+            "TEXT_TO_IMAGE:custom:openai-images:v1",
+            "vendor-image-model",
+            json!({ "prompt": "A lake", "n": 11 }),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn provider_bridge_receives_signed_image_urls_and_returns_only_local_results() {
         use std::{
             io::{Read, Write},
@@ -5298,6 +6543,71 @@ mod tests {
     }
 
     #[test]
+    fn custom_openai_video_payload_uses_the_video_api_contract() {
+        let text = super::openai_compatible_video_payload(
+            "TEXT_TO_VIDEO:custom:openai-compatible-video:v1",
+            "vendor-video-model",
+            json!({
+                "prompt": "A slow camera move",
+                "duration": 8,
+                "size": "1280x720"
+            }),
+        )
+        .expect("text-to-video parameters should serialize");
+        let text_json: serde_json::Value = serde_json::from_slice(&text.body).unwrap();
+        assert_eq!(text_json["model"], "vendor-video-model");
+        assert_eq!(text_json["prompt"], "A slow camera move");
+        assert_eq!(text_json["seconds"], "8");
+        assert_eq!(text_json["size"], "1280x720");
+        assert!(text_json.get("duration").is_none());
+        assert!(text.multipart_boundary.is_none());
+
+        let remote_image = super::openai_compatible_video_payload(
+            "IMAGE_TO_VIDEO:custom:openai-compatible-video:v1",
+            "vendor-video-model",
+            json!({
+                "images": ["https://images.example/reference.png"],
+                "prompt": "Animate the reference",
+                "duration": 4
+            }),
+        )
+        .expect("remote image reference should use the JSON form");
+        let image_json: serde_json::Value = serde_json::from_slice(&remote_image.body).unwrap();
+        assert_eq!(
+            image_json["input_reference"]["image_url"],
+            "https://images.example/reference.png"
+        );
+        assert!(image_json.get("images").is_none());
+
+        let local_image = super::openai_compatible_video_payload(
+            "IMAGE_TO_VIDEO:custom:openai-compatible-video:v1",
+            "vendor-video-model",
+            json!({
+                "images": ["data:image/png;base64,iVBORw0KGgo="],
+                "prompt": "Animate the local reference",
+                "duration": 4
+            }),
+        )
+        .expect("local image reference should use the multipart form");
+        let boundary = local_image
+            .multipart_boundary
+            .as_deref()
+            .expect("local image request should be multipart");
+        assert!(local_image
+            .body
+            .windows(b"name=\"input_reference\"; filename=\"reference.png\"".len())
+            .any(|window| window == b"name=\"input_reference\"; filename=\"reference.png\""));
+        assert!(local_image
+            .body
+            .windows(8)
+            .any(|window| window == [137, 80, 78, 71, 13, 10, 26, 10]));
+        assert!(local_image
+            .body
+            .windows(format!("--{boundary}--\r\n").len())
+            .any(|window| window == format!("--{boundary}--\r\n").as_bytes()));
+    }
+
+    #[test]
     fn unicompapi_bridge_projects_one_reference_image() {
         let image = "data:image/png;base64,iVBORw0KGgo=";
         let edit = unicompapi_payload(
@@ -5330,6 +6640,8 @@ mod tests {
             serde_json::from_slice(&video).expect("valid video JSON");
         assert_eq!(parsed_video["image"], image);
         assert_eq!(parsed_video["model"], "vendor-hosted-video-model");
+        assert_eq!(parsed_video["seconds"], "5");
+        assert!(parsed_video.get("duration").is_none());
         assert!(parsed_video.get("images").is_none());
     }
 
@@ -5618,6 +6930,18 @@ mod tests {
     #[test]
     fn reviewed_media_form_uses_the_paid_submission_timeout() {
         assert_eq!(
+            super::worker_request_timeout(&json!({"method": "characterVoiceReference.generate"})),
+            super::VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            super::worker_request_timeout(&json!({"method": "characterVoiceReference.confirm"})),
+            super::VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            super::worker_request_timeout(&json!({"method": "audio.sample.confirm"})),
+            super::VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT
+        );
+        assert_eq!(
             super::worker_request_timeout(&json!({"method": "agent.generation.selectMedia"})),
             super::MEDIA_WORKER_REQUEST_TIMEOUT
         );
@@ -5638,7 +6962,127 @@ mod tests {
             .expect_err("fixture must time out");
 
         assert!(error.contains("timed out after 50 ms"));
-        assert!(error.contains("restarted"));
+        assert!(error.contains("Worker was retained"));
+    }
+
+    #[test]
+    fn worker_supervisor_retains_shared_process_after_timeout_and_local_rejection() {
+        let mut command = Command::new("node");
+        command.args(["-e", "require('readline').createInterface({input:process.stdin}).on('line',l=>{const r=JSON.parse(l);setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,ok:true,result:{pid:process.pid}})+'\\n'),r.delay||0)})"]);
+        let worker = Arc::new(WorkerProcess::spawn_command(command).unwrap());
+        let original_pid = worker.child.lock().unwrap().id();
+        let dir = std::env::temp_dir().join(format!(
+            "worker-supervisor-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let state = WorkerState::new(dir).unwrap();
+        *state.process.lock().unwrap() = Some(Arc::clone(&worker));
+        let slow = state.request_with_timeout(
+            &json!({"id":"slow", "delay":200}),
+            Duration::from_millis(30),
+        );
+        assert!(slow.unwrap_err().contains("Worker was retained"));
+        assert_eq!(
+            state.request(&json!({"id":"healthy"})).unwrap()["result"]["pid"],
+            original_pid
+        );
+        let error = state
+            .request(&json!({"id":"large", "data":"x".repeat(SIDECAR_ENVELOPE_MAX_BYTES)}))
+            .unwrap_err();
+        assert!(error.contains("2 MiB"));
+        assert!(Arc::ptr_eq(
+            state.process.lock().unwrap().as_ref().unwrap(),
+            &worker
+        ));
+        assert_eq!(
+            state.request(&json!({"id":"after-rejection"})).unwrap()["result"]["pid"],
+            original_pid
+        );
+        worker.stop();
+        assert!(worker.child.lock().unwrap().try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn worker_supervisor_isolates_a_timeout_from_a_concurrent_healthy_request() {
+        let mut command = Command::new("node");
+        command.args(["-e", "require('readline').createInterface({input:process.stdin}).on('line',l=>{const r=JSON.parse(l);setTimeout(()=>process.stdout.write(JSON.stringify({id:r.id,ok:true,result:{pid:process.pid}})+'\\n'),r.delay||0)})"]);
+        let worker = Arc::new(WorkerProcess::spawn_command(command).unwrap());
+        let pid = worker.child.lock().unwrap().id();
+        let state = WorkerState::new(std::env::temp_dir()).unwrap();
+        *state.process.lock().unwrap() = Some(Arc::clone(&worker));
+        std::thread::scope(|scope| {
+            let slow = scope.spawn(|| {
+                state.request_with_timeout(
+                    &json!({"id":"concurrent-slow", "delay":400}),
+                    Duration::from_millis(150),
+                )
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !worker
+                .replies
+                .lock()
+                .unwrap()
+                .pending
+                .contains_key("concurrent-slow")
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                state.request(&json!({"id":"concurrent-healthy"})).unwrap()["result"]["pid"],
+                pid
+            );
+            assert!(slow
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("Worker was retained"));
+        });
+        assert!(worker.available.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            state
+                .request(&json!({"id":"after-concurrent-timeout"}))
+                .unwrap()["result"]["pid"],
+            pid
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn worker_supervisor_waits_for_graceful_shutdown_and_refuses_replacement() {
+        let mut command = Command::new("node");
+        command.args(["-e", "require('readline').createInterface({input:process.stdin}).on('line',l=>{const r=JSON.parse(l);if(r.kind==='host.control'&&r.method==='worker.shutdown'){process.stdout.write(JSON.stringify({id:r.id,ok:true,result:{stopped:true}})+'\\n',()=>setTimeout(()=>process.exit(0),10))}})"]);
+        let worker = Arc::new(WorkerProcess::spawn_command(command).unwrap());
+        let state = WorkerState::new(std::env::temp_dir()).unwrap();
+        *state.process.lock().unwrap() = Some(Arc::clone(&worker));
+        state.shutdown();
+        assert!(worker.child.lock().unwrap().wait().unwrap().success());
+        assert!(state.process.lock().unwrap().is_none());
+        assert!(state
+            .request(&json!({"id":"after-shutdown"}))
+            .unwrap_err()
+            .contains("WORKER_STOPPING"));
+    }
+
+    #[test]
+    fn worker_transport_close_cleans_its_host_stream_registry() {
+        let mut command = Command::new("node");
+        command.args(["-e", "setTimeout(()=>process.exit(0),100)"]);
+        let worker = WorkerProcess::spawn_command(command).unwrap();
+        worker.host_streams.lock().unwrap().insert(
+            "owned".into(),
+            super::ActiveHostStream {
+                project_session_id: "session".into(),
+                cancellation: Arc::new(crate::llm_stream::LlmCancellation::default()),
+            },
+        );
+        assert!(worker
+            .request_with_timeout(&json!({"id":"exit"}), Duration::from_secs(2))
+            .is_err());
+        worker.stop();
+        assert!(!worker.available.load(std::sync::atomic::Ordering::Acquire));
+        assert!(worker.host_streams.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -5721,6 +7165,45 @@ mod tests {
     }
 
     #[test]
+    fn native_provider_forwards_visual_tool_results_for_both_protocols() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            let mut value = native_provider_stream_fixture();
+            value["protocol"] = json!(protocol);
+            let outputs = json!([{"callId":"frames", "output":"manual visualInputs", "images":[{"mimeType":"image/jpeg", "data":"AAAA"}]}]);
+            value["continuation"] = if protocol == "openai-responses" {
+                json!({"protocol":protocol, "previousResponseId":"read-response", "outputs":outputs})
+            } else {
+                json!({"protocol":protocol, "providerResponseId":"read-response", "calls":[{"id":"frames", "name":"shot.continuity.read", "argumentsJson":"{}"}], "outputs":outputs})
+            };
+            assert!(validate_provider_stream_params(&value).is_ok());
+            let body = crate::llm_stream::request_body_for_contract_test(value.clone()).unwrap();
+            let image_message = if protocol == "openai-responses" {
+                body["input"].as_array().unwrap().last().unwrap()
+            } else {
+                body["messages"].as_array().unwrap().last().unwrap()
+            };
+            assert_eq!(image_message["role"], "user");
+            assert!(image_message["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("frames"));
+            if protocol == "openai-responses" {
+                assert_eq!(
+                    image_message["content"][1]["image_url"],
+                    "data:image/jpeg;base64,AAAA"
+                );
+            } else {
+                assert_eq!(
+                    image_message["content"][1]["image_url"]["url"],
+                    "data:image/jpeg;base64,AAAA"
+                );
+            }
+            value["continuation"]["outputs"][0]["images"][0]["mimeType"] = json!("video/mp4");
+            assert!(crate::llm_stream::request_body_for_contract_test(value).is_err());
+        }
+    }
+
+    #[test]
     fn native_provider_host_contract_accepts_inference_settings_through_request_body() {
         for (protocol, parameter) in [
             ("openai-responses", "max_output_tokens"),
@@ -5775,7 +7258,7 @@ mod tests {
             json!([]),
             json!({}),
             json!({"maxOutputTokens": 0, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
-            json!({"maxOutputTokens": 131073, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
+            json!({"maxOutputTokens": 4294967296_u64, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
             json!({"maxOutputTokens": 1.5, "outputTokenParameter": "max_output_tokens", "reasoning": "provider_default"}),
             json!({"maxOutputTokens": 8192, "outputTokenParameter": "max_tokens", "reasoning": "provider_default"}),
             json!({"maxOutputTokens": 8192, "outputTokenParameter": "max_output_tokens", "reasoning": "off"}),
@@ -5894,7 +7377,12 @@ mod tests {
             "method": "provider.stream.start",
             "params": { "value": "x".repeat(SIDECAR_ENVELOPE_MAX_BYTES) },
         });
-        assert!(validate_host_request_envelope(&oversized).is_err());
+        assert!(validate_host_request_envelope(&oversized).is_ok());
+        let mut ordinary = oversized.clone();
+        ordinary["method"] = json!("provider.media.poll");
+        assert!(validate_host_request_envelope(&ordinary).is_err());
+        let too_large = json!({"kind":"host.request","requestId":"request","method":"provider.stream.start","params":{"value":"x".repeat(super::MODEL_REQUEST_ENVELOPE_MAX_BYTES)}});
+        assert!(validate_host_request_envelope(&too_large).is_err());
     }
 
     #[test]
@@ -5994,5 +7482,19 @@ mod tests {
             Ok(".webm")
         );
         assert!(provider_video_extension(Some("text/html"), "/output/video.mp4").is_err());
+    }
+
+    #[test]
+    fn openai_compatible_video_content_defaults_untyped_content_to_mp4() {
+        assert_eq!(openai_compatible_video_extension(None), Ok(".mp4"));
+        assert_eq!(
+            openai_compatible_video_extension(Some("application/octet-stream")),
+            Ok(".mp4")
+        );
+        assert_eq!(
+            openai_compatible_video_extension(Some("video/webm")),
+            Ok(".webm")
+        );
+        assert!(openai_compatible_video_extension(Some("text/html")).is_err());
     }
 }

@@ -95,12 +95,12 @@ describe('NovelContextService', () => {
       title: '角色提示词',
       contentMarkdown: '# 林澈\n灯塔守望员。',
     });
-    publish(workflow, character.id);
     novel.saveBinding({
       documentId: character.id,
       role: 'character-bible',
       domainScope: 'short-drama',
     });
+    publish(workflow, character.id);
     const chapter = novel.saveChapter({ title: '第一章' });
     workflow.saveDraft({
       documentId: chapter.documentId,
@@ -171,11 +171,15 @@ describe('NovelContextService', () => {
     publish(workflow, first.id);
     context.compile(conversation.id);
     const current = workflow.getDocument(chapter.documentId);
+    const unpublished = workflow.unpublish({
+      documentId: chapter.documentId,
+      expectedDocumentRowVersion: current.rowVersion,
+    });
     workflow.saveDraft({
       documentId: chapter.documentId,
       title: chapter.title,
       contentMarkdown: '第二版内容。',
-      expectedDocumentRowVersion: current.rowVersion,
+      expectedDocumentRowVersion: unpublished.rowVersion,
     });
     publish(workflow, chapter.documentId);
     const rows = projects.access(

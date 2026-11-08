@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { ChatPanel } from '../ChatPanel';
+import { MarkdownEditor } from '../MarkdownEditor';
 import {
   DETACHED_PANEL_ACTION_EVENT,
   DETACHED_PANEL_READY_EVENT,
@@ -194,7 +195,8 @@ function DetachedDocumentPanel({
 }) {
   const editorWritable =
     snapshot.writable &&
-    ['draft', 'changes_requested', 'published', 'new'].includes(snapshot.state);
+    !snapshot.publishedVersionId &&
+    ['draft', 'changes_requested', 'new'].includes(snapshot.state);
 
   return (
     <section className="detached-document-panel">
@@ -241,7 +243,18 @@ function DetachedDocumentPanel({
           >
             保存草稿
           </button>
-          {snapshot.state === 'in_review' && (
+          {snapshot.publishedVersionId && (
+            <button
+              className="button secondary"
+              type="button"
+              title="取消发布并恢复为草稿"
+              onClick={() => onAction({ panelId: 'document', type: 'document-unpublish' })}
+              disabled={!snapshot.writable || snapshot.busy}
+            >
+              取消发布
+            </button>
+          )}
+          {snapshot.state === 'in_review' && !snapshot.publishedVersionId && (
             <>
               <button
                 className="button secondary"
@@ -283,13 +296,11 @@ function DetachedDocumentPanel({
             {documentStateLabel(snapshot.state)}
           </span>
         </div>
-        <textarea
-          className="markdown-editor"
-          aria-label="文档内容"
+        <MarkdownEditor
+          label="文档内容"
           value={snapshot.content}
-          onChange={(event) =>
-            onAction({ panelId: 'document', type: 'document-content', value: event.target.value })
-          }
+          onChange={(value) => onAction({ panelId: 'document', type: 'document-content', value })}
+          autoPreviewOnBlur
           readOnly={!editorWritable}
         />
         {snapshot.statusMessage && <div className="inline-status">{snapshot.statusMessage}</div>}

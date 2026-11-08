@@ -277,10 +277,25 @@ describe('NovelService', () => {
     });
     expect(snapshot.structure_hash).toMatch(/^[a-f0-9]{64}$/);
     const current = novel.listChapters()[0]!;
+    expect(() =>
+      novel.updateChapterMetadata({
+        chapterId: current.id,
+        expectedChapterRowVersion: current.rowVersion,
+        expectedDocumentRowVersion: current.documentRowVersion,
+        title: '新章名',
+        displayLabel: '序章',
+      }),
+    ).toThrow('Published chapter documents are read-only');
+
+    workflow.unpublish({
+      documentId: chapter.documentId,
+      expectedDocumentRowVersion: published.document.rowVersion,
+    });
+    const editable = novel.listChapters()[0]!;
     novel.updateChapterMetadata({
-      chapterId: current.id,
-      expectedChapterRowVersion: current.rowVersion,
-      expectedDocumentRowVersion: current.documentRowVersion,
+      chapterId: editable.id,
+      expectedChapterRowVersion: editable.rowVersion,
+      expectedDocumentRowVersion: editable.documentRowVersion,
       title: '新章名',
       displayLabel: '序章',
     });

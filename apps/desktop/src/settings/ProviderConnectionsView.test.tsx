@@ -101,6 +101,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('ProviderConnectionsView', () => {
+  it('does not show internal protocol identifiers in saved provider cards', async () => {
+    vi.mocked(providerProfileClient.listProfiles).mockResolvedValue([profile]);
+
+    render(<ProviderConnectionsView />);
+
+    expect(await screen.findByRole('button', { name: /OpenAI 主账号/ })).toBeInTheDocument();
+    expect(screen.queryByText('openai-responses')).not.toBeInTheDocument();
+  });
+
   it('updates a model when its collapsed-row enable switch is clicked', () => {
     const onUpdate = vi.fn().mockResolvedValue(undefined);
     const model = {
@@ -173,7 +182,7 @@ describe('ProviderConnectionsView', () => {
     expect(await screen.findByText('Authentication failed.')).toBeInTheDocument();
   });
 
-  it('saves an OpenAI-compatible custom provider with an explicit protocol and Base URL', async () => {
+  it('adds a custom provider without asking for a text protocol and defaults to Chat Completions', async () => {
     const customProfile: ProviderProfileInfo = {
       ...profile,
       name: 'Relay',
@@ -201,10 +210,8 @@ describe('ProviderConnectionsView', () => {
     render(<ProviderConnectionsView />);
     fireEvent.click(await screen.findByRole('button', { name: /添加第一个供应商/ }));
     fireEvent.click(screen.getByRole('button', { name: /自定义供应商/ }));
+    expect(screen.queryByLabelText('文本接口协议')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: 'Relay' } });
-    fireEvent.change(screen.getByLabelText('兼容协议'), {
-      target: { value: 'openai-chat-completions' },
-    });
     fireEvent.change(screen.getByLabelText('Base URL'), {
       target: { value: 'https://relay.example/v1' },
     });
@@ -214,7 +221,7 @@ describe('ProviderConnectionsView', () => {
     await waitFor(() =>
       expect(providerProfileClient.createProfile).toHaveBeenCalledWith({
         name: 'Relay',
-        category: 'llm',
+        category: 'multi',
         providerType: 'custom',
         accessType: 'custom',
         protocol: 'openai-chat-completions',
@@ -248,7 +255,7 @@ describe('ProviderConnectionsView', () => {
     render(<ProviderConnectionsView />);
 
     expect(await screen.findByText(/旧版密钥已复制到独立连接/)).toBeInTheDocument();
-    expect(screen.getByText(/旧版迁移 · vidu-v2/)).toBeInTheDocument();
+    expect(screen.getByText('旧版迁移')).toBeInTheDocument();
   });
 });
 

@@ -13,6 +13,25 @@ const cue = {
   lipSync: false,
 };
 const speech = { cueId: 'cue', expectedRowVersion: 1, costAcknowledged: true };
+const referenceGeneration = {
+  characterDocumentId: 'character',
+  expectedVoiceVersionId: 'voice-version',
+  expectedRowVersion: 0,
+  text: '你好，很高兴认识你。',
+  costAcknowledged: true,
+};
+const referencePrepare = {
+  characterDocumentId: 'character',
+  expectedVoiceVersionId: 'voice-version',
+  adapterKey: 'TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1',
+  providerProfileId: 'speech',
+  modelId: 'speech-2.8-hd',
+  parameters: {
+    text: '你好，很高兴认识你。',
+    voice_setting: { voice_id: 'fixed-voice-one', speed: 1, pitch: 0 },
+  },
+};
+const referenceConfirm = { confirmationToken: 'confirmation-token', approved: true };
 const submit = {
   sceneId: 'scene',
   sourceVideoAssetId: 'video',
@@ -32,8 +51,24 @@ const voice = {
 };
 const valid: Array<[WorkerMethod, Record<string, unknown>]> = [
   ['characterVoice.list', {}],
+  ['characterVoiceReference.prepare', referencePrepare],
+  ['characterVoiceReference.confirm', referenceConfirm],
+  ['characterVoiceReference.generate', referenceGeneration],
   ['characterVoice.save', voice],
   ['audio.import', { sourcePath: 'E:\\recordings\\line.wav', cueId: 'cue', expectedRowVersion: 1 }],
+  [
+    'audio.sample.prepare',
+    {
+      adapterKey: 'TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1',
+      providerProfileId: 'speech',
+      modelId: 'speech-2.8-hd',
+      parameters: {
+        text: '你好，很高兴认识你。',
+        voice_setting: { voice_id: 'fixed-voice-one', speed: 1, pitch: 0 },
+      },
+    },
+  ],
+  ['audio.sample.confirm', { confirmationToken: 'confirmation-token', approved: true }],
   ['audio.list', { deleted: 'trash', kind: 'reference' }],
   ['audio.get', { audioId: 'audio' }],
   ['audio.mediaSource', { audioId: 'audio' }],
@@ -108,6 +143,42 @@ describe('dubbing RPC boundary validation', () => {
       ['dubbing.take.adopt', { cueId: 'cue', takeId: 'take' }],
     ] as Array<[WorkerMethod, Record<string, unknown>]>)
       expect(() => validateSessionRequestParams(method, input)).toThrow(RequestValidationError);
+  });
+
+  it('requires bounded nonempty text, a saved voice version, and explicit cost acknowledgement for role reference audio', () => {
+    for (const patch of [
+      { text: '' },
+      { text: '   ' },
+      { text: 'x'.repeat(4001) },
+      { expectedRowVersion: -1 },
+      { expectedVoiceVersionId: null },
+      { costAcknowledged: 'true' },
+    ])
+      expect(() =>
+        validateSessionRequestParams('characterVoiceReference.generate', {
+          ...referenceGeneration,
+          ...patch,
+        }),
+      ).toThrow(RequestValidationError);
+  });
+
+  it('requires a strict adapter and explicit decision for standalone audio samples', () => {
+    const prepare = valid.find(([method]) => method === 'audio.sample.prepare')![1];
+    for (const patch of [
+      { adapterKey: '' },
+      { providerProfileId: null },
+      { modelId: '' },
+      { parameters: [] },
+    ])
+      expect(() =>
+        validateSessionRequestParams('audio.sample.prepare', { ...prepare, ...patch }),
+      ).toThrow(RequestValidationError);
+    expect(() =>
+      validateSessionRequestParams('audio.sample.confirm', {
+        confirmationToken: 'token',
+        approved: 'yes',
+      }),
+    ).toThrow(RequestValidationError);
   });
 
   it('bounds text, scene times, speaker coordinates, voice models and settings without coercion', () => {

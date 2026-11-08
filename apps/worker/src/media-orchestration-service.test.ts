@@ -201,42 +201,184 @@ describe('MediaOrchestrationService', () => {
     ]);
   });
 
-  it('submits the frozen final form after saved production notes change during paid confirmation', async () => {
+  it('passes the frozen custom OpenAI Images Base URL to Native after confirmation', async () => {
+    const f = await setup();
+    Object.assign(f.profile, {
+      category: 'llm',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-responses',
+      baseUrl: 'https://images.example/gateway/v1',
+    });
+    f.models[0]!.remoteModelId = 'vendor-image-model';
+    const selection: MediaModelSelectionSnapshot = {
+      providerProfileId,
+      providerType: 'custom',
+      providerBaseUrl: 'https://images.example/gateway/v1',
+      providerBaseUrlCategory: 'custom-openai-compatible',
+      providerRegion: 'global',
+      modelId: 'image-model',
+      remoteModelId: 'vendor-image-model',
+      adapterKey: 'TEXT_TO_IMAGE:custom:openai-images:v1',
+      adapterSchemaVersion: 1,
+      adapterSchemaSource: 'official-adapter',
+    };
+    const job = f.images.prepare({
+      adapterKey: selection.adapterKey,
+      parameters: { prompt: 'A red fox in snow' },
+      providerProfileId,
+      modelId: selection.modelId,
+      mediaModelSelection: selection,
+    });
+    f.request.mockResolvedValue({
+      status: 200,
+      body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+
+    const pending = f.service.requestSubmission({ jobId: job.id });
+    const result = await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+
+    expect(result.job.status).toBe('succeeded');
+    expect(f.request).toHaveBeenCalledWith(
+      'provider.media.submit',
+      expect.objectContaining({
+        baseUrl: 'https://images.example/gateway/v1',
+        providerProfileId,
+        adapterKey: selection.adapterKey,
+        remoteModelId: 'vendor-image-model',
+        kind: 'image',
+      }),
+      expect.any(Number),
+    );
+
+    const staleJob = f.images.prepare({
+      adapterKey: selection.adapterKey,
+      parameters: { prompt: 'A red fox in snow' },
+      providerProfileId,
+      modelId: selection.modelId,
+      mediaModelSelection: selection,
+    });
+    const stalePending = f.service.requestSubmission({ jobId: staleJob.id });
+    f.models[0]!.capabilities.imageGeneration = false;
+    await expect(
+      f.service.confirmSubmission({
+        jobId: staleJob.id,
+        confirmationToken: stalePending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).rejects.toThrow('no longer compatible');
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
+  it('passes the frozen custom OpenAI-compatible video Base URL to Native after confirmation', async () => {
+    const f = await setup();
+    Object.assign(f.profile, {
+      category: 'multi',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://video.example/gateway/v1',
+    });
+    f.models[1]!.remoteModelId = 'vendor-video-model';
+    const selection: MediaModelSelectionSnapshot = {
+      providerProfileId,
+      providerType: 'custom',
+      providerBaseUrl: 'https://video.example/gateway/v1',
+      providerBaseUrlCategory: 'custom-openai-compatible',
+      providerRegion: 'global',
+      modelId: 'video-model',
+      remoteModelId: 'vendor-video-model',
+      adapterKey: 'TEXT_TO_VIDEO:custom:openai-compatible-video:v1',
+      adapterSchemaVersion: 1,
+      adapterSchemaSource: 'official-adapter',
+    };
+    const job = f.videos.prepare({
+      adapterKey: selection.adapterKey,
+      parameters: { prompt: 'A slow camera move', duration: 8 },
+      providerRegion: 'global',
+      providerProfileId,
+      modelId: selection.modelId,
+      mediaModelSelection: selection,
+    });
+    f.request.mockResolvedValue({ status: 200, taskId: 'video-task-123' });
+
+    const pending = f.service.requestSubmission({ jobId: job.id });
+    const submitted = await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+
+    expect(submitted.job).toMatchObject({ status: 'polling', providerTaskId: 'video-task-123' });
+    expect(f.request).toHaveBeenCalledWith(
+      'provider.media.submit',
+      expect.objectContaining({
+        baseUrl: 'https://video.example/gateway/v1',
+        providerProfileId,
+        adapterKey: selection.adapterKey,
+        remoteModelId: 'vendor-video-model',
+        kind: 'video',
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('submits API-valid edited form inputs even when filled production images are no longer selected', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
     const scene = content.saveScene({ title: '铁匠铺' });
-    const shot = content.saveShot({ sceneId: scene.id, title: '拒绝' });
+    const shot = content.saveShot({
+      sceneId: scene.id,
+      title: '拒绝',
+      prompt: '填充时的提示词',
+    });
     const target = { kind: 'shot' as const, id: shot.id };
     const production = new ProductionService(f.projectsService);
-    content.saveShot({
-      shotId: shot.id,
-      sceneId: scene.id,
-      title: shot.title,
-      expectedRowVersion: shot.rowVersion,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
-        prompt: '原制作说明',
-        timing: { estimatedDurationSeconds: 20, rationale: '剧情时长' },
-      },
-    });
-    const parameters = {
-      prompt: '江晚继续打铁，老瞎子走入雾中',
-      duration: 5,
-      aspect_ratio: '9:16',
-      resolution: '720p',
-      audio: true,
+    const fillAssetId = 'filled-image';
+    const fillAssetPath = join(f.project.rootPath, 'assets', 'images', `${fillAssetId}.png`);
+    const fillAssetBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    await mkdir(join(f.project.rootPath, 'assets', 'images'), { recursive: true });
+    await writeFile(fillAssetPath, fillAssetBytes);
+    f.projectsService.access(true, (db, project) =>
+      createRepositories(db).assets.save({
+        id: fillAssetId,
+        projectId: project.id,
+        kind: 'generated-image',
+        relativePath: `assets/images/${fillAssetId}.png`,
+        sizeBytes: fillAssetBytes.length,
+        contentHash: createHash('sha256').update(fillAssetBytes).digest('hex'),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const referenceSelection = {
+      ...imageSelection,
+      adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
     };
-    const job = f.videos.prepare({
-      adapterKey: videoSelection.adapterKey,
+    const filled = production.compile({
+      target,
+      adapterKey: referenceSelection.adapterKey,
+      inputImages: [{ assetId: fillAssetId, role: 'reference' }],
+    });
+    expect(filled.issues).toEqual([]);
+    expect(filled.source?.inputImages).toEqual([{ assetId: fillAssetId, role: 'reference' }]);
+    const parameters = {
+      images: ['https://images.example/revised.png'],
+      prompt: '用户编辑后的提示词',
+      aspect_ratio: '16:9',
+      resolution: '1080p',
+    };
+    const job = f.images.prepare({
+      adapterKey: referenceSelection.adapterKey,
       shotId: shot.id,
-      productionSource: production.compile({ target, adapterKey: videoSelection.adapterKey })
-        .source!,
+      productionSource: filled.source!,
       parameters,
-      providerRegion: 'global',
       providerProfileId,
-      modelId: videoSelection.modelId,
-      mediaModelSelection: videoSelection,
+      modelId: imageSelection.modelId,
+      mediaModelSelection: referenceSelection,
     });
     const pending = f.service.requestSubmission({ jobId: job.id });
     expect(f.request).not.toHaveBeenCalled();
@@ -244,20 +386,24 @@ describe('MediaOrchestrationService', () => {
       shotId: shot.id,
       sceneId: scene.id,
       title: shot.title,
-      prompt: '另行修订的沈孤鸿剧情',
-      expectedRowVersion: production.read(target).rowVersion,
+      prompt: '后续另行修订的制作说明',
+      expectedRowVersion: shot.rowVersion,
     });
-    f.request.mockResolvedValue({ status: 200, taskId: 'final-form-task' });
-    await f.service.confirmSubmission({
+    f.request.mockResolvedValue({
+      status: 200,
+      body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const submitted = await f.service.confirmSubmission({
       jobId: job.id,
       confirmationToken: pending.confirmation!.confirmationToken,
       approved: true,
     });
+    expect(submitted.job.status).toBe('succeeded');
     expect(f.request).toHaveBeenCalledOnce();
     expect(JSON.stringify(f.request.mock.calls[0])).toContain(parameters.prompt);
-    expect(JSON.stringify(f.request.mock.calls[0])).not.toContain('沈孤鸿');
-    expect(f.videos.get(job.id)).toMatchObject({
-      providerTaskId: 'final-form-task',
+    expect(JSON.stringify(f.request.mock.calls[0])).toContain('https://images.example/revised.png');
+    expect(JSON.stringify(f.request.mock.calls[0])).not.toContain(fillAssetId);
+    expect(f.images.get(job.id)).toMatchObject({
       request: parameters,
     });
   });
@@ -492,7 +638,7 @@ describe('MediaOrchestrationService', () => {
     f.scheduler.release(next);
   });
 
-  it('rechecks the source target at paid confirmation and still permits rejecting a stale draft', async () => {
+  it('submits frozen API-valid parameters after the filled source document changes', async () => {
     const { projectsService, images, service, request } = await setup();
     const content = new ContentService(projectsService);
     const actor = content.saveDocument({
@@ -528,23 +674,23 @@ describe('MediaOrchestrationService', () => {
     projectsService.access(true, (db) =>
       db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(actor.id),
     );
-    await expect(
-      service.confirmSubmission({
-        jobId: job.id,
-        confirmationToken: pending.confirmation!.confirmationToken,
-        approved: true,
+    request.mockResolvedValue({
+      status: 200,
+      body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const submitted = await service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(submitted.job.status).toBe('succeeded');
+    expect(request).toHaveBeenCalledWith(
+      'provider.media.submit',
+      expect.objectContaining({
+        parameters: { prompt: '蓝色外套', aspect_ratio: '16:9', resolution: '1080p' },
       }),
-    ).rejects.toThrow('制作来源');
-    expect(request).not.toHaveBeenCalled();
-    expect(images.get(job.id).mediaState).toBe('awaiting_confirmation');
-    await expect(
-      service.confirmSubmission({
-        jobId: job.id,
-        confirmationToken: pending.confirmation!.confirmationToken,
-        approved: false,
-      }),
-    ).resolves.toMatchObject({ job: { mediaState: 'cancelled' } });
-    expect(request).not.toHaveBeenCalled();
+      expect.any(Number),
+    );
   });
   it('records local output failures after HTTP success as failed without resubmitting', async () => {
     const { images, service, request } = await setup();

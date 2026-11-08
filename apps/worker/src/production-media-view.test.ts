@@ -3,7 +3,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { SceneCharacterRepository } from '@ai-video/persistence';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
 import { describeProductionAsset, readAssetProvenance } from './production-media-view.js';
@@ -40,11 +39,22 @@ async function setup() {
       schemaVersion: 1,
       kind: 'scene',
       prompt: '雨坪决战',
-      references: { sceneDocumentIds: [setting.id] },
     },
-    characterBindings: [{ characterDocumentId: character.id }],
   });
-  return { directory, projects, project, content, character, setting, scene };
+  const shot = content.saveShot({
+    sceneId: scene.id,
+    title: '镜头一',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '雨坪决战',
+      references: {
+        characterDocumentIds: [character.id],
+        sceneDocumentIds: [setting.id],
+      },
+    },
+  });
+  return { directory, projects, project, content, character, setting, scene, shot };
 }
 
 function generatedImage(
@@ -117,9 +127,9 @@ it('exposes default character and IR-resolved scene media without adding asset I
       : undefined,
   ).toBe('scene-image-1');
   expect(JSON.stringify(view)).not.toContain('asset://');
-  expect(fixture.content.listScenes()[0]?.authoringIR?.references?.sceneDocumentIds).not.toContain(
-    'asset-scene-image-1',
-  );
+  expect(
+    fixture.content.listShots(fixture.scene.id)[0]?.authoringIR?.references?.sceneDocumentIds,
+  ).not.toContain('asset-scene-image-1');
 });
 
 it('keeps every IR-referenced location in the media read model', async () => {
@@ -129,14 +139,13 @@ it('keeps every IR-referenced location in the media read model', async () => {
     title: '官道岔口',
     contentMarkdown: '第二个场景资料',
   });
-  fixture.content.saveScene({
+  fixture.content.saveShot({
     sceneId: fixture.scene.id,
-    title: fixture.scene.title,
-    expectedRowVersion: fixture.scene.rowVersion,
+    title: '镜头二',
     authoringIR: {
       schemaVersion: 1,
-      kind: 'scene',
-      prompt: '雨坪与官道岔口连续决战',
+      kind: 'shot',
+      prompt: '官道岔口',
       references: {
         sceneDocumentIds: [fixture.setting.id, secondSetting.id],
       },
@@ -178,19 +187,22 @@ it('reports provenance and keeps empty aliases separate from source identity', a
   });
 });
 
-it('keeps manual character image overrides and explicit disabling distinct from defaults', async () => {
+it('keeps manual shot character image overrides distinct from defaults', async () => {
   const fixture = await setup();
   generatedImage(fixture.projects, 'character-default', fixture.character.id);
   generatedImage(fixture.projects, 'character-manual', fixture.character.id);
-  fixture.projects.access(true, (db) =>
-    new SceneCharacterRepository(db).replace(fixture.scene.id, [
-      { characterDocumentId: fixture.character.id, imageAssetId: 'character-manual' },
-    ]),
-  );
+  fixture.content.saveShotReferenceBindings({
+    shotId: fixture.shot.id,
+    referenceBindings: {
+      characterBindings: [
+        { characterDocumentId: fixture.character.id, assetId: 'character-manual' },
+      ],
+    },
+  });
 
   const manual = new ProductionService(fixture.projects).readMediaForAgent({
-    kind: 'scene',
-    id: fixture.scene.id,
+    kind: 'shot',
+    id: fixture.shot.id,
   });
   const manuallySelected = manual.bindings.find(
     (binding) => binding.documentId === fixture.character.id,
@@ -203,24 +215,6 @@ it('keeps manual character image overrides and explicit disabling distinct from 
       ? manuallySelected.selectedAsset.assetId
       : undefined,
   ).toBe('character-manual');
-
-  fixture.projects.access(true, (db) =>
-    new SceneCharacterRepository(db).replace(fixture.scene.id, [
-      { characterDocumentId: fixture.character.id, imageDisabled: true },
-    ]),
-  );
-  const disabled = new ProductionService(fixture.projects).readMediaForAgent({
-    kind: 'scene',
-    id: fixture.scene.id,
-  });
-  const disabledCharacter = disabled.bindings.find(
-    (binding) => binding.documentId === fixture.character.id,
-  );
-  expect(disabledCharacter?.selectionSource).toBe('disabled');
-  expect(disabledCharacter?.selectedAsset).toBeUndefined();
-  expect(
-    disabled.inputs.referenceImages.some((input) => input.assetId === 'character-default'),
-  ).toBe(false);
 });
 
 it('applies durable shot-level character and scene selections by source document', async () => {
@@ -274,6 +268,36 @@ it('applies durable shot-level character and scene selections by source document
     'shot-character-image',
     'shot-scene-image',
   ]);
+});
+
+it('does not inherit scene-level locations into an unbound shot media view', async () => {
+  const fixture = await setup();
+  const secondSetting = fixture.content.saveDocument({
+    kind: 'scene',
+    title: '内堂',
+    contentMarkdown: '内堂资料',
+  });
+  const scene = fixture.content.saveScene({
+    title: '雨夜决战',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'scene',
+      prompt: '雨坪与内堂',
+      references: { sceneDocumentIds: [fixture.setting.id, secondSetting.id] },
+    },
+  });
+  const shot = fixture.content.saveShot({
+    sceneId: scene.id,
+    title: '镜头一',
+    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '无引用的空镜' },
+  });
+
+  const view = new ProductionService(fixture.projects).readMediaForAgent({
+    kind: 'shot',
+    id: shot.id,
+  });
+  expect(view.bindings.filter((binding) => binding.role === 'scene')).toEqual([]);
+  expect(view.inputs.videoGeneration).toEqual([]);
 });
 
 it('reports recorded input asset IDs without returning paths, prompt text, or provider details', async () => {

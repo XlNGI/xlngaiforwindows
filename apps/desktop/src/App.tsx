@@ -4,13 +4,15 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
+  Archive,
+  RotateCcw,
   Aperture,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   CircleCheck,
   Clapperboard,
   Copy,
-  Ellipsis,
   FilePlus2,
   FileText,
   FileUp,
@@ -20,6 +22,7 @@ import {
   MessageSquare,
   Minus,
   PanelLeftClose,
+  Pencil,
   Plus,
   Power,
   Save,
@@ -31,8 +34,6 @@ import {
   Users,
 } from 'lucide-react';
 import type {
-  AgentDocumentIntent,
-  AgentDocumentOperation,
   AgentLibrarySourceInfo,
   AssetInfo,
   AgentResearchMode,
@@ -42,7 +43,6 @@ import type {
   DocumentDetail,
   DocumentKind,
   DocumentSummary,
-  DocumentVersionInfo,
   HealthResult,
   LlmGenerationInfo,
   LlmGenerationPrepareResult,
@@ -53,6 +53,7 @@ import type {
   ProjectInfo,
   RecentProjectInfo,
   SceneInfo,
+  SceneReferenceImageOptions,
   ShotInfo,
   SqliteProbeResult,
   UnifiedAgentModelSelectionRequest,
@@ -67,8 +68,9 @@ import type {
   ConversationRuntimeLiveAction,
 } from '@ai-video/contracts';
 import {
+  composeSceneReferenceImagePrompt,
   inferUnifiedAgentCapabilityHint,
-  productionImageSelectionsFromBindings,
+  productionShotReferenceIds,
   productionSkillPrompt,
   type ProductionSkillId,
 } from '@ai-video/contracts';
@@ -83,6 +85,7 @@ import {
 import { TaskConfirmationQueue, type TaskConfirmation } from './task-confirmations';
 import { useProjectMaintenance } from './use-project-maintenance';
 import { useDocumentWorkspace } from './use-document-workspace';
+import { AgentResourceRefresh } from './agent-resource-refresh';
 import { useConversationWorkspace } from './use-conversation-workspace';
 import { useAssetWorkspace } from './use-asset-workspace';
 import { useProductionState } from './use-production-state';
@@ -90,13 +93,19 @@ import { TaskConfirmationDialog } from './TaskConfirmationDialog';
 import { useProjectTaskSubscription } from './use-project-task-subscription';
 import { ProductionPanel } from './ProductionPanel';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
-import { composeCharacterImagePrompt } from './character-image-prompt';
 import { SceneWorkspace } from './SceneWorkspace';
-import { sceneReferenceBindings } from './scene-reference-bindings';
-import { effectiveSceneCast, readSceneMedia, sceneMediaParams } from './scene-media';
 import { ScriptWorkspace } from './ScriptWorkspace';
+import { DocumentDirectoryTitleText } from './DocumentDirectoryTitle';
 import { SceneShotDirectory } from './SceneShotDirectory';
-import { ShotWorkspace, type ShotReferenceAssets } from './ShotWorkspace';
+import {
+  ShotWorkspace,
+  shotReferenceImageSelections,
+  type ShotReferenceAssets,
+} from './ShotWorkspace';
+import {
+  shotReferenceDocumentIdsByScene,
+  type ShotReferenceDocumentIds,
+} from './shot-binding-summary';
 import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel, type ChatAttachment } from './ChatPanel';
 import { composeConversationPrompt } from './conversation-prompt-template';
@@ -105,8 +114,11 @@ import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
 import { AssetLibraryView } from './assets/AssetLibraryView';
+import { assetAttachmentFiles } from './assets/asset-attachment-files';
+import { RoughCutWorkspace, type RoughCutImportRequest } from './rough-cut/RoughCutWorkspace';
 import { TaskLogView } from './TaskLogView';
 import { NovelWorkspace } from './NovelWorkspace';
+import { ProjectCreateDialog, ProjectStartupWorkspace } from './ProjectStartupWorkspace';
 import { GeneratedDraftSync } from './GeneratedDraftSync';
 import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
 import { WorkspaceSurface } from './workspace/WorkspaceSurface';
@@ -134,21 +146,22 @@ import {
   type DetachedPanelSnapshot,
 } from './workspace/detached-window';
 import { MODAL_Z_INDEX } from './workspace/ui-layers';
+import { useDraftDocumentBatch } from './DraftDocumentBatch';
 import { generationStatusLabel } from './generation-feedback';
 import brandLogo from './brand-logo.png';
 
 type CheckState = 'checking' | 'ready' | 'error';
-type WorkspaceView = 'documents' | 'characters' | 'novel' | 'shots' | 'tasks';
+type WorkspaceView = 'documents' | 'characters' | 'novel' | 'shots' | 'tasks' | 'rough-cut';
 const WORKSPACE_VIEW_TITLES: Record<WorkspaceView, string> = {
   documents: '剧本',
   characters: '角色与场景',
   novel: '小说',
   shots: '场次与镜头',
   tasks: '任务日志',
+  'rough-cut': '粗剪工作台',
 };
 type NavigationMode = 'project' | 'production';
 type SettingsPage = 'providers' | 'usage' | 'maintenance';
-
 interface DetachedPanelRegistration {
   config: DetachedPanelConfig;
   snapshot: DetachedPanelSnapshot;
@@ -203,71 +216,6 @@ export function resolveAgentRunModelSelection(
   void capability;
   if (explicitSelection) return explicitSelection;
   return agentSelection ?? rememberedSelection;
-}
-
-export function inferDocumentIntent(
-  prompt: string,
-  targetDocumentId?: string,
-): { intent?: AgentDocumentIntent; needsTarget: boolean } {
-  const value = prompt.trim().toLocaleLowerCase();
-  if (!value) return { needsTarget: false };
-  if (
-    /\b(?:don't|do not|never|without)\b.*\b(?:document|draft|update|archive|restore)\b/i.test(value)
-  ) {
-    return { needsTarget: false };
-  }
-  const hasDocumentNoun =
-    /\b(?:document|draft|brief|outline|plan|memo)\b/i.test(value) ||
-    /[\u6587\u6863\u8349\u7a3f\u7b80\u62a5\u5927\u7eb2\u8ba1\u5212\u5907\u5fd8]/u.test(value);
-  if (/\barchive\b/i.test(value) || /[\u5f52\u6863]/u.test(value)) {
-    return targetDocumentId
-      ? {
-          intent: { operation: 'document.archive', documentId: targetDocumentId },
-          needsTarget: false,
-        }
-      : { needsTarget: true };
-  }
-  if (/\b(?:restore|unarchive)\b/i.test(value) || /[\u6062\u590d]/u.test(value)) {
-    return targetDocumentId
-      ? {
-          intent: { operation: 'document.restore', documentId: targetDocumentId },
-          needsTarget: false,
-        }
-      : { needsTarget: true };
-  }
-  if (
-    /\b(?:update|edit|revise|rewrite|modify)\b/i.test(value) ||
-    /[\u66f4\u65b0\u4fee\u6539\u7f16\u8f91\u91cd\u5199]/u.test(value)
-  ) {
-    return targetDocumentId
-      ? {
-          intent: { operation: 'document.update_draft', documentId: targetDocumentId },
-          needsTarget: false,
-        }
-      : { needsTarget: true };
-  }
-  if (
-    /\b(?:read|show|open|summari[sz]e)\b/i.test(value) ||
-    /[\u8bfb\u53d6\u67e5\u770b\u9605\u8bfb\u603b\u7ed3]/u.test(value)
-  ) {
-    return targetDocumentId
-      ? { intent: { operation: 'document.read', documentId: targetDocumentId }, needsTarget: false }
-      : { needsTarget: true };
-  }
-  if (hasDocumentNoun && /\b(?:create|draft|write|generate|make)\b/i.test(value)) {
-    return { intent: { operation: 'document.create_draft' }, needsTarget: false };
-  }
-  return { needsTarget: false };
-}
-
-/** @deprecated Kept for callers of the legacy direct-generation helper. */
-export function inferShortDramaIntent(prompt: string): AgentDocumentOperation {
-  const value = prompt.trim().toLocaleLowerCase();
-  if (/人物|角色|场景提示词|场景设定|人物提示词|角色提示词/u.test(value)) {
-    return 'document.create_draft';
-  }
-  if (/场次|镜头|分镜|分集结构/u.test(value)) return 'novel.episode.submit_structure';
-  return 'novel.episode.submit_draft';
 }
 
 function initialLlmSelection(): { providerProfileId?: string; modelId?: string } {
@@ -360,6 +308,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+function encodedImageMimeType(dataUrl: string | undefined): string | undefined {
+  const type = /^data:(image\/[a-z0-9.+-]+);base64,/iu.exec(dataUrl ?? '')?.[1]?.toLowerCase();
+  return type === 'image/jpg' ? 'image/jpeg' : type;
+}
+
 async function readImageAsDataUrl(file: File): Promise<string> {
   const original = await readFileAsDataUrl(file);
   const maxDataUrlLength = 1_850_000;
@@ -400,6 +353,18 @@ function readTextFile(file: File): Promise<string> {
 
 function isGenerationActive(generation: LlmGenerationInfo | undefined): boolean {
   return generation?.status === 'prepared' || generation?.status === 'streaming';
+}
+
+function generationStatusMessage(generation: LlmGenerationInfo): string {
+  if (isGenerationActive(generation)) return '';
+  return (
+    readableGenerationError(generation.error) ??
+    (generation.status === 'complete'
+      ? ''
+      : generation.status === 'cancelled'
+        ? '生成已停止'
+        : '生成失败')
+  );
 }
 
 function readableFailure(reason: unknown, fallback: string): string {
@@ -452,35 +417,15 @@ function upsertAgentTaskDetail(
   );
 }
 
-function documentStateLabel(state: DocumentVersionInfo['state'] | 'new'): string {
-  switch (state) {
-    case 'draft':
-      return '草稿';
-    case 'changes_requested':
-      return '需修改';
-    case 'in_review':
-      return '审核中';
-    case 'published':
-      return '已发布';
-    case 'rejected':
-      return '已拒绝';
-    case 'superseded':
-      return '已替代';
-    case 'discarded':
-      return '已放弃';
-    default:
-      return '未保存';
-  }
-}
-
 /**
- * Script pages list outline/plan. Character and scene prompts live on their
+ * Script pages list outline/plan/constraint. Character and scene prompts live on their
  * own page. Novel chapters (`note` bound to `novel_chapters`) and shot
  * storyboards stay in their own workspaces so they do not flood the script list.
  */
 const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   outline: '大纲',
   plan: '计划',
+  constraint: '约束',
   character: '角色',
   scene: '场景',
   prop: '道具',
@@ -488,7 +433,7 @@ const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   note: '笔记',
 };
 
-const SCRIPT_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan'];
+const SCRIPT_DOCUMENT_KINDS: DocumentKind[] = ['outline', 'plan', 'constraint'];
 const CHARACTER_DOCUMENT_KINDS: DocumentKind[] = ['character', 'scene', 'prop'];
 const WORKSPACE_DOCUMENT_KINDS: DocumentKind[] = [
   ...SCRIPT_DOCUMENT_KINDS,
@@ -566,25 +511,13 @@ export function inferNovelWritingIntent(
   };
 }
 
-/**
- * Combines the user's direct image request with the most relevant generated
- * prompt document. Image adapters only receive their `prompt` parameter, so
- * without this bridge a request such as “直接生成角色三视图” would silently
- * discard the detailed character/scene constraints produced earlier by the
- * Agent.
- */
+/** Keep direct image preparation on the Agent-authored prompt path. */
 export function composeImageGenerationPrompt(
   userPrompt: string,
-  source?: { title: string; content: string },
+  _source?: { title: string; content: string },
 ): string {
-  const request = userPrompt.trim();
-  if (!source) return request;
-  const content = source.content.trim();
-  if (!content) return request;
-  const prefix = `${request}\n\n请依据以下项目提示词文档生成图片，保持人物、服装、构图和三视图约束一致。\n【${source.title}】\n`;
-  const maximum = 5_000;
-  if (prefix.length >= maximum) return prefix.slice(0, maximum);
-  return `${prefix}${content.slice(0, maximum - prefix.length)}`;
+  void _source;
+  return userPrompt.trim();
 }
 
 export { composeConversationPrompt } from './conversation-prompt-template';
@@ -611,7 +544,9 @@ export function buildAgentAttachments(attachments: ChatAttachment[]): LlmInputAt
     return [
       {
         name: attachment.name,
-        mimeType: attachment.mimeType,
+        mimeType:
+          (attachment.kind === 'image' ? encodedImageMimeType(attachment.dataUrl) : undefined) ??
+          attachment.mimeType,
         ...(attachment.dataUrl ? { dataUrl: attachment.dataUrl } : {}),
         ...(attachment.text !== undefined ? { text: attachment.text } : {}),
       },
@@ -653,7 +588,14 @@ function readVideoPreviewAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
     const objectUrl = URL.createObjectURL(file);
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`无法提取视频首帧：${file.name}`));
+    }, 8000);
     const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.onloadeddata = null;
+      video.onerror = null;
       URL.revokeObjectURL(objectUrl);
       video.remove();
     };
@@ -684,6 +626,90 @@ function readVideoPreviewAsDataUrl(file: File): Promise<string> {
   });
 }
 
+interface ProjectPickerMenuProps {
+  recentProjects: RecentProjectInfo[];
+  currentProject?: Pick<ProjectInfo, 'rootPath'>;
+  writable: boolean;
+  busy: boolean;
+  onOpenProject: (rootPath: string) => void;
+  onBrowse: () => void;
+  onCreate: () => void;
+  onRename: () => void;
+  onCheckIntegrity: () => void;
+  onBackup: () => void;
+  onCloseProject: () => void;
+}
+
+function ProjectPickerMenu({
+  recentProjects,
+  currentProject,
+  writable,
+  busy,
+  onOpenProject,
+  onBrowse,
+  onCreate,
+  onRename,
+  onCheckIntegrity,
+  onBackup,
+  onCloseProject,
+}: ProjectPickerMenuProps) {
+  return (
+    <div className="project-picker-menu" role="menu" aria-label="项目菜单">
+      <span className="project-picker-menu-heading">最近打开</span>
+      {recentProjects.length > 0 ? (
+        recentProjects.slice(0, 6).map((recent) => (
+          <button
+            key={recent.rootPath}
+            type="button"
+            role="menuitem"
+            className={recent.rootPath === currentProject?.rootPath ? 'current' : ''}
+            title={recent.rootPath}
+            disabled={busy}
+            onClick={() => onOpenProject(recent.rootPath)}
+          >
+            <FolderOpen size={14} />
+            <span>{recent.name}</span>
+            {recent.rootPath === currentProject?.rootPath && <small>当前</small>}
+          </button>
+        ))
+      ) : (
+        <span className="project-picker-empty">暂无最近项目</span>
+      )}
+      <div className="project-picker-menu-divider" />
+      <button type="button" role="menuitem" disabled={busy} onClick={onBrowse}>
+        <FolderOpen size={14} />
+        <span>浏览项目目录…</span>
+      </button>
+      <button type="button" role="menuitem" disabled={busy} onClick={onCreate}>
+        <Plus size={14} />
+        <span>新建项目…</span>
+      </button>
+      {currentProject && (
+        <>
+          <div className="project-picker-menu-divider" />
+          <span className="project-picker-menu-heading">当前项目</span>
+          <button type="button" role="menuitem" disabled={!writable || busy} onClick={onRename}>
+            <Pencil size={14} />
+            <span>修改项目名称</span>
+          </button>
+          <button type="button" role="menuitem" disabled={busy} onClick={onCheckIntegrity}>
+            <ShieldCheck size={14} />
+            <span>完整性检查</span>
+          </button>
+          <button type="button" role="menuitem" disabled={!writable || busy} onClick={onBackup}>
+            <Save size={14} />
+            <span>备份项目</span>
+          </button>
+          <button type="button" role="menuitem" disabled={busy} onClick={onCloseProject}>
+            <Power size={14} />
+            <span>关闭项目</span>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const callWorker = projectWorker();
   const [health, setHealth] = useState<HealthResult>();
@@ -698,10 +724,14 @@ export function App() {
   const [projectPath, setProjectPath] = useState('');
   const [projectMessage, setProjectMessage] = useState('');
   const [projectBusy, setProjectBusy] = useState(false);
+  const [projectRenameOpen, setProjectRenameOpen] = useState(false);
+  const [projectRenameValue, setProjectRenameValue] = useState('');
+  const [projectRenameBusy, setProjectRenameBusy] = useState(false);
+  const [projectRenameError, setProjectRenameError] = useState('');
+  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [startupLoaded, setStartupLoaded] = useState(false);
-  /** Inspect/backup/close are maintenance, not daily work, so they stay collapsed. */
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const projectMenuRef = useRef<HTMLDivElement>(null);
+  const projectPickerRef = useRef<HTMLDivElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [providerSettingsRevision, setProviderSettingsRevision] = useState(0);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPage>('providers');
@@ -715,21 +745,31 @@ export function App() {
   );
 
   const [view, setView] = useState<WorkspaceView>('documents');
+  const [roughCutProjectId, setRoughCutProjectId] = useState<string>();
+  const [roughCutImport, setRoughCutImport] = useState<RoughCutImportRequest>();
+  const roughCutImportToken = useRef(0);
   const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
+  const [documentDirectoryMode, setDocumentDirectoryMode] = useState<'active' | 'archived'>(
+    'active',
+  );
+  const [editingDocumentTitleId, setEditingDocumentTitleId] = useState<string | null>(null);
   const [detachedPanels, setDetachedPanels] = useState<Partial<Record<DetachedPanelId, string>>>(
     {},
   );
 
   const [scenes, setScenes] = useState<SceneInfo[]>([]);
+  const [shotReferenceDocuments, setShotReferenceDocuments] = useState<
+    Record<string, ShotReferenceDocumentIds>
+  >({});
   const [scene, setScene] = useState<SceneInfo>();
   const activeSceneIdRef = useRef(scene?.id);
   activeSceneIdRef.current = scene?.id;
   const [proposalRefreshRevision, setProposalRefreshRevision] = useState(0);
-  const [sceneBindingBusy, setSceneBindingBusy] = useState(false);
-  const [sceneBindingMessage, setSceneBindingMessage] = useState('');
   const [sceneVideoPrompt, setSceneVideoPrompt] = useState('');
   const [shots, setShots] = useState<ShotInfo[]>([]);
   const [shot, setShot] = useState<ShotInfo>();
+  const activeShotIdRef = useRef(shot?.id);
+  activeShotIdRef.current = shot?.id;
   const [shotPrompt, setShotPrompt] = useState('');
   const [constraints, setConstraints] = useState<ConstraintInfo[]>([]);
   const [shotStoryboard, setShotStoryboard] = useState<DocumentDetail>();
@@ -741,6 +781,18 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [composer, setComposer] = useState('');
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [chatAttachmentsPending, setChatAttachmentsPending] = useState(false);
+  const chatAttachmentsRef = useRef(chatAttachments);
+  chatAttachmentsRef.current = chatAttachments;
+  const chatAttachmentRevision = useRef(0);
+  const chatAttachmentQueue = useRef(Promise.resolve());
+  const clearChatAttachments = () => {
+    chatAttachmentRevision.current += 1;
+    chatAttachmentQueue.current = Promise.resolve();
+    chatAttachmentsRef.current = [];
+    setChatAttachments([]);
+    setChatAttachmentsPending(false);
+  };
   const [chatMessage, setChatMessage] = useState('');
   const [productionSkillBusy, setProductionSkillBusy] = useState(false);
   const productionSkillPending = useRef(false);
@@ -902,6 +954,27 @@ export function App() {
     });
   };
 
+  const closeDetachedPanelForEntity = (panelId: DetachedPanelId, entityId: string) => {
+    const registration = Object.values(detachedRegistryRef.current).find(
+      (item) =>
+        item.config.panelId === panelId &&
+        item.config.projectId === project?.id &&
+        item.config.entityId === entityId,
+    );
+    if (!registration) return;
+    const { label } = registration.config;
+    delete detachedRegistryRef.current[label];
+    delete detachedSnapshotRef.current[label];
+    delete detachedActionSequenceRef.current[label];
+    setDetachedPanels((current) => {
+      if (current[panelId] !== label) return current;
+      const next = { ...current };
+      delete next[panelId];
+      return next;
+    });
+    void closeDetachedPanelWindow(label).catch(() => undefined);
+  };
+
   const openDocumentWorkspace = (kind?: DocumentKind) => {
     const nextView =
       kind && CHARACTER_DOCUMENT_KINDS.includes(kind)
@@ -915,6 +988,13 @@ export function App() {
   };
 
   const openProjectView = (nextView: WorkspaceView | 'assets', assetId?: string) => {
+    if (nextView === 'rough-cut') {
+      setNavigationMode('project');
+      setRoughCutProjectId(project?.id);
+      workspaceDispatch({ type: 'dock', panelId: 'assets' });
+      workspaceDispatch({ type: 'dock', panelId: 'document' });
+      workspaceDispatch({ type: 'close', panelId: 'conversation' });
+    }
     if (nextView === 'assets') {
       if (assetId) {
         setAssetLibrarySelectedId(assetId);
@@ -959,11 +1039,13 @@ export function App() {
   const docs = useDocumentWorkspace({
     writable,
     syncDetachedPanel: (entityId) => syncDetachedPanelForEntity('document', entityId),
+    closeDetachedPanel: (entityId) => closeDetachedPanelForEntity('document', entityId),
     openDocumentWorkspace,
     closeDocumentPanel: () => workspaceDispatch({ type: 'close', panelId: 'document' }),
   });
   const {
     documents,
+    archivedDocuments,
     document,
     documentTitle,
     documentKind,
@@ -973,6 +1055,9 @@ export function App() {
     setContentBusy,
     contentMessage,
     documentCloseConfirmation,
+    documentArchiveConfirmation,
+    documentArchiveTarget,
+    documentDirty,
     documentEditorWritable,
     setDocuments,
     setDocumentKind,
@@ -980,12 +1065,18 @@ export function App() {
     setDocumentContent,
     setContentMessage,
     setDocumentCloseConfirmation,
+    setDocumentArchiveConfirmation,
+    setDocumentArchiveTarget,
     openDocumentById: openNonChapterDocumentById,
     newDocument,
     importMarkdownDocument,
     saveDocument,
+    requestArchiveDocument,
+    confirmArchiveDocument,
+    restoreArchivedDocument,
     requestDocumentChanges,
     publishDocument,
+    unpublishDocument,
     saveAndPublishDocument,
     restoreVersion,
     requestCloseDocument,
@@ -994,6 +1085,15 @@ export function App() {
     syncMainDocumentIfSelected,
     reset: resetDocumentWorkspace,
   } = docs;
+  const characterSceneReferenceKey = `${project?.id ?? ''}:${document?.id ?? ''}:${documentKind}`;
+  const [characterSceneReference, setCharacterSceneReference] = useState<{
+    key: string;
+    options: SceneReferenceImageOptions;
+  }>({ key: '', options: {} });
+  const activeCharacterSceneReference =
+    characterSceneReference.key === characterSceneReferenceKey
+      ? characterSceneReference.options
+      : {};
 
   const openDocumentById = async (
     documentId: string,
@@ -1166,18 +1266,30 @@ export function App() {
     documentId?: string;
     shotId?: string;
     sceneId?: string;
-    prompt: string;
+    prompt?: string;
+    seedParameters?: import('@ai-video/contracts').AdapterParameters;
+    audioReference?: {
+      characterDocumentId: string;
+      expectedVoiceVersionId: string;
+      providerProfileId: string;
+      model: string;
+    };
     assetKind?: 'character' | 'scene' | 'prop' | 'first-frame';
     images?: string[];
     referenceBindings?: import('@ai-video/contracts').SceneMaterialBindingInfo[];
     inputImages?: import('@ai-video/contracts').ProductionImageSelection[];
     continuityRevision?: number;
   }>();
-  const [linkedAssets, setLinkedAssets] = useState<AssetInfo[]>([]);
+  const linkedAssetSourceKey = `${project?.id}:${document?.id}`;
+  const [linkedAssetState, setLinkedAssetState] = useState<{
+    key: string;
+    items: AssetInfo[];
+  }>({ key: '', items: [] });
+  const linkedAssets = linkedAssetState.key === linkedAssetSourceKey ? linkedAssetState.items : [];
 
   useEffect(() => {
     if (view !== 'characters' || !document?.id) {
-      setLinkedAssets([]);
+      setLinkedAssetState({ key: linkedAssetSourceKey, items: [] });
       return;
     }
     const documentId = document.id;
@@ -1188,15 +1300,15 @@ export function App() {
       limit: 60,
     })
       .then((items) => {
-        if (active) setLinkedAssets(items);
+        if (active) setLinkedAssetState({ key: linkedAssetSourceKey, items });
       })
       .catch(() => {
-        if (active) setLinkedAssets([]);
+        if (active) setLinkedAssetState({ key: linkedAssetSourceKey, items: [] });
       });
     return () => {
       active = false;
     };
-  }, [view, document?.id, taskCompletionRevision, assets]);
+  }, [view, document?.id, linkedAssetSourceKey, taskCompletionRevision, assets]);
 
   const closeSettings = () => {
     setSettingsOpen(false);
@@ -1287,10 +1399,42 @@ export function App() {
     );
   };
 
+  const agentResourceRefresh = useRef(new AgentResourceRefresh());
+  const resourceRefreshCallbacks = useRef({
+    documents: docs.refreshCommittedDocuments,
+    production: async () => {},
+  });
+  resourceRefreshCallbacks.current = {
+    documents: docs.refreshCommittedDocuments,
+    production: async () => refreshProductionSources(),
+  };
   const rememberAgentTask = (detail: import('@ai-video/contracts').AgentTaskDetail | undefined) => {
     setAgentTask(detail);
     if (!detail) return;
     setConversationAgentTasks((current) => upsertAgentTaskDetail(current, detail));
+    if (detail.resourceChanges && detail.task.projectId === activeProjectIdRef.current) {
+      const scopeKey = `${detail.task.projectId}:${workerScope()?.projectSessionId ?? ''}`;
+      agentResourceRefresh.current.observe(
+        scopeKey,
+        detail.task.id,
+        detail.resourceChanges,
+        async (kind) => {
+          if (scopeKey !== `${activeProjectIdRef.current}:${workerScope()?.projectSessionId ?? ''}`)
+            throw new Error('Project session changed');
+          if (kind === 'documentSequence') {
+            await resourceRefreshCallbacks.current.documents();
+            if (
+              scopeKey === `${activeProjectIdRef.current}:${workerScope()?.projectSessionId ?? ''}`
+            )
+              window.dispatchEvent(
+                new CustomEvent('novel-metadata-updated', {
+                  detail: { projectId: detail.task.projectId },
+                }),
+              );
+          } else await resourceRefreshCallbacks.current.production();
+        },
+      );
+    }
   };
 
   const stopAgentTaskEventPolling = () => {
@@ -1371,7 +1515,7 @@ export function App() {
       : [];
     if (isVisible()) {
       activeMediaInputsRef.current = referenceImageInputs;
-      if (includeAttachments) setChatAttachments([]);
+      if (includeAttachments) clearChatAttachments();
     }
     const agentTaskId =
       'agentTaskId' in prepared && typeof prepared.agentTaskId === 'string'
@@ -1380,6 +1524,7 @@ export function App() {
     const isAgentGeneration = agentTaskId !== undefined;
     if (isVisible()) {
       lastGenerationErrorRef.current = undefined;
+      setChatMessage('');
       setLiveAgentActions([]);
       if (agentTaskId) {
         setAgentTask(undefined);
@@ -1476,7 +1621,7 @@ export function App() {
       });
     }
     if (!isGenerationActive(prepared.generation)) {
-      if (isVisible()) setChatMessage(prepared.generation.error ?? '生成已完成');
+      if (isVisible()) setChatMessage(generationStatusMessage(prepared.generation));
       refreshAgentDocuments();
       return Promise.resolve();
     }
@@ -1524,7 +1669,7 @@ export function App() {
           if (!isGenerationActive(next) && nativeRunIsCurrent(run)) {
             confirmationQueue.current!.removeOwner(prepared.stream.generationId);
             if (next.error) lastGenerationErrorRef.current = next.error;
-            setChatMessage(readableGenerationError(next.error) ?? '生成完成');
+            setChatMessage(generationStatusMessage(next));
             refreshAgentDocuments();
           }
         },
@@ -1543,6 +1688,7 @@ export function App() {
             'model',
             request,
             referenceImageInputs,
+            prepared.stream.projectId,
           );
         },
         onMediaSubmission(request) {
@@ -1637,6 +1783,20 @@ export function App() {
     reset: resetConversationWorkspace,
   } = conversationWorkspace;
 
+  const attachmentContext = `${project?.id}:${workerScope(project?.id)?.projectSessionId}:${conversation?.id}`;
+  const attachmentContextRef = useRef(attachmentContext);
+  attachmentContextRef.current = attachmentContext;
+  useEffect(() => {
+    chatAttachmentRevision.current += 1;
+    chatAttachmentQueue.current = Promise.resolve();
+    chatAttachmentsRef.current = [];
+    setChatAttachments([]);
+    setChatAttachmentsPending(false);
+    return () => {
+      chatAttachmentRevision.current += 1;
+    };
+  }, [attachmentContext]);
+
   const conversationPromptTemplate = useConversationPromptTemplate(conversation);
   const saveConversationPromptTemplate = async () => {
     if (!conversation || conversation.archivedAt) return;
@@ -1673,6 +1833,18 @@ export function App() {
     }
   };
 
+  const refreshShotReferenceDocuments = async (sceneRows: SceneInfo[]) => {
+    const expectedProjectId = project?.id;
+    const shotLists = await Promise.all(
+      sceneRows.map(
+        async (sceneRow) =>
+          [sceneRow.id, await callWorker('shot.list', { sceneId: sceneRow.id })] as const,
+      ),
+    );
+    if (!expectedProjectId || activeProjectIdRef.current !== expectedProjectId) return;
+    setShotReferenceDocuments(shotReferenceDocumentIdsByScene(sceneRows, new Map(shotLists)));
+  };
+
   const loadProjectContent = async () => {
     const callWorker = projectWorker();
     const requestId = ++projectContentRequest.current;
@@ -1685,10 +1857,19 @@ export function App() {
       const assetList = await callWorker('asset.list', {});
       const firstScene = sceneList[0];
       const shotList = firstScene ? await callWorker('shot.list', { sceneId: firstScene.id }) : [];
+      const shotLists = new Map<string, ShotInfo[]>([[firstScene?.id ?? '', shotList]]);
+      await Promise.all(
+        sceneList
+          .filter((sceneRow) => sceneRow.id !== firstScene?.id)
+          .map(async (sceneRow) => {
+            shotLists.set(sceneRow.id, await callWorker('shot.list', { sceneId: sceneRow.id }));
+          }),
+      );
       if (requestId !== projectContentRequest.current) return;
       setDocuments(documentList);
       setConstraints(constraintList);
       setScenes(sceneList);
+      setShotReferenceDocuments(shotReferenceDocumentIdsByScene(sceneList, shotLists));
       setScene(firstScene);
       setSceneVideoPrompt(
         firstScene?.videoPrompt?.trim()
@@ -1900,14 +2081,13 @@ export function App() {
   }, [settingsOpen]);
 
   useEffect(() => {
-    if (!projectMenuOpen) return;
+    if (!projectPickerOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
-      if (!projectMenuRef.current?.contains(event.target as Node)) setProjectMenuOpen(false);
+      if (!projectPickerRef.current?.contains(event.target as Node)) setProjectPickerOpen(false);
     };
-    // `document` is the open DocumentDetail here, so the DOM must be reached via window.
     window.document.addEventListener('pointerdown', handlePointerDown);
     return () => window.document.removeEventListener('pointerdown', handlePointerDown);
-  }, [projectMenuOpen]);
+  }, [projectPickerOpen]);
 
   useEffect(() => {
     try {
@@ -1947,7 +2127,7 @@ export function App() {
   }, [project?.id]);
 
   useEffect(() => {
-    if (!generation || generation.executionMode === 'native' || generation.status !== 'streaming')
+    if (!generation || generation.executionMode === 'native' || !isGenerationActive(generation))
       return;
     const projectId = project?.id;
     const conversationId = conversation?.id;
@@ -1973,9 +2153,9 @@ export function App() {
           }
           setGeneration(next);
           setMessages((current) => mergeGenerationMessage(current, conversationId, next));
-          if (next.status !== 'streaming') {
+          if (!isGenerationActive(next)) {
             if (next.error) lastGenerationErrorRef.current = next.error;
-            setChatMessage(readableGenerationError(next.error) ?? '生成完成');
+            setChatMessage(generationStatusMessage(next));
           }
         })
         .catch((reason) => {
@@ -2097,7 +2277,10 @@ export function App() {
     };
   }, [project?.id, workerScope(project?.id)?.projectSessionId, conversation?.id]);
 
-  const runProjectAction = async (action: () => Promise<ProjectInfo | string | undefined>) => {
+  const runProjectAction = async (
+    action: () => Promise<ProjectInfo | string | undefined>,
+    options: { createInitialConversation?: boolean } = {},
+  ) => {
     const requestId = ++projectActionRequest.current;
     generationPollVersion.current += 1;
     projectContentRequest.current += 1;
@@ -2127,8 +2310,25 @@ export function App() {
           projectId: runtime.project.id,
           projectSessionId: runtime.projectSessionId,
         });
+        if (options.createInitialConversation) {
+          try {
+            await callWorker(
+              'conversation.create',
+              { scopeType: 'project' },
+              {
+                projectId: runtime.project.id,
+                projectSessionId: runtime.projectSessionId,
+              },
+            );
+          } catch (reason) {
+            setProjectMessage(
+              `项目已创建，但新会话创建失败：${reason instanceof Error ? reason.message : '会话创建失败'}`,
+            );
+          }
+        }
         setGeneration(undefined);
         setProject(result);
+        setProjectCreateOpen(false);
       }
       setRecentProjects(await callWorker('project.recent', {}));
     } catch (reason) {
@@ -2162,6 +2362,7 @@ export function App() {
     }
     return runProjectAction(
       async () => (await callWorker('project.runtime.create', { name, rootPath })).project,
+      { createInitialConversation: true },
     );
   };
   const createSampleProject = () => {
@@ -2175,11 +2376,14 @@ export function App() {
             name: projectName.trim() || undefined,
           })
         ).project,
+      { createInitialConversation: true },
     );
   };
   const openProject = (requestedPath?: string) => {
     const rootPath = normalizeProjectPath(requestedPath ?? projectPath);
     if (!rootPath) return;
+    setProjectPickerOpen(false);
+    setProjectCreateOpen(false);
     return runProjectAction(async () => {
       const attached = await callWorker('project.runtime.attach', { rootPath });
       const activated = await callWorker('project.runtime.activate', {
@@ -2206,6 +2410,7 @@ export function App() {
   };
   const closeProject = () =>
     runProjectAction(async () => {
+      setProjectPickerOpen(false);
       const scope = workerScope(project?.id);
       if (scope) await callWorker('project.runtime.unload', scope);
       if (project) {
@@ -2220,11 +2425,46 @@ export function App() {
       setProject(undefined);
       resetDocumentWorkspace();
       setScenes([]);
+      setShotReferenceDocuments({});
       resetAssetWorkspace();
       resetConversationWorkspace();
       setGeneration(undefined);
       return '项目已安全关闭';
     });
+
+  const openProjectRename = () => {
+    if (!project || !writable) return;
+    setProjectRenameValue(project.name);
+    setProjectRenameError('');
+    setProjectPickerOpen(false);
+    setProjectRenameOpen(true);
+  };
+
+  const renameProject = async () => {
+    if (!project || !writable || projectRenameBusy) return;
+    const name = projectRenameValue.trim();
+    if (!name) {
+      setProjectRenameError('请输入项目名称。');
+      return;
+    }
+    setProjectRenameBusy(true);
+    setProjectRenameError('');
+    try {
+      const renamed = await callWorker('project.rename', { name });
+      setProject(renamed);
+      setRecentProjects((current) =>
+        current.map((recent) =>
+          recent.rootPath === renamed.rootPath ? { ...recent, name: renamed.name } : recent,
+        ),
+      );
+      setProjectMessage('项目名称已更新。');
+      setProjectRenameOpen(false);
+    } catch (reason) {
+      setProjectRenameError(reason instanceof Error ? reason.message : '项目名称修改失败。');
+    } finally {
+      setProjectRenameBusy(false);
+    }
+  };
 
   const openSettings = (
     page: SettingsPage = project ? 'providers' : 'maintenance',
@@ -2272,6 +2512,7 @@ export function App() {
     const created = await callWorker('scene.save', { title: `场次 ${scenes.length + 1}` });
     const list = await callWorker('scene.list', {});
     setScenes(list);
+    void refreshShotReferenceDocuments(list);
     setScene(created);
     setSceneVideoPrompt(created.videoPrompt ?? '');
     setShots([]);
@@ -2288,6 +2529,7 @@ export function App() {
           .then((rows) => {
             if (!active || activeProjectIdRef.current !== expectedProjectId) return;
             setScenes(rows);
+            void refreshShotReferenceDocuments(rows);
             setScene((current) => rows.find((row) => row.id === current?.id) ?? current);
           })
           .catch(() => undefined);
@@ -2299,72 +2541,61 @@ export function App() {
     };
   }, [project?.id]);
 
+  const productionEditor = useRef({ scene, shot, sceneVideoPrompt, shotPrompt });
+  const productionRefreshRequest = useRef(0);
+  productionEditor.current = { scene, shot, sceneVideoPrompt, shotPrompt };
+  const refreshProductionSources = async () => {
+    if (!project?.id) return;
+    const expectedProjectId = project.id;
+    const expectedSessionId = workerScope()?.projectSessionId;
+    const refreshRequest = ++productionRefreshRequest.current;
+    const expectedSceneId = activeSceneIdRef.current;
+    const [nextScenes, nextShots] = await Promise.all([
+      callWorker('scene.list', {}),
+      expectedSceneId ? callWorker('shot.list', { sceneId: expectedSceneId }) : Promise.resolve([]),
+    ]);
+    if (
+      activeProjectIdRef.current !== expectedProjectId ||
+      workerScope()?.projectSessionId !== expectedSessionId ||
+      productionRefreshRequest.current !== refreshRequest
+    )
+      throw new Error('Production refresh superseded');
+    setScenes(nextScenes);
+    void refreshShotReferenceDocuments(nextScenes);
+    if (activeSceneIdRef.current !== expectedSceneId) return;
+    setShots(nextShots);
+    setScene((current) => {
+      const next = nextScenes.find((item) => item.id === current?.id);
+      if (productionEditor.current.sceneVideoPrompt !== (current?.videoPrompt ?? ''))
+        return current;
+      if (next)
+        setSceneVideoPrompt((text) =>
+          text === (current?.videoPrompt ?? '') ? (next.videoPrompt ?? '') : text,
+        );
+      return next ?? current;
+    });
+    setShot((current) => {
+      const next = nextShots.find((item) => item.id === current?.id);
+      if (productionEditor.current.shotPrompt !== (current?.prompt ?? '')) return current;
+      if (next)
+        setShotPrompt((text) => (text === (current?.prompt ?? '') ? (next.prompt ?? '') : text));
+      return next ?? current;
+    });
+  };
+
   useEffect(() => {
-    let active = true;
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ agent?: boolean; authoring?: boolean }>).detail;
-      if ((!detail?.agent && !detail?.authoring) || !project?.id) return;
-      void Promise.all([
-        callWorker('scene.list', {}),
-        scene?.id ? callWorker('shot.list', { sceneId: scene.id }) : Promise.resolve([]),
-      ])
-        .then(([nextScenes, nextShots]) => {
-          if (!active || activeProjectIdRef.current !== project.id) return;
-          setScenes(nextScenes);
-          setShots(nextShots);
-          setScene((current) => {
-            const next = nextScenes.find((item) => item.id === current?.id);
-            if (next)
-              setSceneVideoPrompt((text) =>
-                text === (current?.videoPrompt ?? '') ? (next.videoPrompt ?? '') : text,
-              );
-            return next ?? current;
-          });
-          setShot((current) => {
-            const next = nextShots.find((item) => item.id === current?.id);
-            if (next)
-              setShotPrompt((text) =>
-                text === (current?.prompt ?? '') ? (next.prompt ?? '') : text,
-              );
-            return next ?? current;
-          });
-        })
-        .catch(() => setContentMessage('制作内容已更新，页面刷新失败，请重新打开对应页面。'));
+      if (!detail?.agent && !detail?.authoring) return;
+      void refreshProductionSources().catch(() =>
+        setContentMessage('制作内容已更新，页面刷新失败，请重新打开对应页面。'),
+      );
     };
     window.addEventListener('production-source-updated', refresh);
     return () => {
-      active = false;
       window.removeEventListener('production-source-updated', refresh);
     };
   }, [project?.id, scene?.id]);
-
-  const bindSceneDocument = async (sceneDocumentId: string) => {
-    if (!scene || !writable || sceneBindingBusy) return;
-    const expectedProjectId = project?.id;
-    const requestId = ++sceneRequest.current;
-    setSceneBindingBusy(true);
-    setSceneBindingMessage('');
-    try {
-      const updated = await callWorker('scene.save', {
-        sceneId: scene.id,
-        title: scene.title,
-        expectedRowVersion: scene.rowVersion,
-        sceneDocumentIds: sceneDocumentId ? [sceneDocumentId] : [],
-      });
-      if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
-        return;
-      setScene(updated);
-      setScenes((rows) => rows.map((item) => (item.id === updated.id ? updated : item)));
-      setSceneBindingMessage(
-        sceneDocumentId ? '场次已绑定场景，下属镜头可沿用场景参考图。' : '场次的场景绑定已解除。',
-      );
-    } catch (error) {
-      if (activeProjectIdRef.current === expectedProjectId && requestId === sceneRequest.current)
-        setSceneBindingMessage(error instanceof Error ? error.message : '场景绑定失败');
-    } finally {
-      setSceneBindingBusy(false);
-    }
-  };
 
   const refreshAppliedStructure = async (
     saved: import('@ai-video/contracts').AgentChangeSetInfo | string,
@@ -2383,6 +2614,7 @@ export function App() {
     if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
       return;
     setScenes(nextScenes);
+    void refreshShotReferenceDocuments(nextScenes);
     const appliedSceneIds = new Set(
       (changeSet?.items ?? [])
         .filter((item) => item.entityType === 'scene' && item.status === 'applied')
@@ -2408,12 +2640,60 @@ export function App() {
     setShotPrompt(nextShot?.prompt ?? '');
   };
 
+  const refreshProductionLifecycle = async (
+    targets: Array<{ kind: 'scene' | 'shot'; id: string }>,
+  ) => {
+    const expectedProjectId = project?.id;
+    const requestId = ++sceneRequest.current;
+    const removedScenes = new Set(
+      targets.filter((item) => item.kind === 'scene').map((item) => item.id),
+    );
+    const removedShots = new Set(
+      targets.filter((item) => item.kind === 'shot').map((item) => item.id),
+    );
+    setScenes((rows) => rows.filter((item) => !removedScenes.has(item.id)));
+    setShots((rows) =>
+      rows.filter((item) => !removedScenes.has(item.sceneId) && !removedShots.has(item.id)),
+    );
+    if (scene && removedScenes.has(scene.id)) {
+      conversationRequest.current += 1;
+      setScene(undefined);
+      setSceneVideoPrompt('');
+      setShot(undefined);
+      setShotPrompt('');
+    } else if (shot && removedShots.has(shot.id)) {
+      conversationRequest.current += 1;
+      setShot(undefined);
+      setShotPrompt('');
+    }
+    const nextScenes = await callWorker('scene.list', {});
+    if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+      return;
+    setScenes(nextScenes);
+    const currentSceneId = activeSceneIdRef.current;
+    if (!currentSceneId) return;
+    if (!nextScenes.some((item) => item.id === currentSceneId)) {
+      setScene(undefined);
+      setShot(undefined);
+      setShots([]);
+      setSceneVideoPrompt('');
+      return;
+    }
+    const nextShots = await callWorker('shot.list', { sceneId: currentSceneId });
+    if (activeProjectIdRef.current !== expectedProjectId || requestId !== sceneRequest.current)
+      return;
+    setShots(nextShots);
+    if (activeShotIdRef.current && !nextShots.some((item) => item.id === activeShotIdRef.current)) {
+      setShot(undefined);
+      setShotPrompt('');
+    }
+  };
+
   const selectScene = async (selected: SceneInfo, selectedShot?: ShotInfo) => {
     const requestId = ++sceneRequest.current;
     conversationRequest.current += 1;
     setScene(selected);
     setSceneVideoPrompt(selected.videoPrompt ?? '');
-    setSceneBindingMessage('');
     setShot(undefined);
     try {
       const items = await callWorker('shot.list', { sceneId: selected.id });
@@ -2443,76 +2723,56 @@ export function App() {
     setShotPrompt(shot?.prompt ?? '');
   }, [shot?.id]);
 
-  const saveSceneVideoPrompt = async (
-    nextPrompt: string,
-    materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
-    characterBindings: import('@ai-video/contracts').SceneCharacterBindingInfo[],
-    dialogueAudioId?: string,
-  ) => {
-    if (!scene) return;
+  const saveSceneVideoPrompt = async (nextPrompt: string) => {
+    if (!scene) return false;
     const expectedProjectId = project?.id;
     const requestId = sceneRequest.current;
     try {
       const updated = await callWorker('scene.save', {
         sceneId: scene.id,
         title: scene.title,
-        sceneDocumentIds:
-          scene.sceneDocumentIds ??
-          (scene.sceneDocumentId ? [scene.sceneDocumentId] : []),
         videoPrompt: nextPrompt,
-        materialBindings,
-        characterBindings,
-        dialogueAudioId: dialogueAudioId ?? null,
         expectedRowVersion: scene.rowVersion,
       });
       if (activeProjectIdRef.current !== expectedProjectId || sceneRequest.current !== requestId)
-        return;
+        return false;
       setScene(updated);
       setScenes((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
       setSceneVideoPrompt(updated.videoPrompt ?? '');
-      setChatMessage('场次视频提示词和素材绑定已保存。');
-      return updated;
+      setChatMessage('场次视频提示词已保存。');
+      return true;
     } catch (reason) {
       if (activeProjectIdRef.current === expectedProjectId && sceneRequest.current === requestId)
         setChatMessage(reason instanceof Error ? reason.message : '场次提示词保存失败');
+      return false;
     }
   };
 
-  const openSceneProduction = async (
-    materialBindings: import('@ai-video/contracts').SceneMaterialBindingInfo[],
-    characterBindings: import('@ai-video/contracts').SceneCharacterBindingInfo[],
-    dialogueAudioId?: string,
-  ) => {
+  const renameScene = async (target: SceneInfo, title: string) => {
+    if (!writable || !title.trim()) return;
+    try {
+      const updated = await callWorker('scene.save', {
+        sceneId: target.id,
+        title: title.trim(),
+        expectedRowVersion: target.rowVersion,
+      });
+      setScenes((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
+      setScene((current) => (current?.id === updated.id ? updated : current));
+      setChatMessage('场次标题已保存。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '场次标题保存失败');
+    }
+  };
+
+  const openSceneProduction = async () => {
     if (!scene) return;
     if (
-      sceneVideoPrompt !== (scene.videoPrompt ?? '') ||
-      JSON.stringify(materialBindings) !== JSON.stringify(scene.materialBindings ?? []) ||
-      JSON.stringify(characterBindings) !== JSON.stringify(scene.characterBindings ?? []) ||
-      dialogueAudioId !== scene.dialogueAudioId
-    ) {
-      if (
-        !(await saveSceneVideoPrompt(
-          sceneVideoPrompt,
-          materialBindings,
-          characterBindings,
-          dialogueAudioId,
-        ))
-      )
-        return;
-    }
+      sceneVideoPrompt !== (scene.videoPrompt ?? '') &&
+      !(await saveSceneVideoPrompt(sceneVideoPrompt))
+    )
+      return;
     const expectedProjectId = project?.id;
     if (!expectedProjectId) return;
-    let resolvedCharacters;
-    try {
-      const media = await readSceneMedia(expectedProjectId, sceneMediaParams(characterBindings));
-      if (activeProjectIdRef.current !== expectedProjectId || activeSceneIdRef.current !== scene.id)
-        return;
-      resolvedCharacters = effectiveSceneCast(characterBindings, media);
-    } catch {
-      setContentMessage('场次参考资料读取失败，请重试。');
-      return;
-    }
-    const references = sceneReferenceBindings(materialBindings, resolvedCharacters, documents);
     const production = await callWorker('production.read', {
       target: { kind: 'scene', id: scene.id },
     });
@@ -2521,11 +2781,17 @@ export function App() {
     setProductionSeed({
       sceneId: scene.id,
       prompt: production?.compiledPrompt ?? sceneVideoPrompt.trim(),
-      images: references.map((item) => `asset://${item.assetId}`),
-      referenceBindings: references,
-      inputImages: productionImageSelectionsFromBindings(references),
     });
-    setProductionCapability(references.length > 0 ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
+    const hasReferences = shots.some((item) => {
+      const references = productionShotReferenceIds(item);
+      return (
+        references.characterDocumentIds.length > 0 ||
+        references.sceneDocumentIds.length > 0 ||
+        references.propDocumentIds.length > 0 ||
+        Boolean(item.referenceBindings?.firstFrameAssetId)
+      );
+    });
+    setProductionCapability(hasReferences ? 'REFERENCE_TO_VIDEO' : 'TEXT_TO_VIDEO');
   };
 
   useEffect(() => {
@@ -2557,6 +2823,8 @@ export function App() {
 
   const saveShotStoryboard = async () => {
     if (!shot) return;
+    const expectedProjectId = project?.id;
+    const requestId = shotStoryboardRequest.current;
     setShotStoryboardBusy(true);
     try {
       const updated = await callWorker('shot.storyboard.save', {
@@ -2564,19 +2832,38 @@ export function App() {
         title: shotStoryboardTitle.trim() || shot.title,
         contentMarkdown: shotStoryboardContent,
       });
+      const latestShots = !shot.documentId
+        ? await callWorker('shot.list', { sceneId: shot.sceneId })
+        : undefined;
+      if (
+        activeProjectIdRef.current !== expectedProjectId ||
+        requestId !== shotStoryboardRequest.current
+      )
+        return;
       setShotStoryboard(updated);
       setShotStoryboardTitle(updated.title);
       setShotStoryboardContent(updated.currentVersion?.contentMarkdown ?? '');
       if (!shot.documentId) {
-        const attached: ShotInfo = { ...shot, documentId: updated.id };
+        const attached: ShotInfo = {
+          ...(latestShots?.find((item) => item.id === shot.id) ?? shot),
+          documentId: updated.id,
+        };
         setShot(attached);
-        setShots((rows) => rows.map((row) => (row.id === shot.id ? attached : row)));
+        setShots((latestShots ?? shots).map((row) => (row.id === shot.id ? attached : row)));
       }
       setChatMessage('分镜文档已保存。');
     } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '分镜文档保存失败');
+      if (
+        activeProjectIdRef.current === expectedProjectId &&
+        requestId === shotStoryboardRequest.current
+      )
+        setChatMessage(reason instanceof Error ? reason.message : '分镜文档保存失败');
     } finally {
-      setShotStoryboardBusy(false);
+      if (
+        activeProjectIdRef.current === expectedProjectId &&
+        requestId === shotStoryboardRequest.current
+      )
+        setShotStoryboardBusy(false);
     }
   };
 
@@ -2590,56 +2877,82 @@ export function App() {
     setShot(created);
   };
 
-  const referenceImages = (refs: ShotReferenceAssets): string[] =>
-    [
-      ...new Set([
-        ...(refs.characterAssetIds ?? []),
-        refs.characterAssetId,
-        ...(refs.sceneAssetIds ?? []),
-        refs.sceneAssetId,
-        refs.firstFrameAssetId,
-        ...(refs.continuityReferenceAssetIds ?? []),
-      ]),
-    ]
-      .filter((id): id is string => Boolean(id))
-      .map((id) => `asset://${id}`);
-
-  const openShotProduction = async (mode: 'image' | 'video', refs: ShotReferenceAssets) => {
+  const seedShotProduction = (
+    mode: 'image' | 'video',
+    refs: ShotReferenceAssets,
+    prompt: string,
+    refresh = false,
+  ) => {
     if (!shot) return;
-    if (shotPrompt !== (shot.prompt ?? '')) {
-      await saveShotPrompt();
-    }
-    const images = referenceImages(refs);
-    const inputImages: import('@ai-video/contracts').ProductionImageSelection[] = [
-      ...[
-        ...(refs.characterAssetIds ?? []),
-        ...(refs.characterAssetId ? [refs.characterAssetId] : []),
-      ].map((assetId) => ({ assetId, role: 'character' as const })),
-      ...(refs.sceneAssetId ? [{ assetId: refs.sceneAssetId, role: 'scene' as const }] : []),
-      ...(refs.sceneAssetIds ?? [])
-        .filter((assetId) => assetId !== refs.sceneAssetId)
-        .map((assetId) => ({ assetId, role: 'scene' as const })),
-      ...(refs.continuityReferenceAssetIds ?? []).map((assetId) => ({
-        assetId,
-        role: 'reference' as const,
-      })),
-      ...(refs.firstFrameAssetId
-        ? [{ assetId: refs.firstFrameAssetId, role: 'first-frame' as const }]
-        : []),
-    ];
-    setProductionSeed({
+    const imageAssetLabel = (assetId: string) => {
+      const asset = assets.find((item) => item.id === assetId);
+      return asset?.alias?.trim() || asset?.relativePath.split(/[\\/]/).pop();
+    };
+    const inputImages = shotReferenceImageSelections(refs).map((image) => {
+      const documentId =
+        image.role === 'character'
+          ? refs.characterBindings?.find((binding) => binding.assetId === image.assetId)
+              ?.characterDocumentId
+          : image.role === 'scene'
+            ? refs.sceneBindings?.find((binding) => binding.assetId === image.assetId)
+                ?.sourceDocumentId
+            : undefined;
+      const documentTitle = documents.find((item) => item.id === documentId)?.title;
+      return {
+        ...image,
+        ...(documentTitle || imageAssetLabel(image.assetId)
+          ? { label: documentTitle ?? imageAssetLabel(image.assetId) }
+          : {}),
+      };
+    });
+    const images = inputImages.map(({ assetId }) => `asset://${assetId}`);
+    const nextSeed = {
       shotId: shot.id,
-      prompt: refs.continuityPrompt ?? shotPrompt.trim(),
+      prompt: refs.continuityPrompt ?? prompt,
       continuityRevision: refs.continuityRowVersion,
-      assetKind: 'first-frame',
+      assetKind: 'first-frame' as const,
       images,
       inputImages,
-    });
+    };
+    setProductionSeed((current) =>
+      !refresh &&
+      current?.shotId === nextSeed.shotId &&
+      current.prompt === nextSeed.prompt &&
+      current.continuityRevision === nextSeed.continuityRevision &&
+      current.assetKind === nextSeed.assetKind &&
+      JSON.stringify(current.images) === JSON.stringify(nextSeed.images) &&
+      JSON.stringify(current.inputImages) === JSON.stringify(nextSeed.inputImages)
+        ? current
+        : nextSeed,
+    );
     if (mode === 'image') {
       setProductionCapability(images.length > 0 ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE');
     } else {
-      setProductionCapability(refs.firstFrameAssetId ? 'IMAGE_TO_VIDEO' : 'REFERENCE_TO_VIDEO');
+      setProductionCapability(
+        inputImages.some((image) => image.role === 'first-frame')
+          ? 'IMAGE_TO_VIDEO'
+          : 'REFERENCE_TO_VIDEO',
+      );
     }
+  };
+
+  const prepareShotProduction = (
+    mode: 'image' | 'video',
+    prompt: string,
+    refs: ShotReferenceAssets,
+  ) => {
+    seedShotProduction(mode, refs, prompt.trim(), true);
+  };
+
+  const openShotProduction = async (
+    mode: 'image' | 'video',
+    refs: ShotReferenceAssets,
+    promptOverride?: string,
+  ) => {
+    if (!shot) return;
+    const sourcePrompt = promptOverride ?? shotPrompt.trim();
+    seedShotProduction(mode, refs, sourcePrompt);
+    if (sourcePrompt !== (shot.prompt ?? '')) await saveShotPrompt(sourcePrompt);
   };
 
   const saveShotReferenceBindings = async (
@@ -2663,22 +2976,145 @@ export function App() {
     return result;
   };
 
-  const saveShotPrompt = async () => {
-    if (!shot) return;
+  const saveShotPrompt = async (promptValue = shotPrompt) => {
+    if (!shot) return false;
+    const targetShot = shot;
+    const expectedProjectId = project?.id;
     try {
       const updated = await callWorker('shot.save', {
-        shotId: shot.id,
-        sceneId: shot.sceneId,
-        title: shot.title,
-        prompt: shotPrompt,
-        expectedRowVersion: shot.rowVersion,
+        shotId: targetShot.id,
+        sceneId: targetShot.sceneId,
+        title: targetShot.title,
+        prompt: promptValue,
+        expectedRowVersion: targetShot.rowVersion,
       });
-      setShots((rows) => rows.map((row) => (row.id === shot.id ? updated : row)));
-      setShot(updated);
+      setShots((rows) => rows.map((row) => (row.id === targetShot.id ? updated : row)));
+      if (
+        activeProjectIdRef.current === expectedProjectId &&
+        activeShotIdRef.current === targetShot.id
+      ) {
+        setShot(updated);
+        setShotPrompt(promptValue);
+      }
       setChatMessage('镜头提示词已保存。');
+      return true;
     } catch (reason) {
       setChatMessage(reason instanceof Error ? reason.message : '镜头提示词保存失败');
+      return false;
     }
+  };
+
+  const renameShot = async (sceneTarget: SceneInfo, target: ShotInfo, title: string) => {
+    if (!writable || !title.trim()) return;
+    try {
+      const updated = await callWorker('shot.save', {
+        shotId: target.id,
+        sceneId: sceneTarget.id,
+        title: title.trim(),
+        expectedRowVersion: target.rowVersion,
+      });
+      setShots((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
+      setShot((current) => (current?.id === updated.id ? updated : current));
+      setChatMessage('镜头标题已保存。');
+    } catch (reason) {
+      setChatMessage(reason instanceof Error ? reason.message : '镜头标题保存失败');
+    }
+  };
+
+  const requestContinuityAgent = async (
+    context: import('@ai-video/contracts').ShotContinuityContext,
+  ) => {
+    if (!project || !shot || context.shotId !== shot.id || context.stale)
+      throw new Error('请重新确认当前镜头选帧。');
+    if (!selectedLlmModel?.capabilities.vision) throw new Error('请选择支持看图的会话模型。');
+    const projectId = project.id;
+    const shotId = shot.id;
+    const targetConversation = conversation ?? (await createConversation());
+    if (
+      !targetConversation ||
+      activeProjectIdRef.current !== projectId ||
+      activeShotIdRef.current !== shotId
+    )
+      throw new Error('项目或镜头已切换。');
+    workspaceDispatch({ type: 'open', panelId: 'conversation' });
+    await sendMessage(
+      [
+        '请协助准备这个镜头的静态参考图图片提示词。先调用 shot.continuity.read 查看人工确认的实际选帧、当前镜头内容和已绑定参考资料。',
+        '以用户参考图生成要求为目标；目标时刻、构图或必要变化不清楚时用 conversation.ask 澄清，不自行假定首帧或换机位。结合实际画面保持必要的服装、站位、持物、环境和光线，不编造不可见空间。',
+        '将明确的生成意图与完整可编辑图片提示词通过 shot.continuity.save 保存到本镜头，不改镜头视频提示词，不直接生成图片或视频。用户将在镜头页面检查后填充正常生图表单。',
+        JSON.stringify({
+          projectId,
+          shotId,
+          expectedRowVersion: context.rowVersion,
+          userIntent: context.binding?.notes,
+        }),
+      ].join('\n\n'),
+      undefined,
+      '',
+      targetConversation,
+      false,
+    );
+  };
+
+  const requestShotBindingRepair = async (promptValue: string) => {
+    if (!shot || !project) throw new Error('请先选择需要修复的镜头。');
+    const expectedProjectId = project.id;
+    const targetShot = shot;
+    if (promptValue !== (targetShot.prompt ?? '') && !(await saveShotPrompt(promptValue)))
+      throw new Error('提示词未保存，绑定修复已取消。');
+    const current = await callWorker('production.read', {
+      target: { kind: 'shot', id: targetShot.id },
+    });
+    if (
+      activeProjectIdRef.current !== expectedProjectId ||
+      activeSceneIdRef.current !== targetShot.sceneId ||
+      activeShotIdRef.current !== targetShot.id
+    )
+      throw new Error('镜头已切换，请重新发起绑定修复。');
+    if (!current.authoringIR || current.authoringIR.kind !== 'shot')
+      throw new Error('本镜尚无可修复的制作提示词，请先生成或保存镜头提示词。');
+    const currentAuthoringIR =
+      current.authoringIR as import('@ai-video/contracts').ProductionShotAuthoringIR;
+    const currentReferences = productionShotReferenceIds({
+      authoringIR: currentAuthoringIR,
+      referenceBindings: targetShot.referenceBindings,
+    });
+    const describeReferences = (ids: string[]) =>
+      ids.map((documentId) => {
+        const document = documents.find((item) => item.id === documentId);
+        return {
+          documentId,
+          kind: document?.kind ?? 'not-in-current-catalog',
+          title: document?.title ?? '未在当前资料列表中找到，请通过项目资料检索核实',
+          lifecycleStatus: document?.lifecycleStatus ?? 'unknown',
+        };
+      });
+    const referenceDetails = {
+      characterDocumentIds: describeReferences(currentReferences.characterDocumentIds),
+      sceneDocumentIds: describeReferences(currentReferences.sceneDocumentIds),
+      propDocumentIds: describeReferences(currentReferences.propDocumentIds),
+    };
+    const targetConversation = conversation ?? (await createConversation());
+    if (!targetConversation || activeProjectIdRef.current !== expectedProjectId)
+      throw new Error('会话不可用，无法发起绑定修复。');
+    const repairPrompt = [
+      '请仅修复下面这个镜头的角色、场景和道具引用关系，不改写提示词正文，不修改时长、data、镜头标题、顺序、其他镜头或场次关系。',
+      '根据完整镜头提示词判断画面中实际可见的人物、地点/环境和独立道具。检索项目资料并核对真实文档 ID；不要按名称猜 ID。对 characterDocumentIds、sceneDocumentIds、propDocumentIds 三类都提交完整列表，无对应对象时明确写 []。场次页只汇总镜头绑定，本任务不设置场次绑定。',
+      '先检查当前镜头 IR 和文档资料，再调用 scene.update_shot_prompts，只更新该镜头。提交完整 authoringIR，逐字保留 prompt、timing 和 data；使用当前 expectedRowVersion。完成后报告每个引用对象的角色、名称和真实文档 ID。',
+      JSON.stringify({
+        source: {
+          projectId: expectedProjectId,
+          scene: { id: targetShot.sceneId, title: scene?.title },
+          shot: { id: targetShot.id, title: targetShot.title },
+        },
+        expectedRowVersion: current.rowVersion,
+        currentAuthoringIR,
+        currentReferencesWithDocumentDetails: referenceDetails,
+        currentShotImageSelections: targetShot.referenceBindings,
+      }),
+    ].join('\n\n');
+    workspaceDispatch({ type: 'open', panelId: 'conversation' });
+    await sendMessage(repairPrompt, undefined, '', targetConversation, false);
   };
 
   const sendMessage = async (
@@ -2694,8 +3130,10 @@ export function App() {
     includeAttachments = true,
     taskExecution?: 'ordered' | 'parallel' | 'supplement',
     continuation?: { idempotencyKey: string },
+    requestMetadata?: { productionSkillId?: ProductionSkillId },
   ) => {
     const conversation = messageConversation;
+    if (includeAttachments && chatAttachmentsPending) return;
     const messageAttachments = includeAttachments ? chatAttachments : [];
     if ((!composerValue.trim() && messageAttachments.length === 0) || !conversation) return;
     if (continuation && activeProjectIdRef.current !== conversation.projectId)
@@ -2714,6 +3152,7 @@ export function App() {
     const requestKey = `${conversation.projectId}:${conversation.id}`;
     if (pendingMessageRequestsRef.current.has(requestKey)) return;
     pendingMessageRequestsRef.current.add(requestKey);
+    if (generationPollOwner.current.conversationId === conversation.id) setChatMessage('');
     const prompt = composerValue;
     const clearAcceptedComposer = () => {
       setComposer((current) =>
@@ -2795,6 +3234,9 @@ export function App() {
               : {}),
             ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
             researchMode,
+            ...(requestMetadata?.productionSkillId
+              ? { productionSkillId: requestMetadata.productionSkillId }
+              : {}),
             ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
             ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
           };
@@ -2866,7 +3308,7 @@ export function App() {
               const completed = submitted.job;
               if (completed.status === 'succeeded') {
                 clearAcceptedComposer();
-                setChatAttachments([]);
+                clearChatAttachments();
                 const nextAssets = await callWorker('asset.list', {});
                 updateAssets(nextAssets, completed.results[0]?.asset?.id);
               }
@@ -2901,7 +3343,7 @@ export function App() {
                 setChatMessage(failed.error ?? '视频任务提交失败。');
               } else {
                 clearAcceptedComposer();
-                setChatAttachments([]);
+                clearChatAttachments();
                 setChatMessage('视频任务已提交，可能产生费用；请在制作面板查看进度。');
               }
             }
@@ -3028,6 +3470,8 @@ export function App() {
             throw new Error('源文档没有可用的已保存版本，请先保存。');
           return {
             ...target,
+            title: source.title,
+            kind: source.kind,
             versionId: source.currentVersion.id,
             state: source.currentVersion.state,
           };
@@ -3040,7 +3484,9 @@ export function App() {
       const prompt = productionSkillPrompt(skillId, sources);
       // Use the exact same Agent entry, model picker, task log and cancellation path.
       // Keep unrelated composer text and attachments untouched.
-      await sendMessage(prompt, undefined, '', targetConversation, false);
+      await sendMessage(prompt, undefined, '', targetConversation, false, undefined, undefined, {
+        productionSkillId: skillId,
+      });
     } catch (reason) {
       if (activeProjectIdRef.current === projectId)
         setChatMessage(readableFailure(reason, '制作任务准备失败'));
@@ -3050,58 +3496,81 @@ export function App() {
     }
   };
 
-  const addChatAttachments = async (files: FileList | File[]) => {
-    const incoming = Array.from(files);
-    if (incoming.length === 0) return;
-    if (chatAttachments.length + incoming.length > MAX_CHAT_ATTACHMENTS) {
-      setChatMessage(`最多同时添加 ${MAX_CHAT_ATTACHMENTS} 个附件。`);
-      return;
-    }
-    if (
-      chatAttachments.reduce((total, attachment) => total + attachment.size, 0) +
-        incoming.reduce((total, file) => total + file.size, 0) >
-      MAX_CHAT_TOTAL_BYTES
-    ) {
-      setChatMessage('附件总大小不能超过 40 MiB。');
-      return;
-    }
-    try {
-      const next: ChatAttachment[] = [];
-      for (const file of incoming) {
-        if (!file.name.trim() || file.size <= 0) throw new Error(`文件为空：${file.name}`);
-        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
-          throw new Error(`附件不能超过 20 MiB：${file.name}`);
+  const addChatAttachments = (files: FileList | File[] | (() => Promise<File[]>)) => {
+    const context = attachmentContextRef.current;
+    const revision = chatAttachmentRevision.current;
+    const current = () =>
+      attachmentContextRef.current === context && chatAttachmentRevision.current === revision;
+    const pendingFiles =
+      typeof files === 'function' ? files : () => Promise.resolve(Array.from(files));
+    setChatAttachmentsPending(true);
+    setChatMessage('正在读取附件…');
+    const add = async () => {
+      if (!current()) return;
+      try {
+        const incoming = await pendingFiles();
+        if (!current()) return;
+        const existing = chatAttachmentsRef.current;
+        if (incoming.length === 0) return;
+        if (existing.length + incoming.length > MAX_CHAT_ATTACHMENTS) {
+          setChatMessage(`最多同时添加 ${MAX_CHAT_ATTACHMENTS} 个附件。`);
+          return;
         }
-        const kind = attachmentKind(file);
-        const attachment: ChatAttachment = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          size: file.size,
-          kind,
-        };
-        if (kind === 'image') attachment.dataUrl = await readImageAsDataUrl(file);
-        else if (kind === 'video') {
-          attachment.dataUrl = await readFileAsDataUrl(file);
-          try {
-            attachment.previewDataUrl = await readVideoPreviewAsDataUrl(file);
-          } catch {
-            // Keep the original video preview; the Agent will receive metadata
-            // and a clear limitation instead of failing the whole request.
-          }
-        } else if (
-          file.size <= MAX_TEXT_ATTACHMENT_BYTES &&
-          /\.(txt|md|json|csv|xml|yaml|yml)$/iu.test(file.name)
+        if (
+          existing.reduce((total, attachment) => total + attachment.size, 0) +
+            incoming.reduce((total, file) => total + file.size, 0) >
+          MAX_CHAT_TOTAL_BYTES
         ) {
-          attachment.text = await readTextFile(file);
+          setChatMessage('附件总大小不能超过 40 MiB。');
+          return;
         }
-        next.push(attachment);
+        const next: ChatAttachment[] = [];
+        for (const file of incoming) {
+          if (!file.name.trim() || file.size <= 0) throw new Error(`文件为空：${file.name}`);
+          if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+            throw new Error(`附件不能超过 20 MiB：${file.name}`);
+          }
+          const kind = attachmentKind(file);
+          const attachment: ChatAttachment = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size,
+            kind,
+          };
+          if (kind === 'image') {
+            attachment.dataUrl = await readImageAsDataUrl(file);
+            attachment.mimeType = encodedImageMimeType(attachment.dataUrl) ?? attachment.mimeType;
+          } else if (kind === 'video') {
+            attachment.dataUrl = await readFileAsDataUrl(file);
+            try {
+              attachment.previewDataUrl = await readVideoPreviewAsDataUrl(file);
+            } catch {
+              // Keep the original video preview; the Agent will receive metadata
+              // and a clear limitation instead of failing the whole request.
+            }
+          } else if (
+            file.size <= MAX_TEXT_ATTACHMENT_BYTES &&
+            /\.(txt|md|json|csv|xml|yaml|yml)$/iu.test(file.name)
+          ) {
+            attachment.text = await readTextFile(file);
+          }
+          next.push(attachment);
+        }
+        if (!current()) return;
+        const updated = [...chatAttachmentsRef.current, ...next];
+        chatAttachmentsRef.current = updated;
+        setChatAttachments(updated);
+        setChatMessage('附件已添加，可以继续描述任务后发送。');
+      } catch (reason) {
+        if (current()) setChatMessage(reason instanceof Error ? reason.message : '添加附件失败');
       }
-      setChatAttachments((current) => [...current, ...next]);
-      setChatMessage('附件已添加，可以继续描述任务后发送。');
-    } catch (reason) {
-      setChatMessage(reason instanceof Error ? reason.message : '添加附件失败');
-    }
+    };
+    const task = chatAttachmentQueue.current.then(add, add).finally(() => {
+      if (current() && chatAttachmentQueue.current === task) setChatAttachmentsPending(false);
+    });
+    chatAttachmentQueue.current = task;
+    return chatAttachmentQueue.current;
   };
 
   const removeChatAttachment = (id: string) => {
@@ -3182,6 +3651,7 @@ export function App() {
   const retryGeneration = async (assistantMessageId: string) => {
     if (retryRequestsRef.current.has(assistantMessageId)) return;
     retryRequestsRef.current.add(assistantMessageId);
+    setChatMessage('');
     try {
       const idempotencyKey = `desktop-retry:${assistantMessageId}:${crypto.randomUUID()}`;
       if (selectedLlmProfile && selectedLlmModel) {
@@ -3576,6 +4046,30 @@ export function App() {
         void updateDetachedDocumentReview(label, 'requestChanges');
       } else if (action.type === 'document-publish') {
         void updateDetachedDocumentReview(label, 'publish');
+      } else if (action.type === 'document-unpublish') {
+        void withDetachedDocumentBusy(label, async (snapshot) => {
+          if (!snapshot.documentId || !snapshot.publishedVersionId)
+            throw new Error('当前文档没有已发布版本');
+          const next = await callWorker('document.unpublish', {
+            documentId: snapshot.documentId,
+            expectedDocumentRowVersion: snapshot.rowVersion,
+          });
+          const history = await callWorker('document.versions', { documentId: next.id });
+          setDocuments(await callWorker('document.list', {}));
+          syncMainDocumentIfSelected(next, history);
+          return {
+            ...snapshot,
+            title: next.title,
+            content: next.currentVersion?.contentMarkdown ?? snapshot.content,
+            state: next.currentVersion?.state ?? 'draft',
+            versions: history,
+            currentVersionId: next.currentVersionId,
+            publishedVersionId: next.publishedVersionId,
+            rowVersion: next.rowVersion,
+            busy: false,
+            statusMessage: '已取消发布，文档已恢复为草稿，可继续编辑。',
+          };
+        });
       } else {
         void pushDetachedSnapshot(label, {
           ...snapshot,
@@ -3839,7 +4333,21 @@ export function App() {
         setComposer(value);
       }}
       attachments={chatAttachments}
+      attachmentsPending={chatAttachmentsPending}
       onAddAttachments={(files) => void addChatAttachments(files)}
+      onAddAssetAttachments={(raw) => {
+        if (!project || !conversation || !writable || conversation.archivedAt) return;
+        const projectId = project.id;
+        void addChatAttachments(() =>
+          assetAttachmentFiles(
+            raw,
+            projectId,
+            MAX_CHAT_ATTACHMENT_BYTES,
+            MAX_CHAT_TOTAL_BYTES,
+            MAX_CHAT_ATTACHMENTS,
+          ),
+        );
+      }}
       onRemoveAttachment={removeChatAttachment}
       onCancelGeneration={() => void cancelGeneration()}
       allowConcurrentTasks={Boolean(selectedLlmProfile && selectedLlmModel)}
@@ -3916,14 +4424,17 @@ export function App() {
       projectSessionId={workerScope(project?.id)?.projectSessionId}
       onRequestSubmissionApproval={requestMediaSubmissionApproval}
       projectViewEpoch={project}
+      seedEventKey={productionSeed}
       shotId={
-        productionSeed?.documentId || productionSeed?.sceneId
+        productionSeed?.documentId || productionSeed?.sceneId || productionSeed?.audioReference
           ? undefined
           : (productionSeed?.shotId ?? shot?.id)
       }
-      sceneId={productionSeed?.sceneId}
       sourceDocumentId={productionSeed?.documentId}
+      sceneId={productionSeed?.sceneId}
       seedPrompt={productionSeed?.prompt}
+      seedParameters={productionSeed?.seedParameters}
+      audioReference={productionSeed?.audioReference}
       seedImages={productionSeed?.images}
       seedReferenceBindings={productionSeed?.referenceBindings}
       seedImageBindings={productionSeed?.inputImages}
@@ -3957,6 +4468,31 @@ export function App() {
       workspaceKinds.includes(item.kind) &&
       matchesDocumentFilter(item, documentKindFilter),
   );
+  const visibleArchivedDocuments = (archivedDocuments ?? []).filter(
+    (item) =>
+      item.domainScope !== 'novel' &&
+      workspaceKinds.includes(item.kind) &&
+      matchesDocumentFilter(item, documentKindFilter),
+  );
+
+  const documentBatch = useDraftDocumentBatch({
+    items: documents.filter((item) => item.domainScope !== 'novel'),
+    visibleItems: documentDirectoryMode === 'active' ? visibleDocuments : [],
+    writable,
+    busy: contentBusy,
+    resetKey: `${project?.id ?? ''}:${view}:${documentDirectoryMode}`,
+    dirtyDocumentId: documentDirty ? document?.id : undefined,
+    onDeleted: async (_items, archived) => {
+      await docs.applyArchivedDocuments(archived);
+    },
+  });
+
+  const restoreArchivedDocumentFromDirectory = async (item: DocumentSummary) => {
+    const restored = await restoreArchivedDocument(item);
+    if (!restored) return;
+    setDocumentDirectoryMode('active');
+    setDocumentKindFilter(restored.kind);
+  };
 
   /**
    * A new document adopts the active kind filter so that it lands in the list
@@ -4011,105 +4547,172 @@ export function App() {
   const renderDocumentToolbar = (
     eyebrow: string,
     fallbackTitle: string,
-    options?: { compact?: boolean; showImport?: boolean; showNew?: boolean; showHeading?: boolean },
+    options?: {
+      compact?: boolean;
+      showImport?: boolean;
+      showNew?: boolean;
+      showHeading?: boolean;
+      readOnly?: boolean;
+      useDocumentTitle?: boolean;
+      showProductionGenerate?: boolean;
+      productionGenerateImage?: boolean;
+      productionGenerateLabel?: string;
+      productionGenerateTitle?: string;
+      productionGenerateDisabled?: boolean;
+      onGenerateProduction?: () => void;
+    },
   ) => (
-    <div className={`workspace-toolbar${options?.compact ? ' is-compact' : ''}`}>
+    <div
+      className={`workspace-toolbar document-workspace-toolbar${options?.compact ? ' is-compact' : ''}`}
+    >
       <div>
         <span className="eyebrow">{eyebrow}</span>
         {options?.showHeading === false ? null : (
           <h1>
-            {options?.compact || hasForeignDocument
+            {options?.readOnly ||
+            options?.compact ||
+            options?.useDocumentTitle === false ||
+            hasForeignDocument
               ? fallbackTitle
               : (document?.title ?? fallbackTitle)}
           </h1>
         )}
       </div>
       <div className="toolbar-actions">
-        {view === 'documents' &&
-          document?.kind === 'outline' &&
-          document.scopeType === 'project' &&
-          !hasForeignDocument && (
-            <button
-              className="button secondary"
-              type="button"
-              disabled={!documentEditorWritable || contentBusy}
-              onClick={() => void moveDocumentToNovel()}
-            >
-              <BookOpen size={15} /> 移至小说资料
-            </button>
-          )}
-        {options?.showImport === false ? null : (
-          <button
-            className="button secondary markdown-import-button"
-            type="button"
-            aria-label="导入 Markdown"
-            title="导入 Markdown"
-            onClick={() => void importMarkdownDocument()}
-            disabled={!writable || contentBusy}
-          >
-            <FileUp size={15} />
-            <span>导入 Markdown</span>
-          </button>
-        )}
-        {options?.showNew === false ? null : (
-          <button
-            className="button secondary"
-            type="button"
-            onClick={newDocumentOfActiveKind}
-            disabled={!writable}
-          >
-            <FilePlus2 size={15} />
-            新建
-          </button>
-        )}
-        <button
-          className="button primary"
-          type="button"
-          onClick={() => void saveAndPublishDocument()}
-          disabled={
-            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
-          }
-          title="保存当前内容并直接发布为权威版本"
-        >
-          <Save size={15} />
-          保存并发布
-        </button>
-        <button
-          className="button secondary"
-          type="button"
-          onClick={() => void saveDocument()}
-          disabled={
-            hasForeignDocument || !documentEditorWritable || contentBusy || !documentTitle.trim()
-          }
-        >
-          保存草稿
-        </button>
-        {!hasForeignDocument && document?.currentVersion?.state === 'in_review' && (
+        {!options?.readOnly && (
           <>
+            {view === 'documents' &&
+              document?.kind === 'outline' &&
+              document.scopeType === 'project' &&
+              !hasForeignDocument && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={!documentEditorWritable || contentBusy}
+                  onClick={() => void moveDocumentToNovel()}
+                >
+                  <BookOpen size={15} /> 移至小说资料
+                </button>
+              )}
+            {options?.showImport === false ? null : (
+              <button
+                className="button secondary markdown-import-button"
+                type="button"
+                aria-label="导入 Markdown"
+                title="导入 Markdown"
+                onClick={() => void importMarkdownDocument()}
+                disabled={!writable || contentBusy}
+              >
+                <FileUp size={15} />
+                <span>导入 Markdown</span>
+              </button>
+            )}
+            {options?.showNew === false ? null : (
+              <button
+                className="button secondary"
+                type="button"
+                onClick={newDocumentOfActiveKind}
+                disabled={!writable}
+              >
+                <FilePlus2 size={15} />
+                新建
+              </button>
+            )}
             <button
               className="button secondary"
               type="button"
-              onClick={() => void requestDocumentChanges()}
-              disabled={!writable || contentBusy}
+              onClick={() => void saveAndPublishDocument()}
+              disabled={
+                hasForeignDocument ||
+                !documentEditorWritable ||
+                contentBusy ||
+                !documentTitle.trim()
+              }
+              title="保存当前内容并直接发布为权威版本"
             >
-              退回修改
+              <Save size={15} />
+              保存并发布
             </button>
             <button
-              className="button primary"
+              className="button secondary"
               type="button"
-              onClick={() => void publishDocument()}
-              disabled={!writable || contentBusy}
+              onClick={() => void saveDocument()}
+              disabled={
+                hasForeignDocument ||
+                !documentEditorWritable ||
+                contentBusy ||
+                !documentTitle.trim()
+              }
             >
-              发布
+              保存草稿
             </button>
+            {document?.publishedVersionId && !hasForeignDocument && (
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => void unpublishDocument()}
+                disabled={!writable || contentBusy}
+                title="取消发布并恢复为草稿"
+              >
+                取消发布
+              </button>
+            )}
+            {!hasForeignDocument &&
+              !document?.publishedVersionId &&
+              document?.currentVersion?.state === 'in_review' && (
+                <>
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={() => void requestDocumentChanges()}
+                    disabled={!writable || contentBusy}
+                  >
+                    退回修改
+                  </button>
+                  <button
+                    className="button primary"
+                    type="button"
+                    onClick={() => void publishDocument()}
+                    disabled={!writable || contentBusy}
+                  >
+                    发布
+                  </button>
+                </>
+              )}
+            {options?.showProductionGenerate && (
+              <button
+                className="button primary production-generate-button"
+                type="button"
+                onClick={options.onGenerateProduction}
+                disabled={options.productionGenerateDisabled}
+                title={
+                  options.productionGenerateTitle ?? '根据当前剧本文档生成可编辑的制作资料草稿'
+                }
+              >
+                {options.productionGenerateImage ? (
+                  <Image size={14} aria-hidden="true" />
+                ) : (
+                  <ListChecks size={14} aria-hidden="true" />
+                )}
+                {options.productionGenerateLabel ?? '一键生成制作资料'}
+              </button>
+            )}
           </>
         )}
       </div>
     </div>
   );
 
-  const openCharacterSceneImageProduction = async () => {
+  const openCharacterSceneImageProduction = async (sceneReference?: SceneReferenceImageOptions) => {
     if (!documentContent.trim()) return;
+    const referenceAsset =
+      documentKind === 'scene' && sceneReference?.referenceAssetId
+        ? linkedAssets.find((asset) => asset.id === sceneReference.referenceAssetId)
+        : undefined;
+    if (documentKind === 'scene' && sceneReference?.referenceAssetId && !referenceAsset) {
+      setContentMessage('场景参考图已不可用，请重新选择。');
+      return;
+    }
     let documentId = document?.id;
     if (!documentId) {
       if (!documentTitle.trim()) return;
@@ -4120,13 +4723,21 @@ export function App() {
     setProductionSeed({
       documentId,
       prompt:
-        documentKind === 'character'
-          ? composeCharacterImagePrompt(documentContent)
+        documentKind === 'scene'
+          ? composeSceneReferenceImagePrompt(documentContent)
           : documentContent.trim(),
       assetKind:
         documentKind === 'prop' ? 'prop' : documentKind === 'scene' ? 'scene' : 'character',
+      ...(documentKind === 'scene'
+        ? {
+            images: referenceAsset ? [`project-asset://${referenceAsset.id}`] : [],
+            inputImages: referenceAsset
+              ? [{ assetId: referenceAsset.id, role: 'reference' as const }]
+              : [],
+          }
+        : {}),
     });
-    setProductionCapability('TEXT_TO_IMAGE');
+    setProductionCapability(referenceAsset ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE');
   };
 
   const renderDocumentEditor = () =>
@@ -4139,8 +4750,6 @@ export function App() {
         title={documentTitle}
         kind={CHARACTER_DOCUMENT_KINDS.includes(documentKind) ? documentKind : 'character'}
         content={documentContent}
-        stateLabel={documentStateLabel(document?.currentVersion?.state ?? 'new')}
-        stateKey={document?.currentVersion?.state ?? 'new'}
         writable={documentEditorWritable && !contentBusy}
         versions={versions}
         currentVersionId={document?.currentVersionId}
@@ -4148,22 +4757,30 @@ export function App() {
         assets={linkedAssets}
         boundScenes={scenes.filter((item) =>
           documentKind === 'scene'
-            ? item.sceneDocumentId === document?.id && Boolean(document?.id)
+            ? Boolean(
+                document?.id &&
+                (item.sceneDocumentId === document.id ||
+                  item.sceneDocumentIds?.includes(document.id) ||
+                  shotReferenceDocuments[item.id]?.sceneDocumentIds.includes(document.id)),
+              )
             : documentKind === 'character' &&
-              item.characterBindings?.some(
-                (binding) => binding.characterDocumentId === document?.id,
+              Boolean(
+                document?.id &&
+                (item.characterBindings?.some(
+                  (binding) => binding.characterDocumentId === document.id,
+                ) ||
+                  shotReferenceDocuments[item.id]?.characterDocumentIds.includes(document.id)),
               ),
         )}
         onOpenScene={(id) => {
           const target = scenes.find((item) => item.id === id);
           if (target) void selectScene(target);
         }}
-        onTitleChange={setDocumentTitle}
-        onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
         onRestoreVersion={(versionId) => void restoreVersion(versionId)}
-        onGenerate={() => {
-          void openCharacterSceneImageProduction();
+        sceneReference={activeCharacterSceneReference}
+        onSceneReferenceChange={(sceneReference) => {
+          setCharacterSceneReference({ key: characterSceneReferenceKey, options: sceneReference });
         }}
         onOpenAsset={(assetId) => {
           updateAssets(assets, assetId);
@@ -4172,79 +4789,26 @@ export function App() {
       />
     ) : (
       <ScriptWorkspace
-        title={documentTitle}
-        kind={documentKind}
         content={documentContent}
-        stateLabel={documentStateLabel(document?.currentVersion?.state ?? 'new')}
-        stateKey={document?.currentVersion?.state ?? 'new'}
         writable={documentEditorWritable && !contentBusy}
         versions={versions}
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
-        onPrepareMedia={() => {
-          if (document)
-            void runProductionSkill('script-to-media', [
-              { id: document.id, documentId: document.id },
-            ]);
-        }}
-        preparationDisabled={
-          productionSkillBusy ||
-          (generation != null && isGenerationActive(generation)) ||
-          !document?.currentVersionId ||
-          documentContent !== (document?.currentVersion?.contentMarkdown ?? '') ||
-          documentTitle !== document?.title
-        }
-        onTitleChange={setDocumentTitle}
-        onKindChange={setDocumentKind}
         onContentChange={setDocumentContent}
         onRestoreVersion={(versionId) => void restoreVersion(versionId)}
       />
     );
 
-  const requestSceneBindingUpdate = async (
-    nextPrompt = sceneVideoPrompt,
-    bindings = scene?.materialBindings ?? [],
-    characters = scene?.characterBindings ?? [],
-    dialogueAudioId = scene?.dialogueAudioId,
-  ) => {
-    if (!scene || !project) return;
-    const expectedProjectId = project.id;
-    const targetSceneId = scene.id;
-    let target = scene;
-    if (
-      JSON.stringify(bindings) !== JSON.stringify(scene.materialBindings ?? []) ||
-      JSON.stringify(characters) !== JSON.stringify(scene.characterBindings ?? []) ||
-      dialogueAudioId !== scene.dialogueAudioId
-    ) {
-      const saved = await saveSceneVideoPrompt(
-        scene.videoPrompt ?? '',
-        bindings,
-        characters,
-        dialogueAudioId,
-      );
-      if (!saved || activeProjectIdRef.current !== expectedProjectId || saved.id !== targetSceneId)
-        return;
-      target = saved;
-      setSceneVideoPrompt(nextPrompt);
-    }
-    const prompt = [
-      '请理解以下完整视频提示词，为已有场次关联对应场景和全部出场角色。先检索项目角色、场景资料，再调用 scene.submit_structure 保存可编辑草稿，无需等待用户批准。',
-      '这是修改已有场次：使用 sceneId 和 expectedRowVersion，shots:[]，返回完整 characterDocumentIds 和 sceneDocumentId。保留下面的提示词正文，不创建重复场次。有歧义返回 needs_clarification 反馈，禁止按姓名猜 ID。',
-      JSON.stringify({
-        sceneId: target.id,
-        expectedRowVersion: target.rowVersion,
-        title: target.title,
-        videoPrompt: nextPrompt,
-      }),
-    ].join('\n\n');
-    workspaceDispatch({ type: 'open', panelId: 'conversation' });
-    const targetConversation = conversation ?? (await createConversation());
-    if (targetConversation && activeProjectIdRef.current === expectedProjectId)
-      await sendMessage(prompt, undefined, prompt, targetConversation, false);
-  };
+  const startupMode = !project;
 
   return (
-    <div className="app-shell" data-left-open={leftOpen} data-navigation-mode={navigationMode}>
+    <div
+      className="app-shell"
+      data-left-open={leftOpen}
+      data-navigation-mode={navigationMode}
+      data-theme={startupMode ? 'light' : undefined}
+      data-startup={project ? 'false' : 'true'}
+    >
       <header
         className="topbar"
         data-tauri-drag-region
@@ -4259,27 +4823,65 @@ export function App() {
         </div>
         <div className="project-title" data-tauri-drag-region>
           <strong data-tauri-drag-region>unicomp</strong>
-          <span data-tauri-drag-region>{project?.name ?? '未打开项目'}</span>
         </div>
+        <span className="topbar-divider" aria-hidden="true" />
+        <div className="project-picker-wrap" ref={projectPickerRef}>
+          <button
+            className="project-picker"
+            type="button"
+            aria-label="选择项目"
+            title={project?.rootPath ?? '选择要打开的项目'}
+            aria-haspopup="menu"
+            aria-expanded={projectPickerOpen}
+            onClick={() => setProjectPickerOpen((open) => !open)}
+          >
+            <FolderOpen size={15} />
+            <span className="project-picker-copy">
+              <strong>{project?.name ?? '未打开项目'}</strong>
+            </span>
+            <ChevronDown size={14} />
+          </button>
+          {projectPickerOpen && (
+            <ProjectPickerMenu
+              recentProjects={recentProjects}
+              currentProject={project}
+              writable={writable}
+              busy={projectBusy}
+              onOpenProject={(rootPath) => void openProject(rootPath)}
+              onBrowse={() => {
+                setProjectPickerOpen(false);
+                void selectProjectDirectory(true);
+              }}
+              onCreate={() => {
+                setProjectPickerOpen(false);
+                setProjectCreateOpen(true);
+              }}
+              onRename={openProjectRename}
+              onCheckIntegrity={() => {
+                setProjectPickerOpen(false);
+                void runProjectAction(async () => {
+                  const result = await callWorker('project.integrity', {});
+                  return result.ok
+                    ? `完整性检查通过 · Schema v${result.schemaVersion}`
+                    : result.messages.join('; ');
+                });
+              }}
+              onBackup={() => {
+                setProjectPickerOpen(false);
+                void runProjectAction(
+                  async () => `备份完成：${(await callWorker('project.backup', {})).path}`,
+                );
+              }}
+              onCloseProject={() => void closeProject()}
+            />
+          )}
+        </div>
+        {project && projectMessage && (
+          <small className="project-message topbar-project-message" role="status">
+            {projectMessage}
+          </small>
+        )}
         <div className="topbar-actions">
-          <button
-            className="icon-button"
-            type="button"
-            title="打开项目"
-            onClick={() => void selectProjectDirectory(true)}
-            disabled={projectBusy}
-          >
-            <FolderOpen size={17} />
-          </button>
-          <button
-            className="icon-button"
-            type="button"
-            title="新建项目"
-            onClick={() => void createProject()}
-            disabled={projectBusy || !projectPath.trim() || !projectName.trim()}
-          >
-            <Plus size={18} />
-          </button>
           <button
             className="icon-button"
             type="button"
@@ -4374,6 +4976,91 @@ export function App() {
         />
       )}
 
+      {project && projectCreateOpen && (
+        <ProjectCreateDialog
+          recentProjects={recentProjects}
+          startupLoaded={startupLoaded}
+          projectName={projectName}
+          projectPath={projectPath}
+          projectMessage={projectMessage}
+          projectBusy={projectBusy}
+          onClose={() => setProjectCreateOpen(false)}
+          onProjectNameChange={setProjectName}
+          onProjectPathChange={setProjectPath}
+          onBrowse={() => void selectProjectDirectory()}
+          onCreateProject={() => void createProject()}
+          onCreateSampleProject={() => void createSampleProject()}
+        />
+      )}
+
+      {projectRenameOpen && project && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          style={{ zIndex: MODAL_Z_INDEX }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !projectRenameBusy)
+              setProjectRenameOpen(false);
+          }}
+        >
+          <form
+            className="project-rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="project-rename-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void renameProject();
+            }}
+          >
+            <header>
+              <h2 id="project-rename-title">修改项目名称</h2>
+              <button
+                className="icon-button subtle"
+                type="button"
+                title="关闭"
+                aria-label="关闭修改项目名称"
+                disabled={projectRenameBusy}
+                onClick={() => setProjectRenameOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <label htmlFor="project-rename-input">项目名称</label>
+            <input
+              id="project-rename-input"
+              autoFocus
+              maxLength={200}
+              value={projectRenameValue}
+              onChange={(event) => setProjectRenameValue(event.target.value)}
+              disabled={projectRenameBusy}
+            />
+            {projectRenameError && (
+              <small className="project-rename-error" role="alert">
+                {projectRenameError}
+              </small>
+            )}
+            <div className="project-rename-actions">
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => setProjectRenameOpen(false)}
+                disabled={projectRenameBusy}
+              >
+                取消
+              </button>
+              <button
+                className="button primary"
+                type="submit"
+                disabled={projectRenameBusy || !projectRenameValue.trim()}
+              >
+                {projectRenameBusy ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {documentCloseConfirmation && (
         <div className="dialog-backdrop" role="presentation" style={{ zIndex: MODAL_Z_INDEX }}>
           <section
@@ -4408,6 +5095,89 @@ export function App() {
         </div>
       )}
 
+      {documentBatch.dialog}
+
+      {documentArchiveConfirmation && documentArchiveTarget && (
+        <div className="dialog-backdrop" role="presentation" style={{ zIndex: MODAL_Z_INDEX }}>
+          <section
+            className="document-close-dialog document-archive-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="document-archive-title"
+          >
+            <h2 id="document-archive-title">归档文档？</h2>
+            <p>
+              将“
+              {document?.id === documentArchiveTarget.id
+                ? documentTitle || document.title
+                : documentArchiveTarget.title}
+              ”移入已归档文档。归档不会删除内容，之后可以恢复。
+            </p>
+            {document?.id === documentArchiveTarget.id && documentDirty && (
+              <p className="document-archive-dirty-note">
+                当前编辑含未保存更改。放弃后只会归档最近一次保存的版本。
+              </p>
+            )}
+            {document?.id === documentArchiveTarget.id &&
+              !documentEditorWritable &&
+              documentDirty && (
+                <p className="document-archive-dirty-note" role="alert">
+                  当前版本不可保存，请放弃未保存更改后归档。
+                </p>
+              )}
+            {contentMessage && (
+              <p className="document-archive-error" role="alert">
+                {contentMessage}
+              </p>
+            )}
+            <div className="document-close-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => {
+                  setDocumentArchiveConfirmation(false);
+                  setDocumentArchiveTarget(undefined);
+                }}
+                disabled={contentBusy}
+              >
+                取消
+              </button>
+              {document?.id === documentArchiveTarget.id && documentDirty ? (
+                <>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => void confirmArchiveDocument(false)}
+                    disabled={contentBusy}
+                  >
+                    放弃更改并归档
+                  </button>
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={() => void confirmArchiveDocument(true)}
+                    disabled={contentBusy || !documentEditorWritable || !documentTitle.trim()}
+                  >
+                    <Save size={15} />
+                    保存并归档
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => void confirmArchiveDocument(false)}
+                  disabled={contentBusy}
+                >
+                  <Archive size={15} />
+                  归档文档
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+
       {currentConfirmation && (
         <TaskConfirmationDialog
           item={currentConfirmation}
@@ -4420,6 +5190,7 @@ export function App() {
       <ResizableAppLayout
         key={workerScope(project?.id)?.projectSessionId ?? project?.id}
         projectId={project?.id}
+        startupMode={startupMode}
         sidebarOpen={leftOpen}
         onSidebarOpenChange={setLeftOpen}
         sidebar={
@@ -4439,6 +5210,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'novel' ? 'active' : ''}`}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('novel')}
               >
                 <BookOpen size={16} />
@@ -4447,6 +5219,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'documents' ? 'active' : ''}`}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('documents')}
               >
                 <FileText size={16} />
@@ -4463,6 +5236,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'characters' ? 'active' : ''}`}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('characters')}
               >
                 <Users size={16} />
@@ -4480,6 +5254,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'shots' ? 'active' : ''}`}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('shots')}
               >
                 <Clapperboard size={16} />
@@ -4490,6 +5265,7 @@ export function App() {
                 className={`nav-item ${workspaceLayout.panels.assets.open ? 'active' : ''}`}
                 aria-pressed={workspaceLayout.panels.assets.open}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('assets')}
               >
                 <Image size={16} />
@@ -4499,6 +5275,7 @@ export function App() {
               <button
                 className={`nav-item ${navigationMode === 'project' && view === 'tasks' ? 'active' : ''}`}
                 type="button"
+                disabled={!project}
                 onClick={() => openProjectView('tasks')}
               >
                 <ListChecks size={16} />
@@ -4508,6 +5285,7 @@ export function App() {
 
             <ProductionNavigation
               capability={productionCapability}
+              disabled={!project}
               onCapabilityChange={(capability) => {
                 setProductionSeed(undefined);
                 setProductionCapability(capability);
@@ -4515,152 +5293,22 @@ export function App() {
               }}
             />
 
-            <section className="project-manager" aria-label="项目管理">
-              {project ? (
-                <>
-                  <div className="open-project-card">
-                    <div className="open-project-title">
-                      <strong>{project.name}</strong>
-                      <div className="project-menu" ref={projectMenuRef}>
-                        <button
-                          className="project-menu-trigger"
-                          type="button"
-                          title="项目管理操作"
-                          aria-label="项目管理操作"
-                          aria-haspopup="menu"
-                          aria-expanded={projectMenuOpen}
-                          onClick={() => setProjectMenuOpen((open) => !open)}
-                        >
-                          <Ellipsis size={15} />
-                        </button>
-                        {projectMenuOpen && (
-                          <div className="project-menu-popup" role="menu" aria-label="项目管理操作">
-                            <button
-                              type="button"
-                              role="menuitem"
-                              onClick={() => {
-                                setProjectMenuOpen(false);
-                                void runProjectAction(async () => {
-                                  const result = await callWorker('project.integrity', {});
-                                  return result.ok
-                                    ? `完整性检查通过 · Schema v${result.schemaVersion}`
-                                    : result.messages.join('; ');
-                                });
-                              }}
-                            >
-                              <ShieldCheck size={14} />
-                              <span>完整性检查</span>
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              disabled={!writable}
-                              onClick={() => {
-                                setProjectMenuOpen(false);
-                                void runProjectAction(
-                                  async () =>
-                                    `备份完成：${(await callWorker('project.backup', {})).path}`,
-                                );
-                              }}
-                            >
-                              <Save size={14} />
-                              <span>备份项目</span>
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              onClick={() => {
-                                setProjectMenuOpen(false);
-                                void closeProject();
-                              }}
-                            >
-                              <Power size={14} />
-                              <span>关闭项目</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <span title={project.rootPath}>{project.rootPath}</span>
-                    <small>
-                      {project.mode === 'read-write' ? '可写' : '只读'} · Schema v
-                      {project.schemaVersion}
-                    </small>
-                  </div>
-                </>
-              ) : (
-                <>
-                  {startupLoaded && recentProjects.length === 0 && (
-                    <div className="first-run-block">
-                      <strong>开始创作</strong>
-                      <span>示例：雾港来信</span>
-                    </div>
-                  )}
-                  <label htmlFor="project-name">项目名称</label>
-                  <input
-                    id="project-name"
-                    value={projectName}
-                    onChange={(event) => setProjectName(event.target.value)}
-                  />
-                  <label htmlFor="project-path">项目绝对目录</label>
-                  <div className="project-path-row">
-                    <input
-                      id="project-path"
-                      value={projectPath}
-                      onChange={(event) => setProjectPath(event.target.value)}
-                      placeholder="D:\Projects\my-drama"
-                    />
-                    <button
-                      type="button"
-                      aria-label="选择项目目录"
-                      title="选择项目目录"
-                      onClick={() => void selectProjectDirectory()}
-                      disabled={projectBusy}
-                    >
-                      <FolderOpen size={14} />
-                    </button>
-                  </div>
-                  <div className="project-actions">
-                    <button
-                      type="button"
-                      onClick={() => void createProject()}
-                      disabled={projectBusy || !projectPath.trim() || !projectName.trim()}
-                    >
-                      新建
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void openProject()}
-                      disabled={projectBusy || !projectPath.trim()}
-                    >
-                      打开
-                    </button>
-                  </div>
-                  {startupLoaded && recentProjects.length === 0 && (
-                    <button
-                      className="sample-project-button"
-                      type="button"
-                      onClick={() => void createSampleProject()}
-                      disabled={projectBusy || !projectPath.trim()}
-                    >
-                      <Clapperboard size={13} />
-                      创建示例项目
-                    </button>
-                  )}
-                  {recentProjects.map((recent) => (
-                    <button
-                      className="recent-link"
-                      type="button"
-                      key={recent.rootPath}
-                      onClick={() => void openProject(recent.rootPath)}
-                    >
-                      {recent.name}
-                    </button>
-                  ))}
-                </>
-              )}
-              {projectMessage && <small className="project-message">{projectMessage}</small>}
-            </section>
+            <button
+              className={`nav-item ${navigationMode === 'project' && view === 'rough-cut' ? 'active' : ''}`}
+              type="button"
+              disabled={!project}
+              onClick={() => openProjectView('rough-cut')}
+            >
+              <Clapperboard size={16} />
+              <span>粗剪工作台</span>
+            </button>
+            {!project && (
+              <div className="project-startup-rail-note">
+                <strong>尚未选择项目</strong>
+                <span>打开本地项目后，可使用资料导航与项目助手。</span>
+              </div>
+            )}
+
             <div className="runtime-block">
               <div className="runtime-title">
                 {state === 'ready' ? (
@@ -4721,7 +5369,8 @@ export function App() {
                 ? (document?.title ?? documentTitle)
                 : ''
             }
-            editorTitle={WORKSPACE_VIEW_TITLES[view]}
+            editorTitle={startupMode ? '项目空间' : WORKSPACE_VIEW_TITLES[view]}
+            roughCutMode={view === 'rough-cut'}
             conversationContent={conversationPanel}
             productionContent={productionPanel}
             assetsContent={
@@ -4733,6 +5382,16 @@ export function App() {
                   selectedAssetRevision={assetLibraryFocusRevision}
                   openTrashRequest={assetTrashRequest}
                   taskCompletionRevision={taskCompletionRevision}
+                  onAddToRoughCut={(assetIds) => {
+                    roughCutImportToken.current += 1;
+                    if (project)
+                      setRoughCutImport({
+                        projectId: project.id,
+                        token: roughCutImportToken.current,
+                        assetIds,
+                      });
+                    openProjectView('rough-cut');
+                  }}
                   onOpenSource={(source) => {
                     if (source.sourceKind === 'dubbing' && source.sceneId) {
                       const target = scenes.find((item) => item.id === source.sceneId);
@@ -4749,6 +5408,7 @@ export function App() {
               )
             }
             productionOpen={navigationMode === 'production'}
+            startupMode={startupMode}
             documentActive={(view === 'documents' || view === 'characters') && !hasForeignDocument}
             detachedPanels={detachedPanels}
             onOpenConversation={() => void focusDetachedPanelWindow(detachedPanels.conversation)}
@@ -4765,294 +5425,609 @@ export function App() {
             onDetachDocument={() => void detachPanel('document')}
             onDetachConversation={() => void detachPanel('conversation')}
           >
-            {view === 'novel' ? (
-              <NovelWorkspace
-                projectId={project?.id}
-                writable={writable}
-                productionBusy={
-                  productionSkillBusy || (generation != null && isGenerationActive(generation))
-                }
-                onGenerateScript={(chapters) =>
-                  runProductionSkill(
-                    'chapters-to-script',
-                    chapters.map(({ id, documentId }) => ({ id, documentId })),
-                  )
-                }
-                focusChapterId={novelFocusChapterId}
-                focusReferenceId={novelFocusReferenceId}
-                refreshToken={novelRefreshRevision || undefined}
-                referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
-                onReferencesChanged={async () => {
-                  setDocuments(await callWorker('document.list', {}));
-                  if (conversation)
-                    setContextPreview(
-                      await callWorker('context.preview', { conversationId: conversation.id }),
-                    );
-                }}
+            {startupMode ? (
+              <ProjectStartupWorkspace
+                recentProjects={recentProjects}
+                startupLoaded={startupLoaded}
+                projectName={projectName}
+                projectPath={projectPath}
+                projectMessage={projectMessage}
+                projectBusy={projectBusy}
+                createOpen={projectCreateOpen}
+                onCreateOpenChange={setProjectCreateOpen}
+                onProjectNameChange={setProjectName}
+                onProjectPathChange={setProjectPath}
+                onBrowse={() => void selectProjectDirectory()}
+                onOpenProject={() => void selectProjectDirectory(true)}
+                onOpenRecent={(rootPath) => void openProject(rootPath)}
+                onCreateProject={() => void createProject()}
+                onCreateSampleProject={() => void createSampleProject()}
               />
-            ) : view === 'documents' || view === 'characters' ? (
+            ) : (
               <>
-                {renderDocumentToolbar(
-                  document?.currentVersion?.state === 'published'
-                    ? view === 'characters'
-                      ? '已发布角色/场景'
-                      : '已发布项目资料'
-                    : view === 'characters'
-                      ? '角色/场景提示词'
-                      : '剧本草稿',
-                  view === 'characters' ? '角色与场景' : '剧本编辑器',
-                  view === 'characters'
-                    ? { compact: true, showImport: false, showNew: false, showHeading: false }
-                    : undefined,
-                )}
-                {project ? (
-                  <div className="directory-layout">
-                    <aside className="directory-index" aria-label="项目文档目录">
-                      <div className="tree-heading">
-                        <span>{view === 'characters' ? '角色与场景' : '文档'}</span>
-                        <button
-                          className="icon-button subtle"
-                          type="button"
-                          title={view === 'characters' ? '新建角色或场景' : '新建文档'}
-                          onClick={newDocumentOfActiveKind}
-                          disabled={!writable}
-                        >
-                          <FilePlus2 size={14} />
-                        </button>
-                      </div>
-                      <div className="document-kind-filters" role="group" aria-label="文档类型筛选">
-                        {(view === 'characters'
-                          ? [
-                              { id: 'all' as const, label: '全部' },
-                              { id: 'character' as const, label: '角色' },
-                              { id: 'scene' as const, label: '场景' },
-                              { id: 'prop' as const, label: '道具' },
-                            ]
-                          : [
-                              { id: 'all' as const, label: '全部' },
-                              { id: 'outline' as const, label: '大纲' },
-                              { id: 'plan' as const, label: '计划' },
-                            ]
-                        ).map((filter) => (
-                          <button
-                            className={documentKindFilter === filter.id ? 'active' : ''}
-                            type="button"
-                            key={filter.id}
-                            aria-pressed={documentKindFilter === filter.id}
-                            onClick={() => setDocumentKindFilter(filter.id)}
-                          >
-                            {filter.label}
-                          </button>
-                        ))}
-                      </div>
-                      {visibleDocuments.map((item) => (
-                        <button
-                          className={`tree-item with-kind ${document?.id === item.id ? 'selected' : ''}`}
-                          type="button"
-                          key={item.id}
-                          onClick={() => void openDocumentById(item.id)}
-                        >
-                          <FileText size={13} />
-                          <span>{item.title}</span>
-                          <small className="tree-item-kind">
-                            {DOCUMENT_KIND_LABELS[item.kind]}
-                          </small>
-                        </button>
-                      ))}
-                      {visibleDocuments.length === 0 && (
-                        <small className="tree-empty">
-                          {documentKindFilter === 'all'
-                            ? '暂无文档'
-                            : `暂无${DOCUMENT_KIND_LABELS[documentKindFilter]}类型文档`}
-                        </small>
-                      )}
-                      {view === 'documents' ? (
-                        <>
-                          <div className="tree-heading nested">
-                            <span>约束条件</span>
-                          </div>
-                          {constraints.map((item) => (
-                            <div
-                              className="tree-item constraint-item"
-                              key={item.id}
-                              title={item.content}
-                            >
-                              <ListChecks size={13} />
-                              <span>
-                                {item.content.length > 40
-                                  ? item.content.slice(0, 40) + '…'
-                                  : item.content}
-                              </span>
-                            </div>
-                          ))}
-                          {constraints.length === 0 && (
-                            <small className="tree-empty">暂无约束，可在会话中提升为约束</small>
-                          )}
-                        </>
-                      ) : null}
-                    </aside>
-                    <div className="directory-pane">{renderDocumentEditor()}</div>
-                  </div>
-                ) : (
-                  <EmptyWorkspace />
-                )}
-              </>
-            ) : view === 'shots' ? (
-              <>
-                <div className="workspace-toolbar">
-                  <div>
-                    <span className="eyebrow">{shot ? scene?.title : '场次与镜头'}</span>
-                    <h1>{shot?.title ?? scene?.title ?? '场次未选择'}</h1>
-                  </div>
-                  <button
-                    className="button primary"
-                    type="button"
-                    onClick={() => void addShot()}
-                    disabled={!writable || !scene}
-                  >
-                    <Plus size={15} />
-                    新建镜头
-                  </button>
-                </div>
-                {project ? (
-                  <div className="directory-layout">
-                    <SceneShotDirectory
+                {project && roughCutProjectId === project.id && (
+                  <div className="rough-cut-holder" hidden={view !== 'rough-cut'}>
+                    <RoughCutWorkspace
+                      key={project.id}
+                      active={view === 'rough-cut'}
                       projectId={project.id}
-                      scenes={scenes}
-                      sceneId={scene?.id}
-                      shotId={shot?.id}
-                      shots={shots}
                       writable={writable}
-                      onAddScene={() => void addScene()}
-                      onSelectScene={(item) => void selectScene(item)}
-                      onSelectShot={(parent, item) => {
-                        if (scene?.id === parent.id) {
-                          conversationRequest.current += 1;
-                          setShot(item);
-                        } else void selectScene(parent, item);
-                      }}
+                      scenes={scenes}
+                      importRequest={roughCutImport}
+                      onImportHandled={(token) =>
+                        setRoughCutImport((current) =>
+                          current?.token === token ? undefined : current,
+                        )
+                      }
                     />
-                    <div className="directory-pane">
-                      {scene && !shot ? (
-                        <SceneWorkspace
+                  </div>
+                )}
+                {view === 'rough-cut' ? (
+                  project ? null : (
+                    <EmptyWorkspace title="请打开一个项目" />
+                  )
+                ) : view === 'novel' ? (
+                  <NovelWorkspace
+                    projectId={project?.id}
+                    writable={writable}
+                    productionBusy={
+                      productionSkillBusy || (generation != null && isGenerationActive(generation))
+                    }
+                    onGenerateScript={(chapters) =>
+                      runProductionSkill(
+                        'chapters-to-script',
+                        chapters.map(({ id, documentId }) => ({ id, documentId })),
+                      )
+                    }
+                    focusChapterId={novelFocusChapterId}
+                    focusReferenceId={novelFocusReferenceId}
+                    refreshToken={novelRefreshRevision || undefined}
+                    referenceDocuments={documents.filter((item) => item.domainScope === 'novel')}
+                    onReferencesChanged={async () => {
+                      setDocuments(await callWorker('document.list', {}));
+                      if (conversation)
+                        setContextPreview(
+                          await callWorker('context.preview', { conversationId: conversation.id }),
+                        );
+                    }}
+                  />
+                ) : view === 'documents' || view === 'characters' ? (
+                  <>
+                    {renderDocumentToolbar(
+                      documentDirectoryMode === 'archived'
+                        ? '已归档项目资料'
+                        : document?.currentVersion?.state === 'published'
+                          ? view === 'characters'
+                            ? '已发布角色/场景'
+                            : '已发布项目资料'
+                          : view === 'characters'
+                            ? '角色/场景提示词'
+                            : '剧本草稿',
+                      documentDirectoryMode === 'archived'
+                        ? '已归档文档'
+                        : view === 'characters'
+                          ? '角色与场景'
+                          : '剧本编辑器',
+                      {
+                        ...(view === 'characters'
+                          ? { compact: true, showImport: false, showNew: false }
+                          : {}),
+                        showHeading: documentDirectoryMode === 'archived' || view !== 'characters',
+                        readOnly: documentDirectoryMode === 'archived',
+                        useDocumentTitle: true,
+                        showProductionGenerate:
+                          documentDirectoryMode === 'active' &&
+                          (view === 'documents' || view === 'characters'),
+                        productionGenerateLabel:
+                          view === 'characters'
+                            ? documentKind === 'prop'
+                              ? '生成道具图'
+                              : documentKind === 'scene'
+                                ? '生成场景图'
+                                : '生成角色图'
+                            : undefined,
+                        productionGenerateImage: view === 'characters',
+                        productionGenerateTitle:
+                          view === 'characters' ? '根据当前资料生成图片' : undefined,
+                        productionGenerateDisabled:
+                          view === 'characters'
+                            ? !document?.id ||
+                              hasForeignDocument ||
+                              !documentEditorWritable ||
+                              contentBusy ||
+                              !documentTitle.trim() ||
+                              !documentContent.trim()
+                            : !document?.id ||
+                              hasForeignDocument ||
+                              productionSkillBusy ||
+                              (generation != null && isGenerationActive(generation)) ||
+                              !document?.currentVersionId ||
+                              documentContent !==
+                                (document?.currentVersion?.contentMarkdown ?? '') ||
+                              documentTitle !== document?.title,
+                        onGenerateProduction: () => {
+                          if (!document) return;
+                          if (view === 'characters') {
+                            void openCharacterSceneImageProduction(
+                              documentKind === 'scene' ? activeCharacterSceneReference : undefined,
+                            );
+                            return;
+                          }
+                          void runProductionSkill('script-to-media', [
+                            { id: document.id, documentId: document.id },
+                          ]);
+                        },
+                      },
+                    )}
+                    {project ? (
+                      <div className="directory-layout">
+                        <aside
+                          className="directory-index project-document-index"
+                          aria-label="项目文档目录"
+                        >
+                          <div className="document-directory-header">
+                            {view === 'characters' ? (
+                              <div className="tree-heading">
+                                <span>角色与场景</span>
+                                {documentDirectoryMode === 'active' && (
+                                  <button
+                                    className="icon-button subtle"
+                                    type="button"
+                                    title="新建角色或场景"
+                                    onClick={newDocumentOfActiveKind}
+                                    disabled={!writable}
+                                  >
+                                    <FilePlus2 size={14} />
+                                  </button>
+                                )}
+                              </div>
+                            ) : null}
+                            <div
+                              className="document-directory-modes"
+                              role="group"
+                              aria-label="文档生命周期筛选"
+                            >
+                              <button
+                                type="button"
+                                className={documentDirectoryMode === 'active' ? 'active' : ''}
+                                aria-pressed={documentDirectoryMode === 'active'}
+                                onClick={() => {
+                                  setEditingDocumentTitleId(null);
+                                  setDocumentDirectoryMode('active');
+                                }}
+                              >
+                                当前
+                              </button>
+                              <button
+                                type="button"
+                                className={documentDirectoryMode === 'archived' ? 'active' : ''}
+                                aria-pressed={documentDirectoryMode === 'archived'}
+                                onClick={() => {
+                                  setEditingDocumentTitleId(null);
+                                  setDocumentDirectoryMode('archived');
+                                }}
+                              >
+                                已归档
+                              </button>
+                            </div>
+                            <div
+                              className="document-kind-filters"
+                              role="group"
+                              aria-label="文档类型筛选"
+                            >
+                              {(view === 'characters'
+                                ? [
+                                    { id: 'all' as const, label: '全部' },
+                                    { id: 'character' as const, label: '角色' },
+                                    { id: 'scene' as const, label: '场景' },
+                                    { id: 'prop' as const, label: '道具' },
+                                  ]
+                                : [
+                                    { id: 'all' as const, label: '全部' },
+                                    { id: 'outline' as const, label: '大纲' },
+                                    { id: 'plan' as const, label: '计划' },
+                                    { id: 'constraint' as const, label: '约束' },
+                                  ]
+                              ).map((filter) => (
+                                <button
+                                  className={documentKindFilter === filter.id ? 'active' : ''}
+                                  type="button"
+                                  key={filter.id}
+                                  aria-pressed={documentKindFilter === filter.id}
+                                  onClick={() => {
+                                    setEditingDocumentTitleId(null);
+                                    setDocumentKindFilter(filter.id);
+                                  }}
+                                >
+                                  {filter.label}
+                                </button>
+                              ))}
+                            </div>
+                            {documentDirectoryMode === 'active' && documentBatch.controls()}
+                            {documentBatch.message && (
+                              <small role="status">{documentBatch.message}</small>
+                            )}
+                          </div>
+                          <div className="document-directory-list">
+                            {documentDirectoryMode === 'active'
+                              ? visibleDocuments.map((item) => {
+                                  if (view === 'characters') {
+                                    const selected = document?.id === item.id;
+                                    const title = selected ? documentTitle : item.title;
+                                    const editing = selected && editingDocumentTitleId === item.id;
+                                    return (
+                                      <div
+                                        className={`tree-item with-kind document-directory-item ${document?.id === item.id ? 'selected' : ''}`}
+                                        key={item.id}
+                                      >
+                                        {documentBatch.checkbox(item)}
+                                        {editing ? (
+                                          <input
+                                            className="document-directory-title-input"
+                                            type="text"
+                                            aria-label="文档标题"
+                                            autoFocus
+                                            value={documentTitle}
+                                            readOnly={!documentEditorWritable || contentBusy}
+                                            onChange={(event) =>
+                                              setDocumentTitle(event.target.value)
+                                            }
+                                            onBlur={() => {
+                                              if (!documentTitle.trim())
+                                                setDocumentTitle(document?.title ?? item.title);
+                                              setEditingDocumentTitleId(null);
+                                            }}
+                                            onKeyDown={(event) => {
+                                              if (event.key === 'Enter') {
+                                                event.preventDefault();
+                                                event.currentTarget.blur();
+                                              }
+                                              if (event.key === 'Escape') {
+                                                setDocumentTitle(document?.title ?? item.title);
+                                                setEditingDocumentTitleId(null);
+                                              }
+                                            }}
+                                          />
+                                        ) : (
+                                          <button
+                                            className="document-directory-title"
+                                            type="button"
+                                            aria-label={
+                                              selected
+                                                ? `编辑文档标题 ${title || item.title}`
+                                                : `打开文档 ${item.title}`
+                                            }
+                                            disabled={
+                                              selected && (!documentEditorWritable || contentBusy)
+                                            }
+                                            onClick={() => {
+                                              if (selected) setEditingDocumentTitleId(item.id);
+                                              else {
+                                                setEditingDocumentTitleId(null);
+                                                void openDocumentById(item.id);
+                                              }
+                                            }}
+                                          >
+                                            <DocumentDirectoryTitleText
+                                              text={title || '未命名文档'}
+                                            />
+                                          </button>
+                                        )}
+                                        <small className="tree-item-kind">
+                                          {DOCUMENT_KIND_LABELS[item.kind]}
+                                        </small>
+                                        {item.domainScope !== 'novel' && !hasForeignDocument && (
+                                          <button
+                                            className="icon-button subtle document-directory-archive"
+                                            type="button"
+                                            title="归档后可在已归档文档中恢复"
+                                            aria-label={`归档文档“${item.title}”`}
+                                            disabled={!writable || contentBusy}
+                                            onClick={() => requestArchiveDocument(item)}
+                                          >
+                                            <Archive size={14} aria-hidden="true" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    );
+                                  }
+
+                                  const selected = document?.id === item.id;
+                                  const title = selected ? documentTitle : item.title;
+                                  const editing = selected && editingDocumentTitleId === item.id;
+                                  return (
+                                    <div
+                                      className={`tree-item with-kind document-directory-item ${selected ? 'selected' : ''}`}
+                                      key={item.id}
+                                    >
+                                      {documentBatch.checkbox(item)}
+                                      {editing ? (
+                                        <input
+                                          className="document-directory-title-input"
+                                          type="text"
+                                          aria-label="文档标题"
+                                          autoFocus
+                                          value={documentTitle}
+                                          readOnly={!documentEditorWritable || contentBusy}
+                                          onChange={(event) => setDocumentTitle(event.target.value)}
+                                          onBlur={() => {
+                                            if (!documentTitle.trim())
+                                              setDocumentTitle(document?.title ?? item.title);
+                                            setEditingDocumentTitleId(null);
+                                          }}
+                                          onKeyDown={(event) => {
+                                            if (event.key === 'Enter') {
+                                              event.preventDefault();
+                                              event.currentTarget.blur();
+                                            }
+                                            if (event.key === 'Escape') {
+                                              setDocumentTitle(document?.title ?? item.title);
+                                              setEditingDocumentTitleId(null);
+                                            }
+                                          }}
+                                        />
+                                      ) : (
+                                        <button
+                                          className="document-directory-title"
+                                          type="button"
+                                          aria-label={
+                                            selected
+                                              ? `编辑文档标题 ${title || item.title}`
+                                              : `打开文档 ${item.title}`
+                                          }
+                                          disabled={
+                                            selected && (!documentEditorWritable || contentBusy)
+                                          }
+                                          onClick={() => {
+                                            if (selected) setEditingDocumentTitleId(item.id);
+                                            else {
+                                              setEditingDocumentTitleId(null);
+                                              void openDocumentById(item.id);
+                                            }
+                                          }}
+                                        >
+                                          <DocumentDirectoryTitleText
+                                            text={title || '未命名文档'}
+                                          />
+                                        </button>
+                                      )}
+                                      <small className="tree-item-kind">
+                                        {DOCUMENT_KIND_LABELS[item.kind]}
+                                      </small>
+                                      {item.domainScope !== 'novel' && !hasForeignDocument && (
+                                        <button
+                                          className="icon-button subtle document-directory-archive"
+                                          type="button"
+                                          title="归档后可在已归档文档中恢复"
+                                          aria-label={`归档文档“${item.title}”`}
+                                          disabled={!writable || contentBusy}
+                                          onClick={() => requestArchiveDocument(item)}
+                                        >
+                                          <Archive size={14} aria-hidden="true" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                              : visibleArchivedDocuments.map((item) => (
+                                  <div className="archived-document-row" key={item.id}>
+                                    <div className="tree-item with-kind">
+                                      <FileText size={13} />
+                                      <DocumentDirectoryTitleText text={item.title} />
+                                      <small className="tree-item-kind">
+                                        {DOCUMENT_KIND_LABELS[item.kind]}
+                                      </small>
+                                    </div>
+                                    <button
+                                      className="icon-button subtle"
+                                      type="button"
+                                      title={`恢复“${item.title}”`}
+                                      aria-label={`恢复文档“${item.title}”`}
+                                      disabled={!writable || contentBusy}
+                                      onClick={() =>
+                                        void restoreArchivedDocumentFromDirectory(item)
+                                      }
+                                    >
+                                      <RotateCcw size={14} />
+                                    </button>
+                                  </div>
+                                ))}
+                            {(documentDirectoryMode === 'active'
+                              ? visibleDocuments.length
+                              : visibleArchivedDocuments.length) === 0 && (
+                              <small className="tree-empty">
+                                {documentDirectoryMode === 'archived'
+                                  ? documentKindFilter === 'all'
+                                    ? '暂无已归档文档'
+                                    : `暂无已归档的${DOCUMENT_KIND_LABELS[documentKindFilter]}文档`
+                                  : documentKindFilter === 'all'
+                                    ? '暂无文档'
+                                    : `暂无${DOCUMENT_KIND_LABELS[documentKindFilter]}类型文档`}
+                              </small>
+                            )}
+                            {view === 'documents' &&
+                            documentDirectoryMode === 'active' &&
+                            constraints.length > 0 ? (
+                              <>
+                                <div className="tree-heading nested">
+                                  <span>生产约束记录</span>
+                                </div>
+                                {constraints.map((item) => (
+                                  <div
+                                    className="tree-item constraint-item"
+                                    key={item.id}
+                                    title={item.content}
+                                  >
+                                    <ListChecks size={13} />
+                                    <span>
+                                      {item.content.length > 40
+                                        ? item.content.slice(0, 40) + '…'
+                                        : item.content}
+                                    </span>
+                                  </div>
+                                ))}
+                              </>
+                            ) : null}
+                          </div>
+                        </aside>
+                        <div className="directory-pane">
+                          {documentDirectoryMode === 'archived' ? (
+                            <EmptyWorkspace title="已归档文档" />
+                          ) : (
+                            renderDocumentEditor()
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <EmptyWorkspace />
+                    )}
+                  </>
+                ) : view === 'shots' ? (
+                  <>
+                    <div className="workspace-toolbar">
+                      <div>
+                        <span className="eyebrow">{shot ? scene?.title : '场次与镜头'}</span>
+                        <h1>{shot?.title ?? scene?.title ?? '场次未选择'}</h1>
+                      </div>
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => void addShot()}
+                        disabled={!writable || !scene}
+                      >
+                        <Plus size={15} />
+                        新建镜头
+                      </button>
+                    </div>
+                    {project ? (
+                      <div className="directory-layout">
+                        <SceneShotDirectory
                           projectId={project.id}
-                          scene={scene}
-                          mediaRevision={taskCompletionRevision}
-                          onBindSceneDocument={(id) => void bindSceneDocument(id)}
-                          onOpenDocument={(id) => void openDocumentById(id)}
-                          sceneBindingBusy={sceneBindingBusy}
-                          sceneBindingMessage={sceneBindingMessage}
-                          prompt={sceneVideoPrompt}
-                          bindings={scene.materialBindings ?? []}
-                          documents={documents}
-                          assets={assets}
+                          scenes={scenes}
+                          sceneId={scene?.id}
+                          shotId={shot?.id}
+                          shots={shots}
                           writable={writable}
-                          onPromptChange={setSceneVideoPrompt}
-                          onRequestBindings={(prompt, bindings, characters, dialogueAudioId) =>
-                            void requestSceneBindingUpdate(
-                              prompt,
-                              bindings,
-                              characters,
-                              dialogueAudioId,
-                            )
+                          busy={shotStoryboardBusy}
+                          dirtySceneId={
+                            sceneVideoPrompt !== (scene?.videoPrompt ?? '') ? scene?.id : undefined
                           }
-                          onSave={(nextPrompt, bindings, characters, dialogueAudioId) =>
-                            void (
-                              nextPrompt !== (scene.videoPrompt ?? '')
-                                ? requestSceneBindingUpdate
-                                : saveSceneVideoPrompt
-                            )(nextPrompt, bindings, characters, dialogueAudioId)
-                          }
-                          onGenerateVideo={(bindings, characters, dialogueAudioId) =>
-                            void (sceneVideoPrompt !== (scene.videoPrompt ?? '')
-                              ? requestSceneBindingUpdate(
-                                  sceneVideoPrompt,
-                                  bindings,
-                                  characters,
-                                  dialogueAudioId,
-                                )
-                              : openSceneProduction(bindings, characters, dialogueAudioId))
-                          }
-                          onOpenAsset={(assetId) => {
-                            updateAssets(assets, assetId);
-                            openProjectView('assets', assetId);
-                          }}
-                        />
-                      ) : null}
-                      {shot ? (
-                        <ShotWorkspace
-                          projectId={project.id}
-                          shotId={shot.id}
-                          scene={scene}
-                          mediaRevision={taskCompletionRevision}
-                          onSaveSceneReferences={(characters, dialogueAudioId) =>
-                            saveSceneVideoPrompt(
-                              scene?.videoPrompt ?? '',
-                              scene?.materialBindings ?? [],
-                              characters,
-                              dialogueAudioId,
-                            )
-                          }
-                          onBindSceneDocument={(id) => void bindSceneDocument(id)}
-                          onOpenDocument={(id) => void openDocumentById(id)}
-                          sceneBindingBusy={sceneBindingBusy}
-                          sceneBindingMessage={sceneBindingMessage}
-                          sceneDocumentId={scene?.sceneDocumentId}
-                          referenceBindings={shot.referenceBindings}
-                          onSaveReferenceBindings={saveShotReferenceBindings}
-                          shotTitle={shot.title}
-                          shotStatus={shot.status}
-                          shotPosition={shot.position}
-                          continuitySourceDirty={shotPrompt !== (shot.prompt ?? '')}
-                          llm={
-                            selectedLlmProfile && selectedLlmModel
-                              ? {
-                                  providerProfileId: selectedLlmProfile.id,
-                                  modelId: selectedLlmModel.id,
-                                  name: selectedLlmModel.displayName,
-                                  vision: selectedLlmModel.capabilities.vision,
-                                }
+                          dirtyShotId={
+                            shot &&
+                            (shotPrompt !== (shot.prompt ?? '') ||
+                              shotStoryboardTitle !== (shotStoryboard?.title ?? '') ||
+                              shotStoryboardContent !==
+                                (shotStoryboard?.currentVersion?.contentMarkdown ?? ''))
+                              ? shot.id
                               : undefined
                           }
-                          prompt={shotPrompt}
-                          writable={writable}
-                          assets={assets}
-                          documents={documents}
-                          storyboardTitle={shotStoryboardTitle}
-                          storyboardContent={shotStoryboardContent}
-                          storyboardBusy={shotStoryboardBusy}
-                          hasStoryboard={Boolean(shotStoryboard)}
-                          onPromptChange={setShotPrompt}
-                          onSavePrompt={() => void saveShotPrompt()}
-                          onGenerateImage={(refs) => void openShotProduction('image', refs)}
-                          onGenerateVideo={(refs) => void openShotProduction('video', refs)}
-                          onStoryboardTitleChange={setShotStoryboardTitle}
-                          onStoryboardContentChange={setShotStoryboardContent}
-                          onSaveStoryboard={() => void saveShotStoryboard()}
+                          onLifecycleChanged={refreshProductionLifecycle}
+                          onAddScene={() => void addScene()}
+                          onRenameScene={(item, title) => void renameScene(item, title)}
+                          onRenameShot={(parent, item, title) =>
+                            void renameShot(parent, item, title)
+                          }
+                          onSelectScene={(item) => void selectScene(item)}
+                          onSelectShot={(parent, item) => {
+                            if (scene?.id === parent.id) {
+                              conversationRequest.current += 1;
+                              setShot(item);
+                            } else void selectScene(parent, item);
+                          }}
                         />
-                      ) : scene ? null : (
-                        <EmptyWorkspace title="还没有场次" />
-                      )}
-                    </div>
-                  </div>
+                        <div className="directory-pane">
+                          {scene && !shot ? (
+                            <SceneWorkspace
+                              projectId={project.id}
+                              scene={scene}
+                              shots={shots}
+                              prompt={sceneVideoPrompt}
+                              documents={documents}
+                              assets={assets}
+                              writable={writable}
+                              onPromptChange={setSceneVideoPrompt}
+                              onSave={(nextPrompt) => void saveSceneVideoPrompt(nextPrompt)}
+                              onGenerateVideo={() => void openSceneProduction()}
+                              onOpenAsset={(assetId) => {
+                                updateAssets(assets, assetId);
+                                openProjectView('assets', assetId);
+                              }}
+                            />
+                          ) : null}
+                          {shot ? (
+                            <ShotWorkspace
+                              projectId={project.id}
+                              shotId={shot.id}
+                              mediaRevision={taskCompletionRevision}
+                              authoringIR={
+                                shot.authoringIR?.kind === 'shot' ? shot.authoringIR : undefined
+                              }
+                              referenceBindings={shot.referenceBindings}
+                              onSaveReferenceBindings={saveShotReferenceBindings}
+                              shotTitle={shot.title}
+                              shotStatus={shot.status}
+                              shotPosition={shot.position}
+                              continuitySourceDirty={shotPrompt !== (shot.prompt ?? '')}
+                              llm={
+                                selectedLlmProfile && selectedLlmModel
+                                  ? {
+                                      providerProfileId: selectedLlmProfile.id,
+                                      modelId: selectedLlmModel.id,
+                                      name: selectedLlmModel.displayName,
+                                      vision: selectedLlmModel.capabilities.vision,
+                                    }
+                                  : undefined
+                              }
+                              prompt={shotPrompt}
+                              writable={writable}
+                              assets={assets}
+                              documents={documents}
+                              storyboardTitle={shotStoryboardTitle}
+                              storyboardContent={shotStoryboardContent}
+                              storyboardBusy={shotStoryboardBusy}
+                              hasStoryboard={Boolean(shotStoryboard)}
+                              onPromptChange={setShotPrompt}
+                              onSavePrompt={() => void saveShotPrompt()}
+                              onRepairBindings={requestShotBindingRepair}
+                              onAskContinuityAgent={requestContinuityAgent}
+                              onPrepareGenerate={prepareShotProduction}
+                              onGenerateImage={(refs, prompt) =>
+                                void openShotProduction('image', refs, prompt)
+                              }
+                              onGenerateVideo={(refs, prompt) =>
+                                void openShotProduction('video', refs, prompt)
+                              }
+                              onStoryboardTitleChange={setShotStoryboardTitle}
+                              onStoryboardContentChange={setShotStoryboardContent}
+                              onSaveStoryboard={() => void saveShotStoryboard()}
+                            />
+                          ) : scene ? null : (
+                            <EmptyWorkspace title="还没有场次" />
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <EmptyWorkspace />
+                    )}
+                    <GeneratedDraftSync
+                      projectId={project?.id}
+                      writable={writable}
+                      refreshRevision={proposalRefreshRevision}
+                      onSaved={refreshAppliedStructure}
+                    />
+                  </>
                 ) : (
-                  <EmptyWorkspace />
+                  <TaskLogView
+                    projectId={project?.id}
+                    taskRevision={projectTasks?.revision}
+                    onOpenDocument={(documentId) => void openDocumentById(documentId)}
+                    onOpenConversation={(conversationId) =>
+                      void openConversationById(conversationId)
+                    }
+                    onOpenLibrarySource={openLibrarySource}
+                  />
                 )}
-                <GeneratedDraftSync
-                  projectId={project?.id}
-                  writable={writable}
-                  refreshRevision={proposalRefreshRevision}
-                  onSaved={refreshAppliedStructure}
-                />
               </>
-            ) : (
-              <TaskLogView
-                projectId={project?.id}
-                taskRevision={projectTasks?.revision}
-                onOpenDocument={(documentId) => void openDocumentById(documentId)}
-                onOpenConversation={(conversationId) => void openConversationById(conversationId)}
-                onOpenLibrarySource={openLibrarySource}
-              />
             )}
           </WorkspaceSurface>
         </main>

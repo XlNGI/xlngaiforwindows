@@ -1,17 +1,18 @@
 import { useState, type KeyboardEvent } from 'react';
-import { ChevronDown, ChevronRight, Image, Video } from 'lucide-react';
-import type { GenerationCapability } from '@ai-video/contracts';
+import { AudioLines, ChevronDown, ChevronRight, Image, Video } from 'lucide-react';
+import type { ProductionCapability } from './use-production-state';
 
 interface ProductionNavigationProps {
-  capability: GenerationCapability;
-  onCapabilityChange: (capability: GenerationCapability) => void;
+  capability: ProductionCapability;
+  disabled?: boolean;
+  onCapabilityChange: (capability: ProductionCapability) => void;
 }
 
 const groups: Array<{
-  id: 'image' | 'video';
+  id: 'image' | 'video' | 'audio';
   label: string;
   icon: typeof Image;
-  items: Array<{ capability: GenerationCapability; label: string }>;
+  items: Array<{ capability: ProductionCapability; label: string }>;
 }> = [
   {
     id: 'image',
@@ -34,15 +35,23 @@ const groups: Array<{
       { capability: 'START_END_TO_VIDEO', label: '首尾帧生视频' },
     ],
   },
+  {
+    id: 'audio',
+    label: '音频制作',
+    icon: AudioLines,
+    items: [{ capability: 'TEXT_TO_AUDIO', label: '音频生成' }],
+  },
 ];
 
-/** Image and video capabilities never overlap, so one group owns any capability. */
-function groupOf(capability: GenerationCapability): 'image' | 'video' {
+/** Each capability belongs to exactly one production group. */
+function groupOf(capability: ProductionCapability): 'image' | 'video' | 'audio' {
+  if (capability === 'TEXT_TO_AUDIO') return 'audio';
   return capability.endsWith('_TO_IMAGE') ? 'image' : 'video';
 }
 
 export function ProductionNavigation({
   capability,
+  disabled = false,
   onCapabilityChange,
 }: ProductionNavigationProps) {
   /*
@@ -50,9 +59,9 @@ export function ProductionNavigation({
    * at all times. Only the active group opens now, so the rail shows the current
    * production mode plus its siblings and collapses the unrelated group.
    */
-  const [expanded, setExpanded] = useState<Record<'image' | 'video', boolean>>(() => {
+  const [expanded, setExpanded] = useState<Record<'image' | 'video' | 'audio', boolean>>(() => {
     const active = groupOf(capability);
-    return { image: active === 'image', video: active === 'video' };
+    return { image: active === 'image', video: active === 'video', audio: active === 'audio' };
   });
 
   const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, direction: number) => {
@@ -85,6 +94,7 @@ export function ProductionNavigation({
               className="production-menu-heading"
               type="button"
               aria-expanded={open}
+              disabled={disabled}
               onClick={() => setExpanded((current) => ({ ...current, [group.id]: !open }))}
               onKeyDown={(event) => moveFocus(event, event.key === 'ArrowUp' ? -1 : 1)}
             >
@@ -99,8 +109,16 @@ export function ProductionNavigation({
                     className={item.capability === capability ? 'active' : ''}
                     type="button"
                     aria-current={item.capability === capability ? 'page' : undefined}
+                    disabled={disabled}
                     key={item.capability}
-                    onClick={() => onCapabilityChange(item.capability)}
+                    onClick={() => {
+                      setExpanded({
+                        image: group.id === 'image',
+                        video: group.id === 'video',
+                        audio: group.id === 'audio',
+                      });
+                      onCapabilityChange(item.capability);
+                    }}
                     onKeyDown={(event) => moveFocus(event, event.key === 'ArrowUp' ? -1 : 1)}
                   >
                     {item.label}

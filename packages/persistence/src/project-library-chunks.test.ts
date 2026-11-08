@@ -34,7 +34,14 @@ async function temporaryDatabase() {
 function insertDocument(
   database: ReturnType<typeof openProjectDatabase>,
   now: string,
-  params: { id: string; kind: string; title: string; content: string; versionId: string },
+  params: {
+    id: string;
+    kind: string;
+    title: string;
+    content: string;
+    versionId: string;
+    state?: 'draft' | 'published';
+  },
 ) {
   database
     .prepare(
@@ -48,12 +55,13 @@ function insertDocument(
       `INSERT INTO document_versions
        (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
         author_type, content_hash, state_updated_at, created_at)
-       VALUES (?, ?, 1, ?, 'draft', ?, 'project', 'user', ?, ?, ?)`,
+       VALUES (?, ?, 1, ?, ?, ?, 'project', 'user', ?, ?, ?)`,
     )
     .run(
       params.versionId,
       params.id,
       params.content,
+      params.state ?? 'draft',
       params.title,
       createHash('sha256').update(params.content).digest('hex'),
       now,
@@ -147,27 +155,28 @@ describe('project library chunks', () => {
       title: '项目大纲',
       content: '第一版雾港提纲',
       versionId: 'published-version',
+      state: 'published',
     });
     database
       .prepare(
-        `INSERT INTO document_versions
-         (id, document_id, version, content_markdown, state, title_snapshot, scope_type_snapshot,
-          author_type, content_hash, state_updated_at, created_at)
-         VALUES (?, ?, 2, ?, 'draft', ?, 'project', 'user', ?, ?, ?)`,
+        `INSERT INTO document_publications
+         (id, project_id, document_id, document_version_id, publication_no,
+          published_by_type, published_at)
+         VALUES (?, 'project', ?, ?, 1, 'user', ?)`,
       )
-      .run(
-        'draft-version',
-        'outline',
-        '第二版灯塔提纲',
-        '项目大纲',
-        createHash('sha256').update('第二版灯塔提纲').digest('hex'),
-        now,
-        now,
-      );
+      .run('outline-publication', 'outline', 'published-version', now);
     database
-      .prepare('UPDATE documents SET current_version_id = ?, published_version_id = ? WHERE id = ?')
-      .run('draft-version', 'published-version', 'outline');
+      .prepare('UPDATE documents SET published_version_id = ? WHERE id = ?')
+      .run('published-version', 'outline');
+    insertDocument(database, now, {
+      id: 'outline-draft',
+      kind: 'outline',
+      title: '项目大纲草稿',
+      content: '第二版灯塔提纲',
+      versionId: 'draft-version',
+    });
     rebuildLibraryChunksForDocument(database, 'project', 'outline', now);
+    rebuildLibraryChunksForDocument(database, 'project', 'outline-draft', now);
 
     const draft = searchProjectLibraryChunks(database, {
       projectId: 'project',

@@ -303,6 +303,8 @@ legacy adapterKey → legacy resolver → contractId + contractRevision + bindin
 
 ## 12. 实施记录
 
+- [x] UniComp Seedance 时长传输补修（2026-11-02）：真实 Provider 错误确认 `seconds` 要求字符串，原绑定错误地复制官方整数 `duration`。按审计、设计、先失败回归、实现的顺序，在两个 Seedance Binding 声明受限 `integer-string` 编码；官方参数和修订保持不变。实现与验证见 [时长传输修复计划](./SEEDANCE-UNICOMP-SECONDS-REPAIR-PLAN.md)，不将自动化通过视为真实渠道出片验收。
+
 - [x] 三家官方声音参考视频运行时（2026-10-14）：用户明确授权万相、Seedance、MiniMax 完整接入后，新增 7 个运行修订和官方 Binding，接通北京业务空间域名、角色本地样本版本、官方上传／Base64、费用确认、Native 提交、后台恢复／下载和成功入库；Schema v45 音频历史引用保护独立于图片／视频素材库。合同目录现共 21 个声音相关定义，原 14 个修订和 UniComp 旧绑定保留。真实付费样片不在本轮验证范围。详见 [官方声音参考视频链路](./OFFICIAL-VOICE-VIDEO-RUNTIME-IMPLEMENTATION.md)。
 
 - [x] 视频声音样本合同补齐（2026-10-14）：新增 14 个官方来源核验定义，包括 Wan 3.0／Prime 修订 2、Wan 2.7、Seedance 2.0／2.5、Vidu Q4 Preview、MiniMax H3／H3 Max、可灵最新视频／音色／角色元素及 Vidu 克隆接口；完成嵌套 Schema、媒体限制、纯请求映射、表单和 Rust 校验。原渠道 Binding 保留历史修订；新定义为 verified，未推断中转渠道支持或发起计费请求。全仓测试、类型、Lint、格式、构建与 Rust 回归通过。详见 [视频声音样本合同补齐](VIDEO-AUDIO-CONTRACTS-IMPLEMENTATION.md)。本条不表示全部视频供应商执行适配阶段已完成。
@@ -318,6 +320,6 @@ legacy adapterKey → legacy resolver → contractId + contractRevision + bindin
 - [~] P1 合同化 Adapter 元数据：UniComp 图像、通用视频、Qwen 图编、Vidu 兼容参考/首尾帧模板和 Vidu Q3/首尾帧适配器已写入 `contractId/contractRevision`；新增 `adapterDescriptorFromModelContract` 可将合同 JSON Schema 转换为旧 AdapterDescriptor 和动态 UI 字段，其余官方 Vidu per-model descriptors 仍待迁移。
 - [x] P1 协议目录基础：新增 Chat Completions、Responses 和 Vidu v2 的 `ProtocolAdapter` 目录及只读 IPC，协议转换与模型合同保持分离。
 - [x] P1 任务生命周期目录基础：新增图像同步、通用视频异步、Vidu 参考视频异步 `TaskAdapter` 描述及只读 IPC；实际执行仍由现有 Worker/Native 服务负责。
-- [x] P2 UniComp 映射实施：用户确认并启用 `deepseek-v4-pro`、`deepseek-flash`、`glm-5`、`glm-5.3`、`glm-5.3-flash`、`kimi-k3`、`MiniMax-M3`、`MiniMax-H3`、`qwen-image`、`viduq3` 到对应官方合同；未提供具体 UniComp 远程 ID 的 Qwen/豆包/Kling/Seedance/Hailuo 项目继续保持待目录发现状态。
+- [x] P2 UniComp 映射实施切片：既有映射继续有效；2026-10-28 按用户给出的精确目录 ID 为 `doubao-seedance-2-0-260128` 和 `doubao-seedance-2-5-260628` 新增官方合同绑定，完成旧同步目录行能力回填、结构化参数投影、嵌套图片物化及模拟任务生命周期验证。仅覆盖本次两个 Seedance ID，不代表其他 Qwen/豆包/Kling/Hailuo 映射已完成。详见 [Seedance UniComp 适配代码审计](./code-traces/2026-10-28-seedance-unicomp-adaptation.md)。真实渠道付费生成未执行。
 - [~] P0 人工启用确认和独立目录持久化：模型合同/Binding 已持久化到应用 SQLite，Worker/桌面客户端已提供启用 API，模型启用同步更新合同状态；复核界面和重新核验流尚未完成，P0 仍保持进行中。
 

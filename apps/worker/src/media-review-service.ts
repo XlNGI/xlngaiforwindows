@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import { validateToolArguments } from '@earendil-works/pi-ai';
 import {
   MEDIA_REVIEW_DRAFT_SCHEMA,
+  prepareSceneReferenceImageProposal,
   type MediaReviewDraft,
   type MediaReviewForm,
   type MediaReviewSummary,
@@ -43,7 +44,7 @@ export class MediaReviewService {
     private readonly projects: ProjectService,
     private readonly media: Pick<
       MediaPreparationService,
-      'selectionContext' | 'selectionRequest' | 'prepareSelected' | 'getTask'
+      'selectionContext' | 'selectionRequest' | 'prepareReviewedSelection' | 'getTask'
     >,
     private readonly submission: Pick<
       MediaOrchestrationService,
@@ -70,12 +71,68 @@ export class MediaReviewService {
             .get(owner.conversationId, project.id)
         )
           throw new Error('审核表单会话不属于当前项目。');
-        const existing = db
-          .prepare(
-            'SELECT * FROM production_review_forms WHERE project_id=? AND conversation_id=? AND form_key=?',
-          )
-          .get(project.id, owner.conversationId, draft.key) as Row | undefined;
         const sources = this.captureSources(db, project.id, draft);
+        const sceneImage = draft.kind === 'image' && draft.assetKind === 'scene';
+        const formKey = sceneImage && owner.taskId ? `${owner.taskId}:${draft.key}` : draft.key;
+        const existing = (
+          sceneImage
+            ? db
+                .prepare(
+                  `SELECT * FROM production_review_forms WHERE project_id=? AND conversation_id=?
+               AND task_id IS ? AND form_key IN (?,?) ORDER BY (form_key=?) DESC LIMIT 1`,
+                )
+                .get(
+                  project.id,
+                  owner.conversationId,
+                  owner.taskId ?? null,
+                  formKey,
+                  draft.key,
+                  formKey,
+                )
+            : db
+                .prepare(
+                  'SELECT * FROM production_review_forms WHERE project_id=? AND conversation_id=? AND form_key=?',
+                )
+                .get(project.id, owner.conversationId, formKey)
+        ) as Row | undefined;
+        if (draft.kind === 'image' && draft.assetKind === 'scene') {
+          Object.assign(
+            draft,
+            prepareSceneReferenceImageProposal(draft.prompt, draft.parameters ?? {}),
+          );
+          validateDraft(draft);
+          if (draft.sourceDocumentId) {
+            if (owner.taskId) {
+              const legacy = db
+                .prepare(
+                  `SELECT id FROM agent_media_selections WHERE project_id=? AND task_id=? AND kind='image'
+                 AND status IN ('pending','consumed') AND json_extract(arguments_json,'$.arguments.sourceDocumentId')=? LIMIT 1`,
+                )
+                .get(project.id, owner.taskId, draft.sourceDocumentId) as
+                { id: string } | undefined;
+              if (legacy)
+                throw new Error(`此场景已有制作意图 ${legacy.id}，请复用单张复合场景图。`);
+            }
+            // A different form key must not split one scene into panorama/detail jobs.
+            // Legacy callers without a task only share currently pending intent.
+            const sameScene = (
+              db
+                .prepare(
+                  `SELECT * FROM production_review_forms WHERE project_id=? AND conversation_id=?
+               AND task_id IS ? AND status<>'cancelled' ${owner.taskId ? '' : "AND status='pending'"}`,
+                )
+                .all(project.id, owner.conversationId, owner.taskId ?? null) as Row[]
+            ).find((row) => {
+              const previous = JSON.parse(row.draft_json) as MediaReviewDraft;
+              return (
+                previous.kind === 'image' &&
+                previous.sourceDocumentId === draft.sourceDocumentId &&
+                row.id !== existing?.id
+              );
+            });
+            if (sameScene) return this.describe(sameScene);
+          }
+        }
         const digest = hashAgentToolArguments(draft);
         if (
           existing?.draft_hash === digest &&
@@ -83,7 +140,11 @@ export class MediaReviewService {
           existing.status !== 'cancelled'
         )
           return this.describe(existing);
-        if (existing && (existing.status !== 'pending' || expected !== existing.row_version))
+        if (
+          existing &&
+          !(sceneImage && existing.status === 'cancelled') &&
+          (existing.status !== 'pending' || expected !== existing.row_version)
+        )
           throw new Error(
             '此表单已存在或版本已变化；请读取后使用当前 expectedRowVersion 更新待审核表单。',
           );
@@ -104,8 +165,15 @@ export class MediaReviewService {
         const now = new Date().toISOString();
         if (existing)
           db.prepare(
-            `UPDATE production_review_forms SET draft_json=?,source_rows_json=?,draft_hash=?,error=NULL,row_version=row_version+1,updated_at=? WHERE id=?`,
-          ).run(JSON.stringify(draft), JSON.stringify(sources), digest, now, id);
+            `UPDATE production_review_forms SET draft_json=?,source_rows_json=?,draft_hash=?,status='pending',job_id=NULL,task_id=?,error=NULL,row_version=row_version+1,updated_at=? WHERE id=?`,
+          ).run(
+            JSON.stringify(draft),
+            JSON.stringify(sources),
+            digest,
+            sceneImage ? (owner.taskId ?? null) : existing.task_id,
+            now,
+            id,
+          );
         else
           db.prepare(
             `INSERT INTO production_review_forms(id,project_id,conversation_id,task_id,form_key,draft_json,source_rows_json,draft_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -114,7 +182,7 @@ export class MediaReviewService {
             project.id,
             owner.conversationId,
             owner.taskId ?? null,
-            draft.key,
+            formKey,
             JSON.stringify(draft),
             JSON.stringify(sources),
             digest,
@@ -287,7 +355,7 @@ export class MediaReviewService {
         if (!params.selection) throw new Error('请选择模型并审核生成参数。');
         const identity = this.identity(row);
         const context = this.context(row, form.inputAssetIds);
-        const prepared = this.media.prepareSelected(context, params.selection, identity);
+        const prepared = this.media.prepareReviewedSelection(context, params.selection, identity);
         const submission = this.submission.requestSubmission({ jobId: prepared.draftId });
         db.prepare(
           "UPDATE production_review_forms SET status='submitting',job_id=?,row_version=row_version+1,updated_at=? WHERE id=?",
@@ -482,6 +550,7 @@ export class MediaReviewService {
       )
         throw new Error('素材类型必须与角色/场景/道具文档类型一致。');
       draft.sourceVersionId = doc.version;
+      if (draft.kind === 'image' && doc.kind === 'scene') draft.assetKind = 'scene';
       sources.push({ table: 'documents', id: draft.sourceDocumentId, version: doc.version });
     }
     if (sceneId) {

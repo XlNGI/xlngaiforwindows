@@ -15,7 +15,10 @@ import {
   type ProviderProfileInfo,
 } from '@ai-video/contracts';
 
-const capabilityOptions: Array<{ key: keyof ProviderModelCapabilities; label: string }> = [
+const capabilityOptions: Array<{
+  key: Exclude<keyof ProviderModelCapabilities, 'contextLimits'>;
+  label: string;
+}> = [
   { key: 'text', label: '文本' },
   { key: 'vision', label: '视觉' },
   { key: 'streaming', label: '流式' },
@@ -377,7 +380,9 @@ export function ModelManagementView({
 }
 
 function hasModelCapability(capabilities: ProviderModelCapabilities): boolean {
-  return Object.values(capabilities).some(Boolean);
+  return Object.entries(capabilities).some(
+    ([key, value]) => key !== 'contextLimits' && value === true,
+  );
 }
 
 function CapabilitySummary({ capabilities }: { capabilities: ProviderModelCapabilities }) {
@@ -575,7 +580,7 @@ function ModelPricingEditor({
   );
 }
 
-function CapabilityEditor({
+export function CapabilityEditor({
   capabilities,
   disabled = false,
   onChange,
@@ -584,6 +589,43 @@ function CapabilityEditor({
   disabled?: boolean;
   onChange: (capabilities: ProviderModelCapabilities) => void;
 }) {
+  const [window, setWindow] = useState('');
+  const [input, setInput] = useState('');
+  const [output, setOutput] = useState('');
+  const [tokenizer, setTokenizer] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const c = capabilities.contextLimits;
+    setWindow(c ? String(c.contextWindow) : '');
+    setInput(c?.maxInputTokens ? String(c.maxInputTokens) : '');
+    setOutput(c?.maxOutputTokens ? String(c.maxOutputTokens) : '');
+    setTokenizer(c?.tokenizer ?? '');
+    setError('');
+  }, [capabilities.contextLimits]);
+  const saveLimits = () => {
+    const values = [window, input, output].map((value) =>
+      value.trim() ? Number(value) : undefined,
+    );
+    if (
+      !values[0] ||
+      values.some((value) => value !== undefined && (!Number.isSafeInteger(value) || value < 1)) ||
+      values.slice(1).some((value) => value !== undefined && value > values[0]!)
+    ) {
+      setError('请输入正整数；最大输入和输出不能超过上下文窗口。');
+      return;
+    }
+    setError('');
+    onChange({
+      ...capabilities,
+      contextLimits: {
+        contextWindow: values[0],
+        maxInputTokens: values[1],
+        maxOutputTokens: values[2],
+        tokenizer: tokenizer.trim() || undefined,
+        capabilitySource: 'manual_config',
+      },
+    });
+  };
   return (
     <fieldset className="capability-editor">
       <legend>能力</legend>
@@ -598,6 +640,65 @@ function CapabilityEditor({
           {option.label}
         </label>
       ))}
+      {capabilities.text && (
+        <div className="form-grid">
+          <label>
+            上下文窗口 Token
+            <input
+              aria-label="上下文窗口 Token"
+              inputMode="numeric"
+              value={window}
+              disabled={disabled}
+              onChange={(e) => setWindow(e.target.value)}
+            />
+          </label>
+          <label>
+            最大输入 Token
+            <input
+              aria-label="最大输入 Token"
+              inputMode="numeric"
+              value={input}
+              disabled={disabled}
+              onChange={(e) => setInput(e.target.value)}
+            />
+          </label>
+          <label>
+            最大输出 Token
+            <input
+              aria-label="最大输出 Token"
+              inputMode="numeric"
+              value={output}
+              disabled={disabled}
+              onChange={(e) => setOutput(e.target.value)}
+            />
+          </label>
+          <label>
+            Tokenizer
+            <input
+              aria-label="Tokenizer"
+              value={tokenizer}
+              placeholder="供应商声明的编码（可选）"
+              disabled={disabled}
+              onChange={(e) => setTokenizer(e.target.value)}
+            />
+          </label>
+          <p>
+            来源：{capabilities.contextLimits?.capabilitySource ?? '模型注册表或保守默认值'}
+            。请按当前模型与网关的实际能力配置。
+          </p>
+          {error && <p role="alert">{error}</p>}
+          <button type="button" disabled={disabled} onClick={saveLimits}>
+            保存上下文能力
+          </button>
+          <button
+            type="button"
+            disabled={disabled || !capabilities.contextLimits}
+            onClick={() => onChange({ ...capabilities, contextLimits: undefined })}
+          >
+            恢复自动能力
+          </button>
+        </div>
+      )}
     </fieldset>
   );
 }

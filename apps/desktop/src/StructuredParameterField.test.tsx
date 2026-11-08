@@ -37,6 +37,38 @@ describe('official structured parameter form', () => {
     vi.resetAllMocks();
   });
   it.each([
+    ['cn.qwen.wan2-7-i2v', ['first_frame', 'last_frame']],
+    ['cn.qwen.wan3-0-video', ['reference_image', 'reference_image']],
+  ])('assigns dragged image groups to available purposes in %s', async (contractId, types) => {
+    vi.mocked(callWorker).mockResolvedValue({
+      assetId: 'image',
+      path: '/image.png',
+      contentType: 'image/png',
+    });
+    render(<Fixture contractId={String(contractId)} initialValue={[]} />);
+    fireEvent.drop(screen.getByLabelText('媒体'), {
+      dataTransfer: {
+        getData: () =>
+          JSON.stringify({
+            version: 1,
+            projectId: 'project',
+            assets: [
+              { id: 'first', kind: 'scene' },
+              { id: 'last', kind: 'scene' },
+            ],
+          }),
+      },
+    });
+    await waitFor(() => {
+      const values = JSON.parse(screen.getByTestId('value').textContent) as Array<{
+        type: string;
+        url: string;
+      }>;
+      expect(values.map((item) => item.type)).toEqual(types);
+      expect(values.map((item) => item.url)).toEqual(['asset://first', 'asset://last']);
+    });
+  });
+  it.each([
     'cn.qwen.wan3-0-video',
     'cn.qwen.wan2-7-i2v',
     'cn.bytedance.seedance2-0.video',
@@ -137,5 +169,16 @@ describe('official structured parameter form', () => {
     ]);
     fireEvent.click(screen.getByRole('button', { name: '删除媒体 1' }));
     expect(JSON.parse(screen.getByTestId('value').textContent ?? 'null')).toEqual([]);
+  });
+
+  it('fills required singleton roles from the Seedance item schema', () => {
+    render(<Fixture contractId="cn.bytedance.seedance2-0.video" />);
+    fireEvent.click(screen.getByRole('button', { name: '添加媒体' }));
+    fireEvent.change(screen.getByRole('combobox', { name: '媒体 1类型' }), {
+      target: { value: '3' },
+    });
+    expect(JSON.parse(screen.getByTestId('value').textContent ?? 'null')).toEqual([
+      { type: 'audio_url', role: 'reference_audio' },
+    ]);
   });
 });

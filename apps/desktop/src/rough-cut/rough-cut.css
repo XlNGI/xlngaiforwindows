@@ -1,0 +1,556 @@
+.rough-cut-holder {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.rough-cut-holder[hidden] {
+  display: none;
+}
+.rough-cut-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  background: var(--panel-bg);
+  color: var(--text-default);
+  container-type: inline-size;
+}
+.rough-cut-heading,
+.rough-cut-actions,
+.rough-cut-transport,
+.rough-cut-viewer-toolbar,
+.rough-cut-timeline-toolbar,
+.rough-cut-edit-tools,
+.rough-cut-properties-heading,
+.rough-cut-notice,
+.rough-cut-export-status,
+.rough-cut-timeline-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rough-cut-heading {
+  padding: 14px 16px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rough-cut-title {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.rough-cut-title > input {
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
+  color: var(--text-strong);
+  font-weight: 600;
+  font-size: 1.1rem;
+  background: transparent;
+  border: 1px solid transparent;
+}
+.rough-cut-title > input:focus {
+  border-color: var(--accent);
+}
+.rough-cut-title small,
+.rough-cut-properties small,
+.rough-cut-timeline small {
+  color: var(--text-muted);
+}
+.rough-cut-actions {
+  flex-wrap: wrap;
+}
+.rough-cut-actions select {
+  max-width: 150px;
+  min-width: 90px;
+}
+.rough-cut-workspace .button {
+  white-space: nowrap;
+  padding: 6px 9px;
+}
+.rough-cut-notice,
+.rough-cut-export-status {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  font-size: var(--ui-font-small);
+  background: var(--accent-panel);
+}
+.rough-cut-notice > span:first-child,
+.rough-cut-export-status > span:first-child {
+  flex: 1;
+  min-width: 140px;
+}
+.rough-cut-error {
+  color: var(--danger);
+}
+.rough-cut-export-location {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.rough-cut-export-path {
+  overflow-wrap: anywhere;
+  user-select: text;
+  color: var(--text-secondary);
+}
+.rough-cut-export-status progress {
+  width: 100px;
+  height: 5px;
+  accent-color: var(--accent);
+}
+.rough-cut-viewer-row {
+  display: flex;
+  flex: 1 0 310px;
+  min-height: 260px;
+  overflow: hidden;
+  padding: 8px 14px 12px;
+}
+.rough-cut-viewer {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+}
+.rough-cut-viewer-toolbar {
+  width: 100%;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  font-size: var(--ui-font-small);
+}
+.rough-cut-screen {
+  background: #101619;
+  position: relative;
+  width: 100%;
+  max-height: 480px;
+  min-height: 100px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 4px;
+  container-type: size;
+}
+.rough-cut-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(100cqw, calc(100cqh * var(--rough-cut-aspect)));
+  height: min(100cqh, calc(100cqw / var(--rough-cut-aspect)));
+}
+.rough-cut-frame > video,
+.rough-cut-frame > canvas {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.rough-cut-frame > .rough-cut-held-frame {
+  z-index: 2;
+}
+.rough-cut-preview-loading {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #101619cc;
+  color: #fff;
+  font-size: var(--ui-font-small);
+}
+.rough-cut-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #bdc7ce;
+  text-align: center;
+  padding: 18px;
+}
+.rough-cut-transport {
+  width: 100%;
+  margin-top: 8px;
+  font-size: var(--ui-font-small);
+  font-variant-numeric: tabular-nums;
+}
+.rough-cut-transport input {
+  flex: 1;
+  min-width: 30px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.rough-cut-properties {
+  flex: 0 0 245px;
+  width: 245px;
+  padding: 0 0 8px 14px;
+  margin-left: 14px;
+  border-left: 1px solid var(--border-subtle);
+  overflow: auto;
+  font-size: var(--ui-font-small);
+}
+.rough-cut-properties-heading {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.rough-cut-properties label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+.rough-cut-properties input,
+.rough-cut-properties select {
+  width: 100%;
+  min-width: 0;
+}
+.rough-cut-range-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+.rough-cut-checkbox,
+.rough-cut-properties .rough-cut-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.rough-cut-checkbox input {
+  width: auto;
+  accent-color: var(--accent);
+}
+.rough-cut-empty-property {
+  color: var(--text-muted);
+}
+.rough-cut-timeline {
+  flex: 0 0 auto;
+  margin: 4px 14px 10px;
+  border-top: 1px solid var(--border-muted);
+  background: var(--surface-bg);
+  min-height: 235px;
+}
+.rough-cut-timeline-toolbar {
+  padding: 8px 10px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rough-cut-edit-tools {
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.rough-cut-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ui-font-small);
+}
+.rough-cut-zoom input {
+  width: 64px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.rough-cut-timeline-scroll {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.rough-cut-tracks {
+  position: relative;
+  width: 100%;
+}
+.rough-cut-ruler {
+  position: relative;
+  margin-left: 72px;
+  height: 33px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.rough-cut-ruler > span {
+  position: absolute;
+  transform: translateX(-50%);
+}
+.rough-cut-ruler > span:first-child {
+  transform: none;
+}
+.rough-cut-ruler > span:last-child {
+  transform: translateX(-100%);
+}
+.rough-cut-track {
+  display: flex;
+  min-height: 102px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rough-cut-track-label {
+  flex: 0 0 72px;
+  width: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-right: 1px solid var(--border-subtle);
+  font-size: var(--ui-font-small);
+  color: var(--text-secondary);
+}
+.rough-cut-clip-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 0;
+  padding: 9px 0;
+}
+.rough-cut-clip {
+  position: relative;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 82px;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background: var(--accent-panel);
+  overflow: hidden;
+}
+.rough-cut-clip.selected {
+  border-color: var(--accent);
+}
+.rough-cut-clip.unavailable {
+  border-color: var(--danger);
+}
+.rough-cut-clip.drop-before {
+  box-shadow: inset 4px 0 var(--accent-soft);
+}
+.rough-cut-clip-select {
+  border: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  position: relative;
+  color: #f6f8fa;
+  background: #283c48;
+  cursor: pointer;
+}
+.rough-cut-clip-select video {
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+.rough-cut-clip-select > span {
+  display: block;
+  position: absolute;
+  inset: auto 0 0;
+  background: rgb(10 20 27 / 75%);
+  text-align: left;
+  padding: 4px 7px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rough-cut-clip-select small {
+  color: #d4dfe5;
+  display: block;
+  font-size: 11px;
+}
+.rough-cut-trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.rough-cut-trim-handle.left {
+  left: 0;
+}
+.rough-cut-trim-handle.right {
+  right: 0;
+}
+.rough-cut-clip.selected .rough-cut-trim-handle,
+.rough-cut-trim-handle:hover {
+  background: color-mix(in srgb, var(--accent) 65%, transparent);
+}
+.rough-cut-drop-placeholder {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  min-height: 80px;
+  text-align: center;
+  padding: 12px;
+}
+.rough-cut-audio-track {
+  min-height: 48px;
+}
+.rough-cut-audio-clip {
+  min-width: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 15%, var(--surface-bg));
+  border-radius: 3px;
+  padding: 3px 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.rough-cut-audio-clip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rough-cut-audio-clip.muted {
+  color: var(--text-muted);
+  background: var(--input-bg);
+}
+.rough-cut-playhead {
+  position: absolute;
+  top: 29px;
+  bottom: 0;
+  width: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.rough-cut-playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 9px;
+  height: 10px;
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+}
+.rough-cut-timeline-footer {
+  justify-content: space-between;
+  padding: 7px 10px;
+  gap: 6px;
+}
+.rough-cut-timeline-footer small {
+  font-size: 11px;
+}
+.rough-cut-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 35%);
+}
+.rough-cut-dialog {
+  width: min(480px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  box-shadow: 0 12px 48px var(--overlay-shadow);
+  padding: 18px;
+}
+.rough-cut-dialog p {
+  color: var(--text-secondary);
+  font-size: var(--ui-font-small);
+}
+.rough-cut-episode-field {
+  display: grid;
+  gap: 7px;
+  margin: 14px 0;
+}
+.rough-cut-episode-field select,
+.rough-cut-episode-field input {
+  width: 100%;
+  min-height: 36px;
+}
+.rough-cut-dialog > .rough-cut-checkbox {
+  margin: 14px 0;
+}
+.rough-cut-timeline.is-drag-over {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--panel-bg) 90%, var(--accent) 10%);
+}
+.rough-cut-drop-hint {
+  color: var(--accent);
+  font-size: 12px;
+}
+.rough-cut-workspace.is-asset-drag-over .rough-cut-frame {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.rough-cut-scene-options {
+  display: grid;
+  gap: 12px;
+  max-height: 45vh;
+  overflow: auto;
+  margin: 18px 0;
+}
+.asset-rough-cut-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 10px;
+}
+.asset-rough-cut-actions > button {
+  flex: 1;
+  justify-content: center;
+  white-space: nowrap;
+}
+@container (max-width: 650px) {
+  .rough-cut-viewer-row.properties-open {
+    position: relative;
+  }
+  .rough-cut-properties {
+    position: absolute;
+    inset: 42px 14px 12px auto;
+    z-index: 2;
+    width: min(280px, calc(100% - 28px));
+    padding: 12px;
+    margin: 0;
+    border: 1px solid var(--border-default);
+    background: var(--panel-bg);
+    border-radius: 5px;
+    box-shadow: 0 6px 24px var(--overlay-shadow);
+  }
+  .rough-cut-heading {
+    padding: 10px;
+  }
+  .rough-cut-actions {
+    gap: 5px;
+  }
+  .rough-cut-viewer-row {
+    padding-left: 8px;
+    padding-right: 8px;
+    flex-basis: 270px;
+  }
+  .rough-cut-timeline {
+    margin-left: 8px;
+    margin-right: 8px;
+  }
+  .rough-cut-timeline-footer {
+    flex-wrap: wrap;
+  }
+}

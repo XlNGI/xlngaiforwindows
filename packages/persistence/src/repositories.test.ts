@@ -542,34 +542,16 @@ describe('repositories', () => {
         kind: 'note',
         title: 'Synopsis',
         scopeType: 'project',
-        currentVersionId: 'published-version',
+        currentVersionId: 'draft-version',
         createdAt: 'now',
         updatedAt: 'now',
       },
       {
-        id: 'published-version',
-        documentId: 'document',
-        version: 1,
-        contentMarkdown: '# Published',
-        state: 'published',
-        createdAt: 'now',
-      },
-    );
-    const publishedDocument = repositories.documents.get('document')!;
-    repositories.documents.saveVersion(
-      {
-        ...publishedDocument,
-        currentVersionId: 'draft-version',
-        title: 'Synopsis draft',
-        updatedAt: 'later',
-      },
-      {
         id: 'draft-version',
         documentId: 'document',
-        version: 2,
+        version: 1,
         contentMarkdown: '# Draft',
         state: 'draft',
-        baseVersionId: 'published-version',
         authorType: 'agent',
         sourceTaskId: 'task',
         sourceMessageId: 'assistant',
@@ -579,12 +561,11 @@ describe('repositories', () => {
     );
     expect(repositories.documents.get('document')).toMatchObject({
       currentVersionId: 'draft-version',
-      publishedVersionId: 'published-version',
-      rowVersion: 1,
+      rowVersion: 0,
     });
     expect(repositories.documents.getVersion('draft-version')).toMatchObject({
       state: 'draft',
-      baseVersionId: 'published-version',
+      baseVersionId: undefined,
       authorType: 'agent',
       sourceTaskId: 'task',
     });
@@ -620,23 +601,31 @@ describe('repositories', () => {
     expect(
       repositories.documents.updateVersionState('draft-version', 'published', 1, 'later'),
     ).toBe(true);
-    expect(
-      repositories.documents.updatePublishedVersion('document', 'draft-version', 1, 'later'),
-    ).toBe(true);
     repositories.documentPublications.append({
       id: 'publication',
       projectId: 'project',
       documentId: 'document',
       documentVersionId: 'draft-version',
-      previousVersionId: 'published-version',
-      publicationNo: 2,
+      publicationNo: 1,
       reviewId: 'review',
       taskId: 'task',
       publishedByType: 'user',
       publishedAt: 'later',
     });
-    expect(repositories.documentPublications.listByDocument('document')).toMatchObject([
-      { id: 'publication', documentVersionId: 'draft-version', publicationNo: 2 },
+    expect(
+      repositories.documents.updatePublishedVersion('document', 'draft-version', 0, 'later'),
+    ).toBe(true);
+    expect(repositories.documents.get('document')).toMatchObject({
+      currentVersionId: 'draft-version',
+      publishedVersionId: 'draft-version',
+      rowVersion: 1,
+    });
+    expect(repositories.documentPublications.listByDocument('document')).toEqual([
+      expect.objectContaining({
+        id: 'publication',
+        documentVersionId: 'draft-version',
+        publicationNo: 1,
+      }),
     ]);
     repositories.documentWorkflowAudits.append({
       id: 'audit-publication',
@@ -647,11 +636,10 @@ describe('repositories', () => {
       actorId: 'local-user',
       documentId: 'document',
       documentVersionId: 'draft-version',
-      sourceVersionId: 'published-version',
       reviewId: 'review',
       publicationId: 'publication',
       taskId: 'task',
-      metadataJson: '{"previousVersionId":"published-version"}',
+      metadataJson: '{}',
       createdAt: 'later',
     });
     expect(repositories.documentWorkflowAudits.listByProject('project', 1)).toMatchObject([
@@ -663,7 +651,7 @@ describe('repositories', () => {
       },
     ]);
     expect(repositories.documentWorkflowAudits.listByDocument('document')).toMatchObject([
-      { id: 'audit-publication', sourceVersionId: 'published-version' },
+      { id: 'audit-publication', publicationId: 'publication' },
     ]);
     expect(() =>
       database

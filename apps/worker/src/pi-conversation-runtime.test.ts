@@ -13,6 +13,7 @@ import {
   PiConversationRuntime,
   type AssistantTextAccumulator,
 } from './pi-conversation-runtime.js';
+import { AgentTaskContinuationRequired } from './agent-provider-tool-gateway.js';
 import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js';
 import type { DomainToolGateway, PiToolIdentity } from './domain-tool-gateway.js';
 
@@ -67,6 +68,7 @@ function fakeProviderExecutor() {
     executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>(),
     confirmTool: vi.fn<AgentProviderToolExecutor['confirmTool']>(),
     selectMedia: vi.fn<AgentProviderToolExecutor['selectMedia']>(),
+    advanceTextTurn: undefined as AgentProviderToolExecutor['advanceTextTurn'],
     startProviderStep: vi.fn<AgentProviderToolExecutor['startProviderStep']>(),
     completeProviderStep: vi.fn<AgentProviderToolExecutor['completeProviderStep']>(),
     terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
@@ -140,7 +142,6 @@ class FakePlanService {
 
 function fakeGateway(plans: FakePlanService): DomainToolGateway {
   return {
-    assertRepairBudget() {},
     tools(grants: ConversationTaskToolGrant[]) {
       return grants.map((item) => ({
         name: item.tool.name,
@@ -164,8 +165,251 @@ function fakeGateway(plans: FakePlanService): DomainToolGateway {
 }
 
 describe('PiConversationRuntime', () => {
+  it('continues an unfinished task in the same generation and preserves the continuation input', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage('I saved the first page; the task is not done.', {
+        responseId: 'unfinished-page-one',
+      }),
+      fauxAssistantMessage('All requested pages are complete.', {
+        responseId: 'finished-all-pages',
+      }),
+    ]);
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('scene.structure.stage', 'stage')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const providerTools = fakeProviderExecutor();
+    const advanceTextTurn = vi.fn<NonNullable<AgentProviderToolExecutor['advanceTextTurn']>>(() => [
+      providerDefinition('scene.structure.stage', 'stage-next'),
+    ]);
+    providerTools.advanceTextTurn = advanceTextTurn;
+    providerTools.completeProviderStep
+      .mockImplementationOnce(() => {
+        throw new AgentTaskContinuationRequired(
+          'Resume the saved stage and finish every remaining page.',
+        );
+      })
+      .mockImplementationOnce(() => undefined);
+    const systemPrompts: string[] = [];
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: new FakePlanService() as never,
+      providerTools,
+      streamFn: (model, context, options) => {
+        systemPrompts.push(context.systemPrompt ?? '');
+        return faux.streamSimple(model, context, options);
+      },
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...identity,
+      identity,
+      taskId: 'task',
+      mode: 'document',
+      prompt: 'Create a large scene plan',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(faux.state.callCount).toBe(2);
+    expect(systemPrompts).toHaveLength(2);
+    for (const systemPrompt of systemPrompts) {
+      expect(systemPrompt).toContain('内部续执行及修复指令不改变语言');
+      expect(systemPrompt).toContain('真实用户明确指定的输出语言优先');
+    }
+    expect(advanceTextTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ finishReason: 'supplement' }),
+    );
+    const continuations = generation.configureAgentTools.mock.calls.map(
+      ([, , continuation]) => continuation as LlmGenerationRuntimeRequest['continuation'],
+    );
+    expect(
+      continuations.some(
+        (continuation) =>
+          continuation?.protocol === 'openai-responses' &&
+          continuation.userMessages?.includes(
+            'Resume the saved stage and finish every remaining page.',
+          ),
+      ),
+    ).toBe(true);
+    expect(generation.complete).toHaveBeenCalledTimes(1);
+    expect(generation.failNative).not.toHaveBeenCalled();
+  });
+
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'preserves reference images in the Native continuation and Chat history (%s)',
+    async (protocol) => {
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxToolCall(
+              'tools.load',
+              { names: ['shot.continuity.read', 'shot.continuity.save'] },
+              { id: 'load-continuity' },
+            ),
+          ],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
+        fauxAssistantMessage(
+          [fauxToolCall('shot.continuity.read', { shotId: 'shot' }, { id: 'frames' })],
+          { stopReason: 'toolUse', responseId: 'frame-response' },
+        ),
+        fauxAssistantMessage(
+          [fauxToolCall('shot.continuity.save', { shotId: 'shot' }, { id: 'save' })],
+          { stopReason: 'toolUse', responseId: 'save-response' },
+        ),
+        fauxAssistantMessage('已保存参考图图片提示词。', { responseId: 'done' }),
+      ]);
+      const tools = [
+        providerDefinition('shot.continuity.read', 'read'),
+        providerDefinition('shot.continuity.save', 'save'),
+      ];
+      const generation = {
+        runtime: vi.fn(() => ({ ...runtimeRequest, protocol, tools })),
+        configureAgentTools: vi.fn(),
+        observe: vi.fn(),
+        complete: vi.fn(),
+        failNative: vi.fn(),
+        cancel: vi.fn(),
+        get: vi.fn(),
+      };
+      const providerTools = fakeProviderExecutor();
+      providerTools.executeTools.mockImplementation(async (params) => {
+        const frame = params.calls[0]!.name === 'shot.continuity.read';
+        return {
+          tools,
+          continuation: {
+            protocol: 'openai-responses',
+            previousResponseId: params.providerResponseId,
+            outputs: [
+              {
+                callId: params.calls[0]!.id,
+                output: frame
+                  ? '{"visualInputs":[{"assetId":"frame"}]}'
+                  : '{"status":"shot_reference_prompt_saved"}',
+                ...(frame ? { images: [{ mimeType: 'image/jpeg', data: '/9j/pixels' }] } : {}),
+              },
+            ],
+          },
+        };
+      });
+      const runtime = new PiConversationRuntime({
+        generation: generation as never,
+        plans: new FakePlanService() as never,
+        providerTools,
+        streamFn: faux.streamSimple,
+        createGateway: () => {
+          throw new Error('No planning');
+        },
+      });
+      await runtime.start({
+        ...identity,
+        identity,
+        taskId: 'task',
+        mode: 'document',
+        prompt: '协助生成中间画面参考图',
+      });
+      await runtime.wait(identity.generationId);
+      expect(generation.failNative).not.toHaveBeenCalled();
+      const continuations = generation.configureAgentTools.mock.calls.map(
+        ([, , continuation]) => continuation as LlmGenerationRuntimeRequest['continuation'],
+      );
+      expect(
+        continuations.some((continuation) =>
+          continuation?.outputs.some((output) => output.images?.[0]?.data === '/9j/pixels'),
+        ),
+      ).toBe(true);
+      if (protocol === 'openai-chat-completions')
+        expect(
+          continuations.some(
+            (continuation) =>
+              continuation?.protocol === protocol &&
+              continuation.history?.some((turn) =>
+                turn.outputs.some((output) => output.images?.[0]?.data === '/9j/pixels'),
+              ),
+          ),
+        ).toBe(true);
+    },
+  );
+
+  it('stops a repeated incomplete response when the Agent makes no tool progress', async () => {
+    const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+    faux.setResponses([
+      fauxAssistantMessage('Still working.', { responseId: 'stalled-one' }),
+      fauxAssistantMessage(
+        [fauxToolCall('library.read', { sourceId: 'already-read' }, { id: 'read-again' })],
+        { stopReason: 'toolUse', responseId: 'stalled-read' },
+      ),
+      fauxAssistantMessage('Still working.', { responseId: 'stalled-two' }),
+    ]);
+    const generation = {
+      runtime: vi.fn(() => ({
+        ...runtimeRequest,
+        tools: [providerDefinition('library.read', 'read')],
+      })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const providerTools = fakeProviderExecutor();
+    providerTools.advanceTextTurn = vi.fn<
+      NonNullable<AgentProviderToolExecutor['advanceTextTurn']>
+    >(() => [providerDefinition('library.read', 'read-next')]);
+    vi.mocked(providerTools.executeTools).mockResolvedValue({
+      continuation: {
+        protocol: 'openai-responses',
+        previousResponseId: 'stalled-read',
+        outputs: [{ callId: 'read-again', output: '{"status":"read"}' }],
+      },
+      tools: [providerDefinition('library.read', 'read-next')],
+    });
+    providerTools.completeProviderStep.mockImplementation(() => {
+      throw new AgentTaskContinuationRequired('The task still has unfinished stages.');
+    });
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: new FakePlanService() as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...identity,
+      identity,
+      taskId: 'task',
+      mode: 'document',
+      prompt: 'Create a large scene plan',
+    });
+    await runtime.wait(identity.generationId);
+
+    expect(faux.state.callCount).toBe(3);
+    expect(providerTools.executeTools).toHaveBeenCalledTimes(1);
+    expect(generation.complete).not.toHaveBeenCalled();
+    expect(generation.failNative).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.stringContaining('AGENT_TASK_CONTINUATION_STALLED'),
+      }),
+    );
+  });
+
   it.each([true, false])(
-    'counts actual requests before sending; final stop=%s',
+    'continues beyond the former request cap; final stop=%s',
     async (finalStop) => {
       const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
       faux.setResponses([
@@ -210,13 +454,11 @@ describe('PiConversationRuntime', () => {
         prompt: 'Continue',
       });
       await runtime.wait(identity.generationId);
-      expect(faux.state.callCount).toBe(24);
-      expect(turns).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
-      expect(generation.complete).toHaveBeenCalledTimes(finalStop ? 1 : 0);
-      if (!finalStop)
-        expect(generation.failNative).toHaveBeenCalledWith(
-          expect.objectContaining({ error: expect.stringContaining('24-turn limit') }),
-        );
+      const expectedRequests = finalStop ? 24 : 25;
+      expect(faux.state.callCount).toBe(expectedRequests);
+      expect(turns).toEqual(Array.from({ length: expectedRequests }, (_, i) => i + 1));
+      expect(generation.complete).toHaveBeenCalledTimes(1);
+      expect(generation.failNative).not.toHaveBeenCalled();
     },
   );
 
@@ -293,8 +535,10 @@ describe('PiConversationRuntime', () => {
     expect(generation.failNative).not.toHaveBeenCalled();
     expect(observed).toContain('waiting_review');
     expect(faux.state.callCount).toBe(7);
-    expect(systemPrompt).toContain('[FROZEN PROJECT CONTEXT]');
-    expect(systemPrompt).toContain('selected chapter context');
+    expect(systemPrompt).not.toContain('[FROZEN PROJECT CONTEXT]');
+    expect(systemPrompt).not.toContain('selected chapter context');
+    expect(systemPrompt).toContain('面向用户的可见进展说明');
+    expect(systemPrompt).toContain('已完成 / 依据 / 未完成项 / 下一步');
   });
 
   it('answers ordinary questions through Pi without entering short-drama planning', async () => {
@@ -347,11 +591,65 @@ describe('PiConversationRuntime', () => {
     expect(systemPrompt).toContain('除非用户明确要求翻译或输出英文');
   });
 
+  it('publishes visible text while the Provider is still streaming', async () => {
+    const faux = createFauxCore({
+      api: 'pi-test',
+      provider: 'pi-test',
+      tokensPerSecond: 20,
+      tokenSize: { min: 1, max: 1 },
+    });
+    const reply = '正在检查项目资料并确认下一步。';
+    faux.setResponses([
+      fauxAssistantMessage([
+        { type: 'thinking', thinking: 'private' },
+        { type: 'text', text: reply },
+      ]),
+    ]);
+    const plans = new FakePlanService();
+    const providerTools = fakeProviderExecutor();
+    const generation = {
+      runtime: vi.fn(() => ({ ...runtimeRequest, tools: [] })),
+      configureAgentTools: vi.fn(),
+      observe: vi.fn<(params: { content: string }) => void>(),
+      complete: vi.fn(),
+      failNative: vi.fn(),
+      cancel: vi.fn(),
+      get: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime({
+      generation: generation as never,
+      plans: plans as never,
+      providerTools,
+      streamFn: faux.streamSimple,
+      createGateway: () => fakeGateway(plans),
+    });
+
+    await runtime.start({
+      taskId: 'task',
+      projectId: identity.projectId,
+      projectSessionId: identity.projectSessionId,
+      conversationId: identity.conversationId,
+      mode: 'document',
+      identity,
+      prompt: '请检查项目资料',
+    });
+    await vi.waitFor(() => expect(generation.observe).toHaveBeenCalled());
+    expect(generation.observe.mock.calls[0]![0].content.length).toBeLessThan(reply.length);
+    expect(generation.complete).not.toHaveBeenCalled();
+    await runtime.wait(identity.generationId);
+    expect(generation.observe.mock.calls.at(-1)?.[0].content).toBe(reply);
+    expect(
+      generation.observe.mock.calls.every(([params]) => !params.content.includes('private')),
+    ).toBe(true);
+    expect(generation.complete).toHaveBeenCalledWith(expect.objectContaining({ content: reply }));
+  });
+
   it('lets the model pick image and video tools in document mode without a forced plan', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
     faux.setResponses([
       fauxAssistantMessage(
         [
+          { type: 'text', text: '我先准备图片，再根据结果制作视频。' },
           fauxToolCall(
             'tools.load',
             { names: ['media.image.prepare', 'media.video.prepare'] },
@@ -366,6 +664,7 @@ describe('PiConversationRuntime', () => {
       ),
       fauxAssistantMessage(
         [
+          { type: 'text', text: '图片草稿已准备好，接着制作视频。' },
           fauxToolCall(
             'media.video.prepare',
             { prompt: 'Animate the dragon' },
@@ -374,7 +673,7 @@ describe('PiConversationRuntime', () => {
         ],
         { stopReason: 'toolUse', responseId: 'response-video' },
       ),
-      fauxAssistantMessage('The dragon image and video drafts are ready.'),
+      fauxAssistantMessage('图片和视频草稿均已准备完成。'),
     ]);
     const plans = new FakePlanService();
     const planOnlyRound = vi.spyOn(plans, 'planOnlyRound');
@@ -404,7 +703,7 @@ describe('PiConversationRuntime', () => {
         ],
       })),
       configureAgentTools: vi.fn(),
-      observe: vi.fn(),
+      observe: vi.fn<(params: { content: string }) => void>(),
       complete: vi.fn(),
       failNative: vi.fn(),
       cancel: vi.fn(),
@@ -436,8 +735,30 @@ describe('PiConversationRuntime', () => {
       vi.mocked(providerTools.executeTools).mock.calls.map(([params]) => params.calls[0]?.name),
     ).toEqual(['media.image.prepare', 'media.video.prepare']);
     expect(providerTools.startProviderStep).toHaveBeenCalled();
+    expect(generation.observe.mock.calls[0]?.[0].content).toBe(
+      '我先准备图片，再根据结果制作视频。',
+    );
+    const middle = '我先准备图片，再根据结果制作视频。\n\n图片草稿已准备好，接着制作视频。';
+    const middleIndex = generation.observe.mock.calls.findIndex(
+      ([params]) => params.content === middle,
+    );
+    expect(middleIndex).toBeGreaterThan(0);
+    expect(generation.observe.mock.invocationCallOrder[0]).toBeLessThan(
+      providerTools.executeTools.mock.invocationCallOrder[0]!,
+    );
+    expect(generation.observe.mock.invocationCallOrder[middleIndex]).toBeGreaterThan(
+      providerTools.executeTools.mock.invocationCallOrder[0]!,
+    );
+    expect(generation.observe.mock.invocationCallOrder[middleIndex]).toBeLessThan(
+      providerTools.executeTools.mock.invocationCallOrder[1]!,
+    );
+    expect(generation.observe.mock.calls.at(-1)?.[0].content).toBe(
+      `${middle}\n\n图片和视频草稿均已准备完成。`,
+    );
     expect(generation.complete).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'The dragon image and video drafts are ready.' }),
+      expect.objectContaining({
+        content: `${middle}\n\n图片和视频草稿均已准备完成。`,
+      }),
     );
   });
 
@@ -538,6 +859,13 @@ describe('PiConversationRuntime', () => {
     expect(systemPrompts[0]).toContain('A saved draft may still have readiness issues');
     expect(systemPrompts[0]).not.toContain('directory receives entities only after user approval');
     expect(systemPrompts[0]).not.toContain('plan only');
+    expect(systemPrompts.length).toBeGreaterThan(1);
+    for (const systemPrompt of systemPrompts) {
+      expect(systemPrompt.trimEnd()).toMatch(
+        /# 本轮可见回复语言\n[\s\S]*真实用户明确指定的输出语言优先[\s\S]*不输出私有推演。$/,
+      );
+      expect(systemPrompt).toContain('内部续执行、工具修复和恢复消息不属于真实用户消息');
+    }
     expect(plans.completed).toBe(false);
     expect(providerTools.executeTools.mock.calls.map(([params]) => params.calls[0]?.id)).toEqual([
       'search',
@@ -555,6 +883,81 @@ describe('PiConversationRuntime', () => {
     expect(configured[1]).toEqual(expect.arrayContaining(definitions.map((tool) => tool.name)));
     expect(generation.complete).toHaveBeenCalled();
   });
+
+  it.each(['multiple writes', 'mixed read/write', 'loader with write'])(
+    'blocks the entire %s response and permits a corrected next response',
+    async (kind) => {
+      const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
+      const second =
+        kind === 'multiple writes'
+          ? 'document.create_draft'
+          : kind === 'mixed read/write'
+            ? 'library.search'
+            : 'tools.load';
+      faux.setResponses([
+        fauxAssistantMessage(
+          [fauxToolCall('tools.load', { names: ['document.create_draft'] }, { id: 'load' })],
+          { stopReason: 'toolUse', responseId: 'load-response' },
+        ),
+        fauxAssistantMessage(
+          [
+            fauxToolCall('document.create_draft', { title: 'Blocked' }, { id: 'blocked-write' }),
+            fauxToolCall(second, { title: 'Blocked' }, { id: 'blocked-other' }),
+          ],
+          { stopReason: 'toolUse', responseId: 'blocked-response' },
+        ),
+        fauxAssistantMessage(
+          [fauxToolCall('document.create_draft', { title: 'Corrected' }, { id: 'corrected' })],
+          { stopReason: 'toolUse', responseId: 'corrected-response' },
+        ),
+        fauxAssistantMessage('Saved.'),
+      ]);
+      const providerTools = fakeProviderExecutor();
+      const definitions = [providerDefinition('document.create_draft', 'handle')];
+      providerTools.executeTools.mockImplementation(async (params) => ({
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: params.providerResponseId,
+          outputs: params.calls.map((call) => ({ callId: call.id, output: '{"status":"saved"}' })),
+        },
+        tools: definitions,
+      }));
+      const generation = {
+        runtime: vi.fn(() => ({ ...runtimeRequest, tools: definitions })),
+        configureAgentTools: vi.fn(),
+        observe: vi.fn(),
+        complete: vi.fn(),
+        failNative: vi.fn(),
+        cancel: vi.fn(),
+        get: vi.fn(),
+      };
+      const contexts: string[] = [];
+      const runtime = new PiConversationRuntime({
+        generation: generation as never,
+        providerTools,
+        plans: new FakePlanService() as never,
+        createGateway: () => fakeGateway(new FakePlanService()),
+        streamFn: (model, context, options) => {
+          contexts.push(JSON.stringify(context.messages));
+          return faux.streamSimple(model, context, options);
+        },
+      });
+      await runtime.start({
+        taskId: 'task',
+        ...identity,
+        identity,
+        mode: 'document',
+        prompt: 'Save.',
+      });
+      await runtime.wait(identity.generationId);
+      expect(generation.failNative).not.toHaveBeenCalled();
+      expect(providerTools.executeTools.mock.calls.map(([params]) => params.calls[0]?.id)).toEqual([
+        'corrected',
+      ]);
+      expect(contexts.some((context) => context.includes('No calls were executed'))).toBe(true);
+      expect(generation.complete).toHaveBeenCalledOnce();
+    },
+  );
 
   it('executes a document tool and refreshes Worker authorizations for the next Pi turn', async () => {
     const faux = createFauxCore({ api: 'pi-test', provider: 'pi-test' });
@@ -800,7 +1203,7 @@ describe('PiConversationRuntime', () => {
     expect(generation.failNative).not.toHaveBeenCalled();
     expect(generation.complete).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('I will archive the draft.'),
+        content: 'I will archive the draft.\n\nThe archive request was approved.',
       }),
     );
   });

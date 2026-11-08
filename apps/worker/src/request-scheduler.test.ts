@@ -2,6 +2,70 @@ import { describe, expect, it } from 'vitest';
 import { RequestScheduler } from './request-scheduler.js';
 
 describe('RequestScheduler', () => {
+  it('closes admission, rejects queued writes and drains already running work', async () => {
+    const scheduler = new RequestScheduler();
+    let release!: () => void;
+    const first = scheduler.run(
+      'chat.message.save',
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    let wrote = false;
+    const queued = scheduler.run('chat.message.save', () => {
+      wrote = true;
+      return Promise.resolve();
+    });
+    const rejected = expect(queued).rejects.toThrow('request was not executed');
+    scheduler.closeAdmission();
+    await expect(scheduler.run('health', () => Promise.resolve())).rejects.toThrow(
+      'admission is closed',
+    );
+    let drained = false;
+    const draining = scheduler.drain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    release();
+    await Promise.all([first, rejected, draining]);
+    expect(wrote).toBe(false);
+    expect(drained).toBe(true);
+  });
+  it('keeps reads and local edits available during role voice reference generation', async () => {
+    const scheduler = new RequestScheduler();
+    let release!: () => void;
+    const generation = scheduler.run(
+      'characterVoiceReference.generate',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    await expect(
+      scheduler.run('characterVoiceReference.list', () => Promise.resolve([])),
+    ).resolves.toEqual([]);
+    await expect(scheduler.run('chat.message.save', () => Promise.resolve('saved'))).resolves.toBe(
+      'saved',
+    );
+    release();
+    await generation;
+  });
+
+  it('keeps reads and local edits available during standalone audio sample generation', async () => {
+    const scheduler = new RequestScheduler();
+    let release!: () => void;
+    const generation = scheduler.run(
+      'audio.sample.confirm',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    await expect(scheduler.run('audio.list', () => Promise.resolve([]))).resolves.toEqual([]);
+    await expect(scheduler.run('chat.message.save', () => Promise.resolve('saved'))).resolves.toBe(
+      'saved',
+    );
+    release();
+    await generation;
+  });
+
   it('keeps local writes, cancellation, and task inspection available during media submission', async () => {
     const scheduler = new RequestScheduler();
     let release!: () => void;

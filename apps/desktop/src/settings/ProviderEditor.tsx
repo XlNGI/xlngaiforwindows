@@ -1,11 +1,38 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { KeyRound, Server, Sparkles, X } from 'lucide-react';
 import { wanVideoWorkspaceId } from '@ai-video/contracts';
+import uniCompApiLogo from '../brand-logo.png';
+import alibabaCloudLogo from '../assets/provider-logos/alibaba-cloud.svg';
+import deepseekLogo from '../assets/provider-logos/deepseek.svg';
+import kimiLogo from '../assets/provider-logos/kimi.svg';
+import minimaxLogo from '../assets/provider-logos/minimax.svg';
+import openAiLogo from '../assets/provider-logos/openai.svg';
+import syncLogo from '../assets/provider-logos/sync.png';
+import viduLogo from '../assets/provider-logos/vidu.svg';
+import volcengineLogo from '../assets/provider-logos/volcengine.png';
+import zhipuLogo from '../assets/provider-logos/zhipu.png';
 import type {
   ProviderDefinitionInfo,
   ProviderProfileCreateParams,
   ProviderProfileInfo,
 } from '@ai-video/contracts';
+
+const OFFICIAL_PROVIDER_LOGOS: Record<string, string> = {
+  'wan-video': alibabaCloudLogo,
+  'seedance-video': volcengineLogo,
+  'minimax-video': minimaxLogo,
+  'minimax-speech': minimaxLogo,
+  sync: syncLogo,
+  openai: openAiLogo,
+  deepseek: deepseekLogo,
+  zhipu: zhipuLogo,
+  qwen: alibabaCloudLogo,
+  kimi: kimiLogo,
+  unicompapi: uniCompApiLogo,
+  vidu: viduLogo,
+};
+
+const MONOCHROME_PROVIDER_LOGOS = new Set(['openai', 'kimi', 'unicompapi']);
 
 interface ProviderEditorProps {
   profile?: ProviderProfileInfo;
@@ -25,22 +52,28 @@ export function ProviderEditor({
   onCancel,
   onSubmit,
 }: ProviderEditorProps) {
+  const orderedDefinitions = useMemo(() => {
+    const featured = definitions.find((definition) => definition.id === 'unicompapi');
+    return featured
+      ? [featured, ...definitions.filter((definition) => definition.id !== featured.id)]
+      : definitions;
+  }, [definitions]);
   const initialDefinition =
-    definitions.find(
+    orderedDefinitions.find(
       (definition) =>
         definition.providerType === profile?.providerType &&
         definition.protocol === profile.protocol &&
         (definition.baseUrl === profile.baseUrl ||
           (definition.providerType === 'wan-video' &&
             Boolean(wanVideoWorkspaceId(profile.baseUrl)))),
-    ) ?? definitions[0];
+    ) ?? orderedDefinitions[0];
   const [accessType, setAccessType] = useState<'official' | 'custom'>(
     profile?.accessType ?? 'official',
   );
   const [definitionId, setDefinitionId] = useState(initialDefinition?.id ?? '');
   const [name, setName] = useState(profile?.name ?? initialDefinition?.name ?? '');
   const [protocol, setProtocol] = useState(
-    profile?.accessType === 'custom' ? profile.protocol : 'openai-responses',
+    profile?.accessType === 'custom' ? profile.protocol : 'openai-chat-completions',
   );
   const [baseUrl, setBaseUrl] = useState(profile?.accessType === 'custom' ? profile.baseUrl : '');
   const [secret, setSecret] = useState('');
@@ -49,25 +82,26 @@ export function ProviderEditor({
 
   useEffect(() => {
     const definition =
-      definitions.find(
+      orderedDefinitions.find(
         (candidate) =>
           candidate.providerType === profile?.providerType &&
           candidate.protocol === profile?.protocol &&
           (candidate.baseUrl === profile?.baseUrl ||
             (candidate.providerType === 'wan-video' &&
               Boolean(wanVideoWorkspaceId(profile?.baseUrl ?? '')))),
-      ) ?? definitions[0];
+      ) ?? orderedDefinitions[0];
     setAccessType(profile?.accessType ?? 'official');
     setDefinitionId(definition?.id ?? '');
     setName(profile?.name ?? definition?.name ?? '');
-    setProtocol(profile?.accessType === 'custom' ? profile.protocol : 'openai-responses');
+    setProtocol(profile?.accessType === 'custom' ? profile.protocol : 'openai-chat-completions');
     setBaseUrl(profile?.accessType === 'custom' ? profile.baseUrl : '');
     setSecret('');
     setWorkspaceId(wanVideoWorkspaceId(profile?.baseUrl ?? '') ?? '');
-  }, [profile?.id, definitions]);
+  }, [profile?.id, orderedDefinitions]);
 
   const selectedDefinition =
-    definitions.find((definition) => definition.id === definitionId) ?? definitions[0];
+    orderedDefinitions.find((definition) => definition.id === definitionId) ??
+    orderedDefinitions[0];
   const wanOfficial = accessType === 'official' && selectedDefinition?.providerType === 'wan-video';
   const officialBaseUrl = wanOfficial
     ? `https://${workspaceId.trim()}.cn-beijing.maas.aliyuncs.com`
@@ -94,7 +128,7 @@ export function ProviderEditor({
           }
         : {
             name: name.trim(),
-            category: 'llm',
+            category: 'multi',
             providerType: profile?.accessType === 'custom' ? profile.providerType : 'custom',
             accessType: 'custom',
             protocol,
@@ -143,32 +177,63 @@ export function ProviderEditor({
 
       {accessType === 'official' ? (
         <div className="official-provider-grid">
-          {definitions.map((definition) => (
-            <button
-              key={definition.id}
-              type="button"
-              className={definition.id === selectedDefinition?.id ? 'selected' : ''}
-              title={definition.name}
-              onClick={() => {
-                setDefinitionId(definition.id);
-                if (!profile) setName(definition.name);
-              }}
-            >
-              <span className="provider-logo">{definition.name.slice(0, 2)}</span>
-              <strong>{definition.name}</strong>
-              <small title={definition.protocol}>{definition.protocol}</small>
-            </button>
-          ))}
+          {orderedDefinitions.map((definition) => {
+            const logo = OFFICIAL_PROVIDER_LOGOS[definition.providerType];
+            const recommended = definition.id === 'unicompapi';
+            return (
+              <button
+                key={definition.id}
+                type="button"
+                className={[
+                  definition.id === selectedDefinition?.id ? 'selected' : '',
+                  recommended ? 'recommended' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                title={definition.name}
+                onClick={() => {
+                  setDefinitionId(definition.id);
+                  if (!profile) setName(definition.name);
+                }}
+              >
+                <span className="provider-logo">
+                  {logo ? (
+                    <img
+                      className={
+                        MONOCHROME_PROVIDER_LOGOS.has(definition.providerType)
+                          ? 'provider-brand-mark provider-brand-mark-mono'
+                          : 'provider-brand-mark'
+                      }
+                      src={logo}
+                      alt=""
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    definition.name.slice(0, 2)
+                  )}
+                </span>
+                <span className="official-provider-title">
+                  <strong>{definition.name}</strong>
+                  {recommended && <span className="provider-recommendation-tag">推荐</span>}
+                </span>
+              </button>
+            );
+          })}
         </div>
-      ) : (
+      ) : profile ? (
         <label>
-          兼容协议
-          <select value={protocol} onChange={(event) => setProtocol(event.target.value)}>
+          文本接口协议
+          <select
+            aria-label="文本接口协议"
+            value={protocol}
+            onChange={(event) => setProtocol(event.target.value)}
+          >
             <option value="openai-responses">OpenAI Responses</option>
             <option value="openai-chat-completions">OpenAI-compatible Chat Completions</option>
           </select>
+          <small>仅影响文本模型请求；图片和视频按各自的接口适配。</small>
         </label>
-      )}
+      ) : null}
 
       <label>
         连接名称

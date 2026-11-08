@@ -61,6 +61,64 @@ const update = (shot: ShotInfo, seconds = 5) => ({
   rationale: '动作和反应所需时长',
 });
 describe('shot timing patch', () => {
+  it('persists timing evidence, versions beat-only edits and clears stale evidence in legacy timing patches', async () => {
+    const f = await setup();
+    const shot = f.content.saveShot({
+      sceneId: f.scene.id,
+      title: '拿笔',
+      prompt: '自然拿起钢笔，同时说话。',
+    });
+    const beats = [
+      { kind: 'action', startSeconds: 0, endSeconds: 2, description: '自然拿起钢笔' },
+      { kind: 'dialogue', startSeconds: 0, endSeconds: 4, description: '说完原台词' },
+    ];
+    const request = { shots: [{ ...update(shot, 4), beats }] };
+    expect(f.tools.execute('scene.update_shot_timings', request, f.identity)).toMatchObject({
+      changedCount: 1,
+    });
+    const saved = f.content.listShots(f.scene.id)[0]!;
+    expect(saved.authoringIR?.timing?.beats).toEqual(beats);
+    expect(saved.prompt).toBe(shot.prompt);
+    expect(f.production.read({ kind: 'scene', id: f.scene.id }).timeline?.[0]).toMatchObject({
+      startSeconds: 0,
+      endSeconds: 4,
+      timing: { beats },
+    });
+    const adapter = getAdapterCatalog().adapters.find(
+      (a) =>
+        a.contractId === 'cn.qwen.wan3-0-video' &&
+        a.capability === 'TEXT_TO_VIDEO' &&
+        a.provider === 'wan-video',
+    )!;
+    const compiled = f.production.compile({
+      target: { kind: 'shot', id: shot.id },
+      adapterKey: adapter.key,
+    });
+    expect(compiled.authoringIR?.timing?.estimatedDurationSeconds).toBe(4);
+    expect(compiled.parameters.prompt).toBe(shot.prompt);
+    expect(f.tools.execute('scene.update_shot_timings', request, f.identity)).toMatchObject({
+      changedCount: 1,
+    });
+    expect(f.content.listShots(f.scene.id)).toEqual([saved]);
+    expect(() =>
+      f.service.update({ shots: [{ ...update(saved, 15), beats }] }, f.identity),
+    ).toThrow(/without gaps/);
+    expect(f.content.listShots(f.scene.id)).toEqual([saved]);
+    const revised = beats.map((beat) => ({
+      ...beat,
+      description: `${beat.description}，保持自然节奏`,
+    }));
+    expect(
+      f.service.update({ shots: [{ ...update(saved, 4), beats: revised }] }, f.identity),
+    ).toMatchObject({ changedCount: 1 });
+    const latest = f.content.listShots(f.scene.id)[0]!;
+    expect(latest.rowVersion).toBe(saved.rowVersion + 1);
+    expect(latest.authoringIR?.timing?.beats).toEqual(revised);
+    expect(f.service.update({ shots: [update(latest, 4)] }, f.identity)).toMatchObject({
+      changedCount: 1,
+    });
+    expect(f.content.listShots(f.scene.id)[0]!.authoringIR?.timing).not.toHaveProperty('beats');
+  });
   it('saves 15 existing shots after four structure reads, preserving every prompt, binding and open field', async () => {
     const f = await setup();
     const actor = f.content.saveDocument({
@@ -143,7 +201,10 @@ describe('shot timing patch', () => {
       paidRequests: 0,
     });
     unifiedAgentToolRegistry.serializeResult(result);
-    expect(f.tools.execute('scene.update_shot_timings', args, f.identity)).toEqual(result);
+    expect(f.tools.execute('scene.update_shot_timings', args, f.identity)).toMatchObject({
+      ...result,
+      execution: { ...(result.execution as object), replayed: true },
+    });
     expect(f.content.listScenes()).toEqual(before);
     const saved = scenes.flatMap((scene) => f.content.listShots(scene.id));
     expect(saved).toHaveLength(15);

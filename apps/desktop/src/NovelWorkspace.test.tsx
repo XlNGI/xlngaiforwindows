@@ -78,6 +78,11 @@ function mockWorker(handler: (method: WorkerMethod, params?: unknown) => unknown
   );
 }
 
+async function editMarkdown(label: string): Promise<HTMLElement> {
+  fireEvent.click(await screen.findByRole('region', { name: `${label}预览` }));
+  return screen.getByRole('textbox', { name: label });
+}
+
 describe('NovelWorkspace', () => {
   it('uses one chapter selection for production and export and protects unsaved edits', async () => {
     const second = {
@@ -96,11 +101,21 @@ describe('NovelWorkspace', () => {
     });
     const generate = vi.fn().mockResolvedValue(undefined);
     render(<NovelWorkspace projectId="project-1" writable onGenerateScript={generate} />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
+    expect(screen.queryByText('小说 → 短剧资料')).not.toBeInTheDocument();
+    expect(screen.queryByText(/当前章节：/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /一键生成剧本/ })).toHaveClass(
+      'production-generate-button',
+    );
+    const commandRow = screen.getByRole('group', { name: '小说操作' });
+    expect(commandRow).toContainElement(screen.getByRole('button', { name: /一键生成剧本/ }));
+    expect(commandRow).toContainElement(screen.getByRole('button', { name: '导入小说' }));
+    expect(commandRow).toContainElement(screen.getByRole('button', { name: /导出 Markdown/ }));
+    expect(commandRow).toContainElement(screen.getByRole('button', { name: '新建草稿' }));
     expect(screen.getAllByRole('checkbox', { name: /^选择 / })).toHaveLength(2);
     fireEvent.click(screen.getByLabelText('选择 Chapter 1 Second'));
     expect(screen.getByText('已选 1 章')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /一键生成短剧资料/ }));
+    fireEvent.click(screen.getByRole('button', { name: /一键生成剧本/ }));
     expect(generate).toHaveBeenCalledExactlyOnceWith([second]);
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     expect(screen.getByLabelText('导出范围')).toHaveValue('selection');
@@ -115,9 +130,9 @@ describe('NovelWorkspace', () => {
     await screen.findByText('导出完成，共 1 章。');
     expect(screen.getByLabelText('选择 Chapter 1 Second')).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: '取消全选' }));
-    fireEvent.change(screen.getByLabelText('章节内容'), { target: { value: '未保存' } });
-    fireEvent.click(screen.getByRole('button', { name: /一键生成短剧资料/ }));
-    expect(screen.getByText('请先保存当前章节，再生成短剧资料。')).toBeInTheDocument();
+    fireEvent.change(await editMarkdown('章节内容'), { target: { value: '未保存' } });
+    fireEvent.click(screen.getByRole('button', { name: /一键生成剧本/ }));
+    expect(screen.getByText('请先保存当前章节，再生成剧本。')).toBeInTheDocument();
     expect(generate).toHaveBeenCalledTimes(1);
   });
   it('loads the chapter tree, opens a chapter, and saves a user draft with CAS', async () => {
@@ -131,10 +146,14 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    expect(await screen.findByText(/Chapter 1 Opening/)).toBeInTheDocument();
-    fireEvent.change(await screen.findByLabelText('章节内容'), {
+    expect(
+      await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' }),
+    ).toBeInTheDocument();
+    const editor = await editMarkdown('章节内容');
+    fireEvent.change(editor, {
       target: { value: 'Updated' },
     });
+    fireEvent.blur(editor);
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
@@ -147,6 +166,7 @@ describe('NovelWorkspace', () => {
         }),
       ),
     );
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent('Updated');
   });
 
   it('lists and edits novel reference documents separately from chapters', async () => {
@@ -192,13 +212,26 @@ describe('NovelWorkspace', () => {
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: /都市小说大纲/ }));
-    expect(await screen.findByDisplayValue('原小说大纲')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('小说资料内容'), { target: { value: '更新后的大纲' } });
+    expect(await screen.findByRole('region', { name: '小说资料内容预览' })).toHaveTextContent(
+      '原小说大纲',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '编辑小说资料标题 都市小说大纲' }));
+    fireEvent.change(screen.getByLabelText('小说资料标题'), {
+      target: { value: '城市故事大纲' },
+    });
+    fireEvent.keyDown(screen.getByLabelText('小说资料标题'), { key: 'Enter' });
+    fireEvent.change(await editMarkdown('小说资料内容'), {
+      target: { value: '更新后的大纲' },
+    });
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'document.draft.save',
-        expect.objectContaining({ documentId: reference.id, contentMarkdown: '更新后的大纲' }),
+        expect.objectContaining({
+          documentId: reference.id,
+          title: '城市故事大纲',
+          contentMarkdown: '更新后的大纲',
+        }),
       ),
     );
   });
@@ -215,16 +248,90 @@ describe('NovelWorkspace', () => {
       return {};
     });
     const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByDisplayValue('Draft');
+    expect(await screen.findByRole('region', { name: '章节内容预览' })).toHaveTextContent('Draft');
 
     rerender(
       <NovelWorkspace projectId="project-1" writable focusChapterId="chapter-1" refreshToken={1} />,
     );
 
-    expect(await screen.findByDisplayValue('Agent latest draft')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: '章节内容预览' })).toHaveTextContent(
+      'Agent latest draft',
+    );
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
     ).toHaveLength(2);
+  });
+
+  it('selects and deletes novel references and chapters together and restores a reference', async () => {
+    const reference = {
+      ...documentDetail(),
+      id: 'reference',
+      kind: 'outline' as const,
+      title: '小说大纲',
+      domainScope: 'novel' as const,
+    };
+    let chapterArchived = false;
+    let referenceArchived = false;
+    mockWorker((method, params) => {
+      if (method === 'novel.chapter.list') return chapterArchived ? [] : [chapter];
+      if (method === 'novel.volume.list') return [];
+      if (method === 'document.get')
+        return (params as { documentId: string }).documentId === reference.id
+          ? reference
+          : documentDetail();
+      if (method === 'novel.chapter.archive') {
+        chapterArchived = true;
+        return { ...chapter, lifecycleStatus: 'archived' };
+      }
+      if (method === 'document.archive') {
+        referenceArchived = true;
+        return { ...reference, lifecycleStatus: 'archived', rowVersion: 1 };
+      }
+      if (method === 'document.archived.list')
+        return referenceArchived
+          ? [{ ...reference, lifecycleStatus: 'archived', rowVersion: 1 }]
+          : [];
+      if (method === 'document.unarchive') {
+        referenceArchived = false;
+        return reference;
+      }
+      return {};
+    });
+    const changed = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NovelWorkspace
+        projectId="project-1"
+        writable
+        referenceDocuments={[reference]}
+        onReferencesChanged={changed}
+      />,
+    );
+    await screen.findByRole('region', { name: '章节内容预览' });
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    expect(screen.getByLabelText('选择小说资料 小说大纲')).toBeChecked();
+    expect(screen.getByLabelText('选择 Chapter 1 Opening')).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '删除所选' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    await screen.findByText('已删除 2 个草稿，可在已归档或已删除列表中恢复。');
+    expect(callWorker).toHaveBeenCalledWith('novel.chapter.archive', {
+      chapterId: chapter.id,
+      expectedRowVersion: 0,
+      reason: 'user_archive',
+    });
+    expect(callWorker).toHaveBeenCalledWith('document.archive', {
+      documentId: reference.id,
+      expectedDocumentRowVersion: 0,
+    });
+    expect(screen.queryByRole('button', { name: '打开小说资料 小说大纲' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('显示已删除'));
+    fireEvent.click(await screen.findByRole('button', { name: '恢复小说资料 小说大纲' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('document.unarchive', {
+        documentId: reference.id,
+        expectedDocumentRowVersion: 1,
+      }),
+    );
+    expect(await screen.findByRole('region', { name: '小说资料内容预览' })).toBeInTheDocument();
   });
 
   it('refreshes chapter metadata without discarding local title or body edits', async () => {
@@ -246,27 +353,37 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByDisplayValue('Draft');
-    fireEvent.change(screen.getByLabelText('章节标题'), { target: { value: '本地未保存标题' } });
-    fireEvent.change(screen.getByLabelText('章节内容'), { target: { value: '本地未保存正文' } });
+    await screen.findByRole('region', { name: '章节内容预览' });
+    fireEvent.click(screen.getByRole('button', { name: '编辑章节标题 Chapter 1 Opening' }));
+    fireEvent.change(screen.getByLabelText('章节标题'), {
+      target: { value: '本地未保存标题' },
+    });
+    fireEvent.keyDown(screen.getByLabelText('章节标题'), { key: 'Enter' });
+    const editor = await editMarkdown('章节内容');
+    fireEvent.change(editor, { target: { value: '本地未保存正文' } });
+    fireEvent.blur(editor);
     updated = true;
     fireEvent(
       window,
       new CustomEvent('novel-metadata-updated', { detail: { projectId: 'other-project' } }),
     );
-    expect(screen.getByLabelText('选择 Chapter 1 Opening')).toBeInTheDocument();
+    expect(screen.getByLabelText('选择 Chapter 1 本地未保存标题')).toBeInTheDocument();
     fireEvent(
       window,
       new CustomEvent('novel-metadata-updated', { detail: { projectId: 'project-1' } }),
     );
-    await screen.findByLabelText('选择 第 1 章 新章名');
+    await screen.findByLabelText('选择 第 1 章 本地未保存标题');
     await waitFor(() =>
       expect(
         vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
       ).toHaveLength(2),
     );
-    expect(screen.getByLabelText('章节标题')).toHaveValue('本地未保存标题');
-    expect(screen.getByLabelText('章节内容')).toHaveValue('本地未保存正文');
+    expect(
+      screen.getByRole('button', { name: '编辑章节标题 第 1 章 本地未保存标题' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent(
+      '本地未保存正文',
+    );
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
@@ -296,8 +413,10 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByDisplayValue('Draft');
-    fireEvent.change(screen.getByLabelText('章节内容'), { target: { value: '本地正文' } });
+    await screen.findByRole('region', { name: '章节内容预览' });
+    const editor = await editMarkdown('章节内容');
+    fireEvent.change(editor, { target: { value: '本地正文' } });
+    fireEvent.blur(editor);
     updated = true;
     fireEvent(
       window,
@@ -309,7 +428,7 @@ describe('NovelWorkspace', () => {
         vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.get'),
       ).toHaveLength(2),
     );
-    expect(screen.getByLabelText('章节内容')).toHaveValue('本地正文');
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent('本地正文');
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
@@ -327,7 +446,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: /^编辑章节标题 Chapter 1/ });
     expect(screen.queryByRole('button', { name: '生成本章正文' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /生成短剧内容/ })).not.toBeInTheDocument();
     expect(screen.getByLabelText('选择 Chapter 1 Opening')).not.toBeChecked();
@@ -342,7 +461,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     expect(screen.getByLabelText('包含草稿')).not.toBeChecked();
     expect(callWorker).not.toHaveBeenCalledWith('novel.export.start', expect.anything());
@@ -369,7 +488,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     const toggle = screen.getByRole('button', { name: /导出 Markdown/ });
     fireEvent.click(toggle);
     fireEvent.change(screen.getByLabelText('导出范围'), { target: { value: 'selection' } });
@@ -396,7 +515,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByLabelText('选择 Chapter 1 Second'));
     expect(screen.getByText('已选 1 章')).toBeInTheDocument();
     expect(
@@ -419,10 +538,11 @@ describe('NovelWorkspace', () => {
   });
 
   it('selects only active search results, preserves hidden selections and supports clearing all', async () => {
-    const second = { ...chapter, id: 'chapter-2', title: 'Second' };
+    const second = { ...chapter, id: 'chapter-2', documentId: 'document-2', title: 'Second' };
     const archived = {
       ...chapter,
       id: 'chapter-3',
+      documentId: 'document-3',
       title: 'Archived',
       lifecycleStatus: 'archived' as const,
     };
@@ -434,7 +554,7 @@ describe('NovelWorkspace', () => {
     });
     const generate = vi.fn().mockResolvedValue(undefined);
     render(<NovelWorkspace projectId="project-1" writable onGenerateScript={generate} />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     expect(screen.getByLabelText('选择 Chapter 1 Archived')).toBeDisabled();
     fireEvent.change(screen.getByLabelText('搜索小说草稿'), { target: { value: 'Second' } });
     fireEvent.click(screen.getByRole('button', { name: '全选搜索结果' }));
@@ -445,7 +565,7 @@ describe('NovelWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '全选' }));
     expect(screen.getByText('已选 2 章')).toBeInTheDocument();
     expect(screen.getByLabelText('选择 Chapter 1 Archived')).not.toBeChecked();
-    fireEvent.click(screen.getByRole('button', { name: /一键生成短剧资料/ }));
+    fireEvent.click(screen.getByRole('button', { name: /一键生成剧本/ }));
     expect(generate).toHaveBeenCalledExactlyOnceWith([chapter, second]);
     fireEvent.click(screen.getByRole('button', { name: '取消全选' }));
     expect(screen.getByText('已选 0 章')).toBeInTheDocument();
@@ -470,7 +590,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('导出失败：所选范围没有已发布章节');
@@ -491,7 +611,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     expect(screen.getByLabelText('导出范围')).toHaveValue('work');
     fireEvent.click(screen.getByLabelText('选择 Chapter 1 Opening'));
@@ -514,7 +634,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: '全选' }));
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
@@ -525,7 +645,7 @@ describe('NovelWorkspace', () => {
     ).toHaveLength(1);
     expect(screen.getByLabelText('包含草稿')).toBeDisabled();
     rerender(<NovelWorkspace projectId="project-2" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     expect(screen.getByText('已选 0 章')).toBeInTheDocument();
     await act(async () => {
       completeExport(exportJob);
@@ -546,7 +666,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: /导出 Markdown/ }));
     fireEvent.click(screen.getByRole('button', { name: '开始导出' }));
     expect(await screen.findByRole('status')).toHaveTextContent('另有 1 章没有已发布版本，未导出');
@@ -565,7 +685,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     const { rerender } = render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByLabelText('章节内容');
+    await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: '全选' }));
     expect(screen.getByText('已选 1 章')).toBeInTheDocument();
     archived = true;
@@ -702,7 +822,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: /^编辑章节标题 Chapter 1/ });
     fireEvent.click(screen.getByRole('button', { name: /新建草稿/ }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('novel.chapter.save', { title: '未命名草稿' }),
@@ -710,7 +830,7 @@ describe('NovelWorkspace', () => {
     expect(await screen.findByText(/已新建小说草稿/)).toBeInTheDocument();
   });
 
-  it('filters drafts and soft-deletes the selected draft with confirmation', async () => {
+  it('filters drafts and archives a chapter from its directory row with confirmation', async () => {
     const secondChapter = {
       ...chapter,
       id: 'chapter-2',
@@ -728,12 +848,12 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
     fireEvent.change(screen.getByLabelText('搜索小说草稿'), { target: { value: 'Storm' } });
     expect(screen.queryByText(/Chapter 1 Opening/)).not.toBeInTheDocument();
     expect(screen.getByText(/Chapter 2 Storm/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('搜索小说草稿'), { target: { value: '' } });
-    fireEvent.click(screen.getByRole('button', { name: /删除草稿/ }));
+    fireEvent.click(screen.getByRole('button', { name: '归档章节 Chapter 1 Opening' }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('novel.chapter.archive', {
         chapterId: 'chapter-1',
@@ -754,7 +874,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable onOpenDocument={onOpenDocument} />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
     fireEvent.click(screen.getByRole('button', { name: /在文档工作区打开/ }));
     expect(onOpenDocument).toHaveBeenCalledWith('document-1');
   });
@@ -785,7 +905,7 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
     fireEvent.click(screen.getByRole('button', { name: /检查小说连续性/ }));
     expect(await screen.findByText('当前草稿还没有 RAG 切片。')).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('novel.context.consistencyReport', {});
@@ -800,13 +920,15 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.change(await screen.findByLabelText('章节内容'), {
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
+    const editor = await editMarkdown('章节内容');
+    fireEvent.change(editor, {
       target: { value: 'Local edits' },
     });
+    fireEvent.blur(editor);
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await waitFor(() => expect(screen.getByText(/已载入服务器版本/)).toBeInTheDocument());
-    expect(screen.getByDisplayValue('Local edits')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent('Local edits');
     expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: 'document-1' });
   });
 
@@ -824,21 +946,28 @@ describe('NovelWorkspace', () => {
       return {};
     });
     render(<NovelWorkspace projectId="project-1" writable />);
-    await screen.findByText(/Chapter 1 Opening/);
-    fireEvent.change(await screen.findByLabelText('章节内容'), {
+    await screen.findByRole('button', { name: '编辑章节标题 Chapter 1 Opening' });
+    const editor = await editMarkdown('章节内容');
+    fireEvent.change(editor, {
       target: { value: 'Local edits' },
     });
+    fireEvent.blur(editor);
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /使用服务器版本/ }));
-    expect(screen.getByDisplayValue('Server version')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent(
+      'Server version',
+    );
 
-    fireEvent.change(screen.getByLabelText('章节内容'), {
+    fireEvent.change(await editMarkdown('章节内容'), {
       target: { value: 'Local edits again' },
     });
+    fireEvent.blur(screen.getByLabelText('章节内容'));
     fireEvent.click(screen.getByRole('button', { name: /保存并切片/ }));
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: /保留本地修改/ }));
-    expect(screen.getByDisplayValue('Local edits again')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '章节内容预览' })).toHaveTextContent(
+      'Local edits again',
+    );
   });
 });

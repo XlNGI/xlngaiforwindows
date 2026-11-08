@@ -5,9 +5,12 @@ import {
   remapPromptReferences,
   type PromptReference,
 } from './prompt-references';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { imageAssetId, ParameterImagePreview } from './ParameterImagePreview';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { ImageListParameterField } from './ImageListParameterField';
+import { StructuredAssetDrop } from './assets/StructuredAssetDrop';
 import { useProductionAuthoring } from './use-production-authoring';
+import { ProductionTimingDetails } from './ProductionTimingDetails';
+import { ProductionInputRoleDetails } from './ProductionInputRoleDetails';
 import { ProjectProductionDefaults } from './ProjectProductionDefaults';
 import { ParameterHelp } from './ParameterHelp';
 import type { ProductionSegment } from '@ai-video/contracts';
@@ -23,20 +26,16 @@ import { open as openAudioDialog } from '@tauri-apps/plugin-dialog';
 import {
   CircleAlert,
   CircleCheck,
-  ChevronDown,
-  ChevronUp,
   Eye,
   FolderOpen,
-  ImagePlus,
   Pause,
   Play,
-  Plus,
   Save,
   Settings2,
-  Trash2,
   WandSparkles,
   Square,
   Video,
+  Volume2,
 } from 'lucide-react';
 import type {
   AdapterCatalogResult,
@@ -58,13 +57,20 @@ import type {
   SceneInfo,
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
+import type { ProductionCapability } from './use-production-state';
 import { projectWorker } from './worker-scope';
 import {
   adapterBindsCatalogModel,
-  isWanMediaAdapter,
+  addProductionAudioBindings,
+  addProductionImageBindings,
+  productionAudioImageBindings,
   productionAudioSupport,
   productionImageSelectionsFromBindings,
+  productionImagesFromParameters,
+  productionFrameInputConflict,
+  resolveProductionFrameInputs,
   seedProductionInputs,
+  sceneReferenceImageParameters,
 } from '@ai-video/contracts';
 import {
   generationErrorFeedback,
@@ -73,29 +79,32 @@ import {
   videoProgressGuidance,
 } from './generation-feedback';
 import { MediaSubmissionConfirmationDialog } from './media-confirmation';
-import {
-  hasLocalImageParameters,
-  isLocalImageDataUrl,
-  MAX_LOCAL_IMAGE_TOTAL_BYTES,
-  readLocalImageFile,
-  totalLocalImageBytes,
-  type LocalImageSelection,
-} from './local-image-input';
+import { hasLocalImageParameters } from './local-image-input';
+import { useDubbingMedia } from './dubbing/media';
 
 interface ProductionPanelProps {
   onRequestSubmissionApproval?: (
     confirmation: MediaSubmissionConfirmationRequest,
   ) => Promise<boolean>;
   expanded?: boolean;
-  capability?: GenerationCapability;
+  capability?: ProductionCapability;
   projectId?: string;
   projectSessionId?: string;
   /** Identity of the loaded project view, including reopening the same project. */
   projectViewEpoch?: object;
+  /** Identity of the latest explicit fill action from a source workspace. */
+  seedEventKey?: object;
   shotId?: string;
   sceneId?: string;
   sourceDocumentId?: string;
   seedPrompt?: string;
+  seedParameters?: AdapterParameters;
+  audioReference?: {
+    characterDocumentId: string;
+    expectedVoiceVersionId: string;
+    providerProfileId: string;
+    model: string;
+  };
   seedImages?: string[];
   seedReferenceBindings?: SceneMaterialBindingInfo[];
   seedImageBindings?: import('@ai-video/contracts').ProductionImageSelection[];
@@ -110,6 +119,10 @@ interface ProductionPanelProps {
   onOpenProviderSettings?: () => void;
   providerSettingsRevision?: number;
 }
+
+type MediaProductionPanelProps = Omit<ProductionPanelProps, 'capability'> & {
+  capability?: GenerationCapability;
+};
 
 const PROVIDER_PROFILE_STORAGE_KEY = 'ai-video.production-provider-profiles';
 
@@ -167,6 +180,19 @@ function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
   );
 }
 
+function productionPromptTexts(parameters: AdapterParameters): string[] {
+  const texts = typeof parameters.prompt === 'string' ? [parameters.prompt] : [];
+  if (Array.isArray(parameters.content))
+    for (const item of parameters.content)
+      if (item && typeof item === 'object' && !Array.isArray(item) && item.type === 'text')
+        texts.push(typeof item.text === 'string' ? item.text : '');
+  return texts;
+}
+
+function hasImageDescriptions(parameters: AdapterParameters): boolean {
+  return productionPromptTexts(parameters).some((text) => text.includes('【输入图片说明】'));
+}
+
 /**
  * Contracts are schema-first. Legacy descriptors may still provide an
  * explicit uiSchema, but a descriptor without one gets a deterministic form
@@ -174,26 +200,37 @@ function defaultParameters(adapter: AdapterDescriptor): AdapterParameters {
  * React component.
  */
 function schemaDerivedFields(adapter: AdapterDescriptor): AdapterUiField[] {
-  const explicit = adapter.uiSchema?.fields ?? [];
-  if (explicit.length > 0) return [...explicit].sort((a, b) => a.order - b.order);
-  return Object.entries(adapter.parameterSchema.properties).map(([key, property], index) => {
-    const control: AdapterUiField['control'] =
-      property.type === 'object' || (property.type === 'array' && property.items?.type !== 'string')
-        ? 'structured'
-        : property.type === 'boolean'
-          ? 'toggle'
-          : property.type === 'integer'
-            ? 'number'
-            : property.enum?.length
-              ? 'select'
-              : property.type === 'array' && property.items?.format === 'uri'
-                ? 'url-list'
-                : property.title.length > 40 ||
-                    /prompt|message|description|content|text/iu.test(key)
-                  ? 'textarea'
-                  : 'text';
-    return { key, control, group: 'basic', order: index * 10 };
-  });
+  const configured = adapter.uiSchema?.fields ?? [];
+  const explicit = configured.filter((field) => !field.hidden);
+  const explicitKeys = new Set(configured.map((field) => field.key));
+  const nextOrder = explicit.reduce((maximum, field) => Math.max(maximum, field.order), 0);
+  const derived = Object.entries(adapter.parameterSchema.properties)
+    .filter(([key, property]) => !explicitKeys.has(key) && property.const === undefined)
+    .map(([key, property], index) => {
+      const control: AdapterUiField['control'] =
+        property.type === 'object' ||
+        (property.type === 'array' && property.items?.type !== 'string')
+          ? 'structured'
+          : property.type === 'boolean'
+            ? 'toggle'
+            : property.type === 'integer'
+              ? 'number'
+              : property.enum?.length
+                ? 'select'
+                : property.type === 'array' && property.items?.format === 'uri'
+                  ? 'url-list'
+                  : (property.title ?? '').length > 40 ||
+                      /prompt|message|description|content|text/iu.test(key)
+                    ? 'textarea'
+                    : 'text';
+      return {
+        key,
+        control,
+        group: explicit.length > 0 ? ('advanced' as const) : ('basic' as const),
+        order: nextOrder + (index + 1) * 10,
+      };
+    });
+  return [...explicit, ...derived].sort((a, b) => a.order - b.order);
 }
 
 function normalizeErrorPath(path: string): string {
@@ -251,16 +288,40 @@ function formatVideoCost(cost: VideoGenerationMetadataInfo['cost'] | undefined):
 const SUBMISSION_UNKNOWN_MESSAGE =
   '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。';
 
-export function ProductionPanel({
+function AudioSamplePreview({ projectId, audio }: { projectId: string; audio: AudioFileInfo }) {
+  const source = useDubbingMedia(projectId, audio.id, true);
+  return (
+    <li className="production-audio-sample">
+      <div className="production-audio-sample-heading">
+        <strong>{audio.name}</strong>
+        <span>
+          {(audio.durationMs / 1000).toFixed(1)} 秒 · {(audio.sizeBytes / 1024).toFixed(0)} KB
+        </span>
+      </div>
+      {source?.src ? (
+        <audio controls preload="metadata" src={source.src} aria-label={`试听${audio.name}`} />
+      ) : (
+        <span role={source?.error ? 'status' : undefined}>
+          {source?.error ?? '正在读取音频样本…'}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function MediaProductionPanel({
   expanded = false,
   capability,
   projectId,
   projectSessionId,
   projectViewEpoch,
+  seedEventKey,
   shotId,
   sceneId,
   sourceDocumentId,
   seedPrompt,
+  seedParameters,
+  audioReference,
   seedImages,
   seedReferenceBindings,
   seedImageBindings,
@@ -274,23 +335,66 @@ export function ProductionPanel({
   onOpenProviderSettings,
   providerSettingsRevision = 0,
   onRequestSubmissionApproval,
-}: ProductionPanelProps) {
+}: MediaProductionPanelProps) {
   const callWorker = projectWorker();
+  const [adapter, setAdapter] = useState<AdapterDescriptor>();
+  const [parameters, setParameters] = useState<AdapterParameters>({});
+  const parametersRef = useRef(parameters);
+  parametersRef.current = parameters;
+  const preserveImageDescriptionEditsRef = useRef(false);
   // Bindings are the saved reference source; normalize them once so the form,
   // compiler and final submission all receive the same ordered image list.
   const effectiveSeedImageBindings = useMemo(
     () => seedImageBindings ?? productionImageSelectionsFromBindings(seedReferenceBindings),
     [seedImageBindings, seedReferenceBindings],
   );
+  const bindSeedImagePrompt = useCallback(
+    (descriptor: AdapterDescriptor, current: AdapterParameters): AdapterParameters =>
+      effectiveSeedImageBindings
+        ? addProductionImageBindings(descriptor, current, effectiveSeedImageBindings)
+        : current,
+    [effectiveSeedImageBindings],
+  );
+  const setAuthoringParameters = useCallback(
+    (update: (current: AdapterParameters) => AdapterParameters) =>
+      setParameters((current) => {
+        const next = update(current);
+        return adapter && !preserveImageDescriptionEditsRef.current
+          ? bindSeedImagePrompt(adapter, next)
+          : next;
+      }),
+    [adapter, bindSeedImagePrompt],
+  );
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
+  const effectiveCapability = capability ?? catalog?.capabilities[0]?.key ?? 'TEXT_TO_IMAGE';
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [models, setModels] = useState<ProviderModelInfo[]>([]);
   const [adapterKey, setAdapterKey] = useState('');
   const [catalogModelId, setCatalogModelId] = useState('');
-  const [adapter, setAdapter] = useState<AdapterDescriptor>();
-  const [parameters, setParameters] = useState<AdapterParameters>({});
   const [formReady, setFormReady] = useState(false);
+  const [seedError, setSeedError] = useState('');
+  const actionBlockReasonId = useId();
+  const frameInputConflict = adapter
+    ? productionFrameInputConflict(adapter, parameters, effectiveSeedImageBindings)
+    : undefined;
+  const frameConflictRef = useRef<HTMLElement>(null);
+  const hasFrameInputConflict = Boolean(frameInputConflict);
+  useEffect(() => {
+    if (hasFrameInputConflict) frameConflictRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [hasFrameInputConflict, seedEventKey]);
+  const currentImages = adapter ? productionImagesFromParameters(adapter, parameters) : [];
+  const displayedCapability =
+    adapter &&
+    isVideoCapability(adapter.capability) &&
+    (adapter.parameterSchema.properties.media || adapter.parameterSchema.properties.content) &&
+    currentImages.length
+      ? currentImages.some((image) => image.role === 'first-frame' || image.role === 'last-frame')
+        ? currentImages.some((image) => image.role === 'last-frame')
+          ? 'START_END_TO_VIDEO'
+          : 'IMAGE_TO_VIDEO'
+        : 'REFERENCE_TO_VIDEO'
+      : effectiveCapability;
   const [draftOverrides, setDraftOverrides] = useState<AdapterParameters>();
   const [segmentShotIds, setSegmentShotIds] = useState<string[]>();
   const [sceneSegments, setSceneSegments] = useState<ProductionSegment[]>([]);
@@ -310,15 +414,73 @@ export function ProductionPanel({
             : undefined,
     adapter,
     providerKey: `${selectedProfileId}:${catalogModelId}`,
-    ready: formReady && adapter?.key === adapterKey,
-    setParameters,
-    initialOverrides:
-      sourceDocumentId && preferredAssetKind === 'character' && seedPrompt
-        ? { ...draftOverrides, prompt: seedPrompt }
-        : draftOverrides,
+    ready:
+      formReady &&
+      !seedError &&
+      adapter?.key === adapterKey &&
+      adapter?.capability === effectiveCapability,
+    setParameters: setAuthoringParameters,
+    initialOverrides: seedPrompt
+      ? {
+          ...(preferredAssetKind === 'scene' && sourceDocumentId && adapter
+            ? sceneReferenceImageParameters(adapter, draftOverrides ?? {})
+            : draftOverrides),
+          prompt: seedPrompt,
+        }
+      : draftOverrides,
     shotIds: segmentShotIds,
     inputImages: effectiveSeedImageBindings,
   });
+  const seedEventKeyRef = useRef<object | undefined>(undefined);
+  useEffect(() => {
+    if (
+      !seedEventKey ||
+      !adapter ||
+      !formReady ||
+      adapter.key !== adapterKey ||
+      adapter.capability !== effectiveCapability ||
+      seedEventKeyRef.current === seedEventKey
+    )
+      return;
+    try {
+      const seeded = bindSeedImagePrompt(adapter, {
+        ...seedProductionInputs(
+          adapter,
+          parametersRef.current,
+          seedPrompt,
+          effectiveSeedImageBindings?.map((image) => ({
+            ...image,
+            url: `project-asset://${image.assetId}`,
+          })),
+        ),
+        ...(seedParameters ?? {}),
+      });
+      seedEventKeyRef.current = seedEventKey;
+      preserveImageDescriptionEditsRef.current = false;
+      productionAuthoring.refill();
+      setSeedError('');
+      for (const field of ['prompt', 'content', 'images', 'media'] as const)
+        if (seeded[field] !== parametersRef.current[field])
+          productionAuthoring.changed(field, seeded[field]);
+      for (const [field, value] of Object.entries(seedParameters ?? {}))
+        productionAuthoring.changed(field, value);
+      setParameters(seeded);
+    } catch (reason) {
+      setSeedError(errorMessage(reason, '制作表单填充失败'));
+    }
+  }, [
+    adapter,
+    adapterKey,
+    effectiveCapability,
+    formReady,
+    bindSeedImagePrompt,
+    effectiveSeedImageBindings,
+    productionAuthoring.changed,
+    productionAuthoring.refill,
+    seedEventKey,
+    seedParameters,
+    seedPrompt,
+  ]);
   useEffect(() => {
     setSegmentShotIds(undefined);
     setSceneSegments([]);
@@ -359,6 +521,41 @@ export function ProductionPanel({
 
   const [generationJobId, setGenerationJobId] = useState<string>();
   const [generationStatus, setGenerationStatus] = useState('');
+  const [audioSamples, setAudioSamples] = useState<AudioFileInfo[]>([]);
+  const [audioSamplesLoading, setAudioSamplesLoading] = useState(false);
+  const [audioSamplesError, setAudioSamplesError] = useState('');
+  useEffect(() => {
+    let active = true;
+    if (!projectId || effectiveCapability !== 'TEXT_TO_AUDIO') {
+      setAudioSamples([]);
+      setAudioSamplesLoading(false);
+      setAudioSamplesError('');
+      return () => {
+        active = false;
+      };
+    }
+    setAudioSamplesLoading(true);
+    setAudioSamplesError('');
+    void callWorker('audio.list', { kind: 'reference' })
+      .then((items) => {
+        if (active)
+          setAudioSamples(
+            items
+              .filter((item) => !item.deletedAt)
+              .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+              .slice(0, 12),
+          );
+      })
+      .catch((reason: unknown) => {
+        if (active) setAudioSamplesError(errorMessage(reason, '项目音频样本读取失败。'));
+      })
+      .finally(() => {
+        if (active) setAudioSamplesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [effectiveCapability, projectId, projectSessionId]);
   const [voiceReferences, setVoiceReferences] = useState<CharacterVoiceReferenceInfo[]>([]);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<string[]>([]);
   const restoredVoiceIds =
@@ -396,7 +593,7 @@ export function ProductionPanel({
     (notice) => notice.code.endsWith('_REVIEW') || notice.code === 'AUTHORING_REVIEW_NOTE',
   );
   const adaptationNotices = (productionAuthoring.result?.notices ?? []).filter(
-    (notice) => !promptReviewNotices.includes(notice),
+    (notice) => !promptReviewNotices.includes(notice) && notice.code !== 'MODEL_DURATION_PADDING',
   );
   const needsVoiceInput = true;
   const needsDialogueInput = true;
@@ -575,10 +772,6 @@ export function ProductionPanel({
   seedPromptRef.current = seedPrompt;
   const seedImagesRef = useRef(seedImages);
   seedImagesRef.current = seedImages;
-  const effectiveCapability =
-    catalog?.capabilities.some((item) => item.key === capability) === true
-      ? capability!
-      : (catalog?.capabilities[0]?.key ?? capability ?? 'TEXT_TO_IMAGE');
 
   useEffect(() => {
     if (preferredAssetKind) setAssetKind(preferredAssetKind);
@@ -587,11 +780,13 @@ export function ProductionPanel({
   useEffect(() => {
     if (!seedPrompt && seedImages === undefined) return;
     if (effectiveSeedImageBindings) return;
+    if (!adapter || adapter.key !== adapterKey || adapter.capability !== effectiveCapability)
+      return;
     setParameters((current) =>
       productionAuthoring.preserveEdits(
         usesStructuredVideoParameters(adapter)
           ? seedOfficialVideoParameters(
-              adapter!,
+              adapter,
               current,
               seedPrompt,
               seedImages ?? [],
@@ -610,6 +805,8 @@ export function ProductionPanel({
     effectiveSeedImageBindings,
     sourceDocumentId,
     adapter,
+    adapterKey,
+    effectiveCapability,
     productionAuthoring.preserveEdits,
   ]);
 
@@ -633,23 +830,41 @@ export function ProductionPanel({
     };
   }, [providerSettingsRevision]);
 
-  const eligibleProfiles = useMemo(
-    () =>
-      profiles.filter(
-        (profile) =>
-          ((profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
-            ['wan-video', 'seedance-video', 'minimax-video'].includes(profile.providerType) ||
-            (profile.providerType === 'unicompapi' &&
-              profile.protocol === 'openai-chat-completions')) &&
-          profile.enabled &&
-          profile.connectionStatus === 'ready' &&
-          (profile.category === 'multi' ||
-            (isVideoCapability(effectiveCapability)
-              ? profile.category === 'video'
-              : profile.category === 'image')),
-      ),
-    [effectiveCapability, profiles],
-  );
+  const eligibleProfiles = useMemo(() => {
+    const customMediaAdapterAvailable = catalog?.adapters.some(
+      (adapter) => adapter.provider === 'custom' && adapter.capability === effectiveCapability,
+    );
+    return profiles.filter((profile) => {
+      const customCompatibleProfile =
+        customMediaAdapterAvailable &&
+        profile.accessType === 'custom' &&
+        profile.providerType === 'custom' &&
+        (profile.category === 'llm' || profile.category === 'multi') &&
+        ['openai-responses', 'openai-chat-completions'].includes(profile.protocol);
+      const officialMediaProfile =
+        (profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
+        ['wan-video', 'seedance-video', 'minimax-video'].includes(profile.providerType) ||
+        (effectiveCapability === 'TEXT_TO_AUDIO' &&
+          profile.providerType === 'minimax-speech' &&
+          profile.protocol === 'minimax-speech') ||
+        (profile.providerType === 'unicompapi' && profile.protocol === 'openai-chat-completions');
+      return (
+        (!audioReference ||
+          (profile.id === audioReference.providerProfileId &&
+            profile.providerType === 'minimax-speech')) &&
+        (officialMediaProfile || customCompatibleProfile) &&
+        profile.enabled &&
+        profile.connectionStatus === 'ready' &&
+        (profile.category === 'multi' ||
+          customCompatibleProfile ||
+          (isVideoCapability(effectiveCapability)
+            ? profile.category === 'video'
+            : effectiveCapability === 'TEXT_TO_AUDIO'
+              ? false
+              : profile.category === 'image'))
+      );
+    });
+  }, [audioReference, catalog, effectiveCapability, profiles]);
   const selectedProfile = eligibleProfiles.find((profile) => profile.id === selectedProfileId);
   const providerRegion =
     selectedProfile?.providerType === 'unicompapi'
@@ -701,6 +916,7 @@ export function ProductionPanel({
 
   useEffect(() => {
     const selected = catalog?.adapters.find((item) => item.key === adapterKey);
+    preserveImageDescriptionEditsRef.current = false;
     setFormReady(false);
     setDraftOverrides(undefined);
     if (!selected) {
@@ -724,21 +940,31 @@ export function ProductionPanel({
         setMessage('');
         const defaults = defaultParameters(resolved);
         const withSeed = (params: AdapterParameters): AdapterParameters => {
+          if (preferredAssetKind === 'scene' && sourceDocumentId)
+            params = sceneReferenceImageParameters(resolved, params);
           if (effectiveSeedImageBindings) {
             try {
-              return seedProductionInputs(
-                resolved,
-                params,
-                seedPromptRef.current,
-                effectiveSeedImageBindings.map((image) => ({
-                  ...image,
-                  url: 'project-asset://' + image.assetId,
-                })),
-              );
-            } catch {
+              const seeded = bindSeedImagePrompt(resolved, {
+                ...seedProductionInputs(
+                  resolved,
+                  params,
+                  seedPromptRef.current,
+                  effectiveSeedImageBindings.map((image) => ({
+                    ...image,
+                    url: 'project-asset://' + image.assetId,
+                  })),
+                ),
+                ...(seedParameters ?? {}),
+              });
+              setSeedError('');
+              return seeded;
+            } catch (reason) {
+              setSeedError(errorMessage(reason, '制作表单填充失败'));
               return params;
             }
           }
+          setSeedError('');
+          if (seedParameters) return { ...params, ...seedParameters };
           if (usesStructuredVideoParameters(resolved))
             return seedOfficialVideoParameters(
               resolved,
@@ -821,6 +1047,8 @@ export function ProductionPanel({
     sceneId,
     sourceDocumentId,
     effectiveSeedImageBindings,
+    seedParameters,
+    preferredAssetKind,
   ]);
 
   const capabilityAdapters = useMemo(
@@ -833,10 +1061,16 @@ export function ProductionPanel({
       if (!model.enabled || model.unavailableAt) return [];
       const supportsCapability = isVideoCapability(effectiveCapability)
         ? model.capabilities.videoGeneration
-        : effectiveCapability === 'REFERENCE_TO_IMAGE'
-          ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
-          : model.capabilities.imageGeneration;
-      if (!supportsCapability) return [];
+        : effectiveCapability === 'TEXT_TO_AUDIO'
+          ? model.capabilities.speechSynthesis === true
+          : effectiveCapability === 'REFERENCE_TO_IMAGE'
+            ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
+            : model.capabilities.imageGeneration;
+      if (
+        !supportsCapability ||
+        (audioReference !== undefined && model.remoteModelId !== audioReference.model)
+      )
+        return [];
       return capabilityAdapters
         .filter((adapter) =>
           adapterBindsCatalogModel(adapter, {
@@ -852,7 +1086,7 @@ export function ProductionPanel({
           model,
         }));
     });
-  }, [capabilityAdapters, effectiveCapability, models, selectedProfile]);
+  }, [audioReference, capabilityAdapters, effectiveCapability, models, selectedProfile]);
   const selectedModel =
     modelOptions.find((item) => item.model.id === catalogModelId && item.adapter.key === adapterKey)
       ?.model ?? models.find((model) => model.id === catalogModelId);
@@ -888,19 +1122,46 @@ export function ProductionPanel({
   };
 
   const updateParameter = (key: string, value: AdapterParameters[string] | undefined) => {
+    if (['images', 'media', 'content'].includes(key)) {
+      // Manual corrections are authoritative; submission still validates the final API inputs.
+      seedEventKeyRef.current = seedEventKey;
+      setSeedError('');
+    }
     productionAuthoring.changed(key, value);
-    setParameters((current) => {
-      const updated = { ...current };
-      if (value === undefined || value === '') delete updated[key];
-      else updated[key] = value;
-      const next = ['images', 'media', 'content', 'video'].includes(key)
-        ? remapPromptReferences(referenceInputs(current), referenceInputs(updated), updated)
-        : updated;
-      for (const field of ['prompt', 'content'])
-        if (next[field] !== current[field]) productionAuthoring.changed(field, next[field]);
-      if (adapterKey) writeStoredParameters(adapterKey, next);
-      return next;
-    });
+    const current = parametersRef.current;
+    const updated = { ...current };
+    if (value === undefined || value === '') delete updated[key];
+    else updated[key] = value;
+    const beforeReferences = referenceInputs(current);
+    const afterReferences = referenceInputs(updated);
+    // Structured content contains both text and media. Editing its text is
+    // authoritative, including partial changes inside generated descriptions.
+    // Rendering an alias as a chip is not a change to the authored text.
+    if (
+      (key === 'prompt' || key === 'content') &&
+      JSON.stringify(
+        productionPromptTexts(canonicalPromptParameters(current, beforeReferences)),
+      ) !==
+        JSON.stringify(productionPromptTexts(canonicalPromptParameters(updated, beforeReferences)))
+    )
+      preserveImageDescriptionEditsRef.current = true;
+    const remapped = ['images', 'media', 'content', 'video'].includes(key)
+      ? remapPromptReferences(beforeReferences, afterReferences, updated)
+      : updated;
+    const next =
+      adapter &&
+      !preserveImageDescriptionEditsRef.current &&
+      hasImageDescriptions(remapped) &&
+      ['images', 'media', 'content'].includes(key) &&
+      JSON.stringify(productionImagesFromParameters(adapter, current)) !==
+        JSON.stringify(productionImagesFromParameters(adapter, updated))
+        ? bindSeedImagePrompt(adapter, remapped)
+        : remapped;
+    for (const field of ['prompt', 'content'])
+      if (next[field] !== current[field]) productionAuthoring.changed(field, next[field]);
+    if (adapterKey) writeStoredParameters(adapterKey, next);
+    parametersRef.current = next;
+    setParameters(next);
     setErrors((current) => current.filter((error) => normalizeErrorPath(error.path) !== key));
     setMessage('');
     setGenerationStatus('');
@@ -925,7 +1186,7 @@ export function ProductionPanel({
   };
 
   const saveDraft = async () => {
-    if (!adapter) return;
+    if (!adapter || frameInputConflict || seedError || !formReady) return;
     if (!shotId) {
       setMessage('请先在左侧选择镜头后再保存草稿。');
       return;
@@ -984,7 +1245,17 @@ export function ProductionPanel({
   };
 
   const generateImage = async () => {
-    if (!adapter || !selectedProfile || !selectedModel || !writable) return;
+    if (
+      !adapter ||
+      adapter.key !== adapterKey ||
+      adapter.capability !== effectiveCapability ||
+      !formReady ||
+      !selectedProfile ||
+      !selectedModel ||
+      !writable ||
+      seedError
+    )
+      return;
     const isCurrent = beginSubmission();
     setGenerationStatus('');
     try {
@@ -1065,12 +1336,170 @@ export function ProductionPanel({
     }
   };
 
+  const generateAudioSample = async () => {
+    if (
+      !adapter ||
+      adapter.capability !== 'TEXT_TO_AUDIO' ||
+      !selectedProfile ||
+      !selectedModel ||
+      !writable ||
+      busy ||
+      seedError ||
+      !formReady ||
+      adapter.key !== adapterKey ||
+      adapter.capability !== effectiveCapability
+    )
+      return;
+    const isCurrent = beginSubmission();
+    setGenerationStatus('');
+    try {
+      const submissionParameters = { ...parameters };
+      const validation = await callWorker('adapter.validate', {
+        adapterKey: adapter.key,
+        parameters: submissionParameters,
+      });
+      if (!isCurrent()) return;
+      setErrors(validation.errors);
+      if (!validation.valid) {
+        setGenerationStatus('请先修正参数。');
+        return;
+      }
+      const pending = await callWorker('audio.sample.prepare', {
+        adapterKey: adapter.key,
+        providerProfileId: selectedProfile.id,
+        modelId: selectedModel.remoteModelId,
+        parameters: submissionParameters,
+      });
+      if (!isCurrent()) return;
+      const approved = await requestPaidSubmissionApproval(pending.confirmation);
+      if (!onRequestSubmissionApproval && !isCurrent()) return;
+      if (!approved) {
+        await callWorker('audio.sample.confirm', {
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: false,
+        });
+        if (isCurrent()) setGenerationStatus('已取消音频样本生成。');
+        return;
+      }
+      const completion = callWorker('audio.sample.confirm', {
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      if (isCurrent()) {
+        setGenerationStatus('正在生成音频样本…');
+      }
+      const result = await completion;
+      if (!isCurrent()) return;
+      if (!result.approved) {
+        setGenerationStatus('已取消音频样本生成。');
+        return;
+      }
+      setAudioSamples((current) =>
+        [result.audio, ...current.filter((item) => item.id !== result.audio.id)].slice(0, 12),
+      );
+      setGenerationStatus('音频样本已保存到当前项目。');
+    } catch (reason) {
+      if (isCurrent()) setGenerationStatus(errorMessage(reason, '音频样本生成失败。'));
+    } finally {
+      if (isCurrent()) {
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
+    }
+  };
+
+  const generateAudioReference = async () => {
+    if (!adapter || adapter.capability !== 'TEXT_TO_AUDIO' || !audioReference) {
+      setGenerationStatus('请从角色资料中打开“制作视频声音参考”以绑定生成音频。');
+      return;
+    }
+    if (
+      !selectedProfile ||
+      !selectedModel ||
+      !writable ||
+      seedError ||
+      !formReady ||
+      adapter.key !== adapterKey ||
+      adapter.capability !== effectiveCapability
+    )
+      return;
+    const isCurrent = beginSubmission();
+    setGenerationStatus('');
+    try {
+      const submissionParameters = { ...parameters };
+      const validation = await callWorker('adapter.validate', {
+        adapterKey: adapter.key,
+        parameters: submissionParameters,
+      });
+      if (!isCurrent()) return;
+      setErrors(validation.errors);
+      if (!validation.valid) {
+        setGenerationStatus('请先修正参数。');
+        return;
+      }
+      const pending = await callWorker('characterVoiceReference.prepare', {
+        characterDocumentId: audioReference.characterDocumentId,
+        expectedVoiceVersionId: audioReference.expectedVoiceVersionId,
+        adapterKey: adapter.key,
+        providerProfileId: selectedProfile.id,
+        modelId: selectedModel.remoteModelId,
+        parameters: submissionParameters,
+      });
+      if (!isCurrent()) return;
+      const approved = await requestPaidSubmissionApproval(pending.confirmation);
+      if (!onRequestSubmissionApproval && !isCurrent()) return;
+      if (!approved) {
+        await callWorker('characterVoiceReference.confirm', {
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: false,
+        });
+        if (isCurrent()) setGenerationStatus('已取消声音参考制作。');
+        return;
+      }
+      const completion = callWorker('characterVoiceReference.confirm', {
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      if (isCurrent()) {
+        setBusy(false);
+        setGenerationStatus('正在生成并绑定视频声音参考…');
+      }
+      const result = await completion;
+      if (!isCurrent()) return;
+      if (!result.approved) {
+        setGenerationStatus('已取消声音参考制作。');
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent('character-voice-reference-updated', {
+          detail: {
+            projectId,
+            characterDocumentId: audioReference.characterDocumentId,
+          },
+        }),
+      );
+      setGenerationStatus('声音参考已生成并绑定到角色。');
+    } catch (reason) {
+      if (isCurrent()) setGenerationStatus(errorMessage(reason, '声音参考制作失败。'));
+    } finally {
+      if (isCurrent()) {
+        setBusy(false);
+        activeSubmission.current = undefined;
+      }
+    }
+  };
+
   const generateVideo = async () => {
     if (
       !adapter ||
+      adapter.key !== adapterKey ||
+      adapter.capability !== effectiveCapability ||
+      !formReady ||
       !selectedProfile ||
       !selectedModel ||
       !isVideoCapability(adapter.capability) ||
+      seedError ||
+      frameInputConflict ||
       !writable
     )
       return;
@@ -1087,11 +1516,12 @@ export function ProductionPanel({
         boundScene &&
         !isOfficialVoiceVideo(adapter) &&
         ((needsDialogueInput && boundScene.dialogueAudioId) ||
-          (needsVoiceInput &&
-            boundScene.characterBindings?.some((item) => item.voiceReferenceVersionId)))
+          (needsVoiceInput && selectedVoiceIds.length > 0))
       )
         throw new Error(
-          '当前连接不支持本场绑定的声音输入，请选择支持声音的视频模型，或先调整场次声音绑定。',
+          support.voiceReference && selectedVoiceIds.length > 0 && !boundScene.dialogueAudioId
+            ? '当前模型支持音频参考，但当前连接未接入本地角色声音上传。请切换支持本地声音上传的连接，或取消本次角色声音选择后，在“参考素材”中添加公网参考音频地址。'
+            : '当前连接无法传入本场选用的本地声音。请切换支持本地声音上传的连接，或调整本次声音选择和完整对白绑定。',
         );
       if (needsDialogueInput && !driving && boundScene?.dialogueAudioId)
         throw new Error(
@@ -1125,22 +1555,30 @@ export function ProductionPanel({
           throw new Error('场次绑定的声音样本已变化或不可用，请回场次重新选择并保存。');
         return voice;
       });
+      const preservesAuthoredImagePrompt = productionAuthoring.overriddenFields.some((field) =>
+        ['prompt', 'content'].includes(field),
+      );
+      const sceneImageBindings = compiledReferenceBindings ?? seedReferenceBindings ?? [];
       const projectedParameters = isOfficialVoiceVideo(adapter)
         ? addOfficialRoleVoices(
             adapter,
             parameters,
             selectedVoices,
             needsDialogueInput ? dialogueAudio?.id : undefined,
-            productionAuthoring.overriddenFields.some((field) =>
-              ['prompt', 'content'].includes(field),
-            )
-              ? []
-              : (compiledReferenceBindings ?? seedReferenceBindings),
+            preservesAuthoredImagePrompt ? [] : sceneImageBindings,
           )
         : parameters;
+      const audioBoundParameters = isOfficialVoiceVideo(adapter)
+        ? addProductionAudioBindings(
+            adapter,
+            projectedParameters,
+            selectedVoices,
+            productionAudioImageBindings(adapter, projectedParameters, sceneImageBindings),
+          )
+        : projectedParameters;
       const submissionParameters = canonicalPromptParameters(
-        projectedParameters,
-        promptReferences(adapter, projectedParameters),
+        audioBoundParameters,
+        promptReferences(adapter, audioBoundParameters),
       );
       if (!isCurrent()) return;
       const validation = await callWorker('adapter.validate', {
@@ -1322,6 +1760,43 @@ export function ProductionPanel({
     });
     return addOfficialRoleVoices(adapter, current, voices, dialogueAudio?.id);
   };
+  const selectedVoicePromptBindings = useCallback(
+    (voiceIds = selectedVoiceIds) =>
+      voiceIds.flatMap((id) => {
+        const binding = rawBoundScene?.characterBindings?.find(
+          (item) => item.characterDocumentId === id,
+        );
+        const voice = voiceReferences.find(
+          (item) =>
+            item.characterDocumentId === id &&
+            (!binding?.voiceReferenceVersionId ||
+              item.versionId === binding.voiceReferenceVersionId),
+        );
+        return voice ? [voice] : [];
+      }),
+    [rawBoundScene?.characterBindings, selectedVoiceIds, voiceReferences],
+  );
+  useEffect(() => {
+    if (!adapter || !isOfficialVoiceVideo(adapter) || sceneInputsLoading) return;
+    if (!voiceReferences.length && !selectedVoiceIds.length) return;
+    setParameters((current) => {
+      const imageBindings = compiledReferenceBindings ?? seedReferenceBindings ?? [];
+      return addProductionAudioBindings(
+        adapter,
+        current,
+        selectedVoicePromptBindings(),
+        productionAudioImageBindings(adapter, current, imageBindings),
+      );
+    });
+  }, [
+    adapter,
+    selectedVoiceIds,
+    voiceReferences,
+    selectedVoicePromptBindings,
+    sceneInputsLoading,
+    compiledReferenceBindings,
+    seedReferenceBindings,
+  ]);
   const referenceInputs = (
     current: AdapterParameters,
     voiceIds = selectedVoiceIds,
@@ -1358,16 +1833,95 @@ export function ProductionPanel({
     />
   );
 
-  const draftSaveHint = !writable
-    ? '当前项目为只读'
-    : !shotId && !sceneId
+  const draftDisabledReason = !writable
+    ? '当前项目为只读，不能保存或提交。'
+    : busy
+      ? '正在处理当前操作，请稍候。'
+      : !formReady
+        ? '正在准备模型表单，请稍候。'
+        : seedError
+          ? `填充失败：${seedError} 请切换模型或修正图片输入后再生成。`
+          : frameInputConflict
+            ? '图片用途冲突尚未处理，请先选择下方的图片用途，再保存或提交。'
+            : undefined;
+  const submissionDisabledReason =
+    draftDisabledReason ??
+    (adapter?.key !== adapterKey || adapter?.capability !== effectiveCapability
+      ? '正在切换模型表单，请稍候。'
+      : !selectedProfile
+        ? '请先选择可用的供应商连接。'
+        : !selectedModel
+          ? '请先选择可用的模型。'
+          : adapter?.capability === 'TEXT_TO_AUDIO'
+            ? undefined
+            : productionAuthoring.loading
+              ? '正在读取制作内容，请稍候；完成后即可提交。'
+              : undefined);
+  const frameConflictContents = frameInputConflict && adapter && (
+    <>
+      <p>
+        已保留全部 {currentImages.length} 张图片。
+        {frameInputConflict.field === 'images'
+          ? '当前模型不能同时使用这些图片用途，请仅保留首帧或更换支持多图参考的模型。'
+          : '当前模型的严格首尾帧与参考素材不能混用，请选择用途或更换模型。'}
+      </p>
+      <p>
+        {frameInputConflict.canUseReferences ? '全部作为参考图会保留图片，但不锁定首帧；' : ''}
+        仅使用首帧会移除其余参考素材。此选择只修改当前表单。
+      </p>
+      <div className="draft-action-row">
+        {frameInputConflict.canUseReferences && (
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!writable || busy || !formReady}
+            onClick={() => {
+              const next = resolveProductionFrameInputs(
+                adapter,
+                parameters,
+                'references',
+                effectiveSeedImageBindings,
+              );
+              updateParameter(frameInputConflict.field, next[frameInputConflict.field]);
+            }}
+          >
+            全部作为参考图
+          </button>
+        )}
+        {frameInputConflict.firstFrameIndex >= 0 && (
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!writable || busy || !formReady}
+            onClick={() => {
+              const next = resolveProductionFrameInputs(
+                adapter,
+                parameters,
+                'first-frame',
+                effectiveSeedImageBindings,
+              );
+              updateParameter(frameInputConflict.field, next[frameInputConflict.field]);
+            }}
+          >
+            仅使用首帧
+          </button>
+        )}
+      </div>
+    </>
+  );
+  const draftSaveHint =
+    draftDisabledReason ??
+    (!shotId && !sceneId
       ? '请先选择镜头'
       : !selectedProfile || !selectedModel
         ? '请先选择供应商连接和模型'
-        : undefined;
+        : undefined);
 
   return (
-    <aside className={`production-panel panel-border${expanded ? ' expanded' : ''}`}>
+    <aside
+      className={`production-panel panel-border${expanded ? ' expanded' : ''}`}
+      data-asset-drop-disabled={!writable || busy}
+    >
       {imageJobs.some((job) =>
         ['awaiting_confirmation', 'submitting', 'downloading', 'submission_unknown'].includes(
           job.mediaState ?? '',
@@ -1420,6 +1974,17 @@ export function ProductionPanel({
       ) : (
         <div className="production-panel-body">
           <div className="production-panel-main">
+            <p className="production-status-message" aria-label="当前制作模式">
+              当前制作模式：
+              {catalog.capabilities.find((item) => item.key === displayedCapability)?.label ??
+                displayedCapability}
+              {frameInputConflict ? '（图片用途待确认）' : ''}
+            </p>
+            {seedError && (
+              <p role="alert" className="validation-error">
+                填充失败：{seedError} 请切换模型或修正图片输入后再生成。
+              </p>
+            )}
             <div className="production-config-row">
               <div className="field-group">
                 <label htmlFor="provider-profile">供应商连接</label>
@@ -1435,12 +2000,14 @@ export function ProductionPanel({
                       {profile.name} ·{' '}
                       {profile.providerType === 'unicompapi'
                         ? 'UniCompAPI'
-                        : profile.baseUrl === 'https://api.vidu.cn' ||
-                            ['wan-video', 'seedance-video', 'minimax-video'].includes(
-                              profile.providerType,
-                            )
-                          ? '中国站'
-                          : '国际站'}
+                        : profile.accessType === 'custom'
+                          ? '自定义 OpenAI 兼容'
+                          : profile.baseUrl === 'https://api.vidu.cn' ||
+                              ['wan-video', 'seedance-video', 'minimax-video'].includes(
+                                profile.providerType,
+                              )
+                            ? '中国站'
+                            : '国际站'}
                     </option>
                   ))}
                 </select>
@@ -1472,7 +2039,10 @@ export function ProductionPanel({
               <div className="provider-required-state">
                 <Settings2 size={20} />
                 <strong>还没有可用于制作的供应商连接</strong>
-                <span>请在设置中心添加并测试官方视频供应商或 UniCompAPI 连接。</span>
+                <span>
+                  请在设置中心添加并测试官方媒体供应商、UniCompAPI，或文生图所用的 OpenAI
+                  兼容自定义连接。
+                </span>
                 <button className="button secondary" type="button" onClick={onOpenProviderSettings}>
                   前往供应商与模型
                 </button>
@@ -1491,6 +2061,16 @@ export function ProductionPanel({
 
             {adapter && (
               <>
+                {frameInputConflict && (
+                  <section
+                    ref={frameConflictRef}
+                    role="alert"
+                    className="production-notes"
+                    aria-label="图片用途冲突"
+                  >
+                    {frameConflictContents}
+                  </section>
+                )}
                 <div className="parameter-fields production-content-fields">
                   {contentFields.map(renderParameter)}
                   {(productionAuthoring.result?.source || productionAuthoring.error) && (
@@ -1500,7 +2080,12 @@ export function ProductionPanel({
                       open={Boolean(
                         productionAuthoring.error ||
                         productionAuthoring.result?.issues.length ||
-                        promptReviewNotices.length,
+                        promptReviewNotices.length ||
+                        (isVideoCapability(adapter.capability) && currentImages.length) ||
+                        (productionAuthoring.result?.estimatedDurationSeconds !== undefined &&
+                          Number(parameters.duration) > 0 &&
+                          Number(parameters.duration) !==
+                            productionAuthoring.result.estimatedDurationSeconds),
                       )}
                     >
                       <summary>制作说明</summary>
@@ -1571,31 +2156,14 @@ export function ProductionPanel({
                             </pre>
                           </details>
                         )}
-                        {productionAuthoring.result?.estimatedDurationSeconds !== undefined && (
-                          <p>
-                            剧情预计 {productionAuthoring.result.estimatedDurationSeconds} 秒
-                            {productionAuthoring.result.requestedDurationSeconds !== undefined
-                              ? ` · 模型请求 ${productionAuthoring.result.requestedDurationSeconds} 秒`
-                              : ''}
-                          </p>
-                        )}
-                        {Boolean(productionAuthoring.result?.timeline?.length) && (
-                          <details>
-                            <summary>
-                              场次分镜时间轴（{productionAuthoring.result!.timeline!.length} 镜头）
-                            </summary>
-                            <ol>
-                              {productionAuthoring.result!.timeline!.map((entry) => (
-                                <li key={entry.shotId}>
-                                  {entry.title}：
-                                  {entry.startSeconds === undefined ||
-                                  entry.endSeconds === undefined
-                                    ? '时间待补充'
-                                    : `${entry.startSeconds}—${entry.endSeconds} 秒`}
-                                </li>
-                              ))}
-                            </ol>
-                          </details>
+                        {isVideoCapability(adapter.capability) && (
+                          <>
+                            <ProductionTimingDetails
+                              result={productionAuthoring.result}
+                              requestedDuration={parameters.duration}
+                            />
+                            <ProductionInputRoleDetails images={currentImages} />
+                          </>
                         )}
                         {productionAuthoring.result?.issues.some(
                           (issue) => issue.code === 'SCENE_REQUIRES_SEGMENTS',
@@ -1699,14 +2267,17 @@ export function ProductionPanel({
                       onSaved={productionAuthoring.refreshKeepingEdits}
                     />
                   )}
-                  {adapter.provider === 'unicompapi' && isWanMediaAdapter(adapter) && (
-                    <p className="production-settings-note" role="note">
-                      “生成音频”控制成片是否带声音。指定声音参考时，在“参考素材”中添加“参考音频”，填写公网音频地址；本地声音样本请使用万相官方连接。
-                    </p>
-                  )}
+                  {adapter.provider === 'unicompapi' &&
+                    productionAudioSupport(adapter).voiceReference && (
+                      <p className="production-settings-note" role="note">
+                        “生成音频”控制成片是否带声音。指定声音参考时，在参考素材中添加参考音频，填写公网音频地址；本地声音样本请使用对应模型的官方视频连接。
+                      </p>
+                    )}
                 </details>
 
-                {isOfficialVoiceVideo(adapter) &&
+                {(isOfficialVoiceVideo(adapter) ||
+                  (productionAudioSupport(adapter).voiceReference &&
+                    Boolean(boundScene?.characterBindings?.length))) &&
                   (productionAudioSupport(adapter).dialogueDriven ||
                     voiceReferences.length > 0) && (
                     <section className="parameter-fields production-audio-inputs">
@@ -1740,9 +2311,15 @@ export function ProductionPanel({
                         </>
                       ) : (
                         <>
-                          <p>
-                            场次选用的声音版本会预先选中，图片与声音按实际提交顺序编号。声音版本变化后需回场次重新选择。
-                          </p>
+                          {isOfficialVoiceVideo(adapter) ? (
+                            <p>
+                              场次选用的声音版本会预先选中，图片与声音按实际提交顺序编号。声音版本变化后需回场次重新选择。
+                            </p>
+                          ) : (
+                            <p role="note">
+                              当前模型支持音频参考，但当前连接未接入本地角色声音上传。请切换支持本地声音上传的连接，或取消下方勾选后，在“参考素材”中添加公网参考音频地址。取消勾选只影响本次表单，不修改场次声音绑定。
+                            </p>
+                          )}
                           {voiceReferences.length === 0 ? (
                             <p>请先在“角色与场景”的角色资料中导入声音样本。</p>
                           ) : (
@@ -1789,12 +2366,44 @@ export function ProductionPanel({
                                       referenceInputs(withoutSavedVoices, nextIds),
                                       withoutSavedVoices,
                                     );
+                                    const nextWithAudioBindings = adapter
+                                      ? addProductionAudioBindings(
+                                          adapter,
+                                          next,
+                                          isOfficialVoiceVideo(adapter)
+                                            ? selectedVoicePromptBindings(nextIds)
+                                            : [],
+                                          productionAudioImageBindings(
+                                            adapter,
+                                            next,
+                                            compiledReferenceBindings ??
+                                              seedReferenceBindings ??
+                                              [],
+                                          ),
+                                        )
+                                      : next;
+                                    const previousPrompt = adapter
+                                      ? addProductionAudioBindings(adapter, parameters, [])
+                                      : parameters;
+                                    const nextPrompt = adapter
+                                      ? addProductionAudioBindings(
+                                          adapter,
+                                          nextWithAudioBindings,
+                                          [],
+                                        )
+                                      : nextWithAudioBindings;
                                     for (const field of ['prompt', 'content'])
-                                      if (next[field] !== parameters[field])
-                                        productionAuthoring.changed(field, next[field]);
-                                    setParameters(next);
-                                    productionAuthoring.changed('media', next.media);
-                                    productionAuthoring.changed('content', next.content);
+                                      if (nextPrompt[field] !== previousPrompt[field])
+                                        productionAuthoring.changed(field, nextPrompt[field]);
+                                    setParameters(nextWithAudioBindings);
+                                    productionAuthoring.changed(
+                                      'media',
+                                      nextWithAudioBindings.media,
+                                    );
+                                    productionAuthoring.changed(
+                                      'content',
+                                      nextWithAudioBindings.content,
+                                    );
                                     setSelectedVoiceIds(nextIds);
                                   }}
                                 />
@@ -1808,31 +2417,77 @@ export function ProductionPanel({
                     </section>
                   )}
 
+                {adapter.capability === 'TEXT_TO_AUDIO' ? (
+                  <p className="production-settings-note" role="note">
+                    生成的音频样本会保存到当前项目，可在此试听。
+                  </p>
+                ) : null}
                 <div className="draft-actions">
-                  <div className="draft-action-row">
-                    <button
-                      className="button secondary"
-                      type="button"
-                      onClick={() => void saveDraft()}
-                      disabled={!writable || busy}
-                      title={draftSaveHint}
-                    >
-                      <Save size={14} />
-                      保存草稿
-                    </button>
-                    {isVideoCapability(adapter.capability) ? (
+                  {submissionDisabledReason && (
+                    <section className="production-action-blocker" aria-label="提交前检查">
+                      <p id={actionBlockReasonId} role="status">
+                        {submissionDisabledReason}
+                      </p>
+                      {frameConflictContents}
+                    </section>
+                  )}
+                  <div
+                    className={`draft-action-row${adapter.capability === 'TEXT_TO_AUDIO' ? ' production-audio-action-row' : ''}`}
+                  >
+                    {adapter.capability !== 'TEXT_TO_AUDIO' ? (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => void saveDraft()}
+                        disabled={Boolean(draftDisabledReason)}
+                        aria-describedby={draftDisabledReason ? actionBlockReasonId : undefined}
+                        title={draftSaveHint}
+                      >
+                        <Save size={14} />
+                        保存草稿
+                      </button>
+                    ) : null}
+                    {adapter.capability === 'TEXT_TO_AUDIO' ? (
+                      <>
+                        <button
+                          className="button primary"
+                          type="button"
+                          onClick={() => void generateAudioSample()}
+                          disabled={Boolean(submissionDisabledReason)}
+                          aria-describedby={
+                            submissionDisabledReason ? actionBlockReasonId : undefined
+                          }
+                          title={submissionDisabledReason}
+                        >
+                          <Volume2 size={14} />
+                          生成音频样本
+                        </button>
+                        {audioReference ? (
+                          <button
+                            className="button secondary"
+                            type="button"
+                            onClick={() => void generateAudioReference()}
+                            disabled={Boolean(submissionDisabledReason)}
+                            aria-describedby={
+                              submissionDisabledReason ? actionBlockReasonId : undefined
+                            }
+                            title={submissionDisabledReason}
+                          >
+                            <Volume2 size={14} />
+                            制作声音参考
+                          </button>
+                        ) : null}
+                      </>
+                    ) : isVideoCapability(adapter.capability) ? (
                       <button
                         className="button primary"
                         type="button"
                         onClick={() => void generateVideo()}
-                        disabled={
-                          !writable ||
-                          busy ||
-                          !formReady ||
-                          productionAuthoring.loading ||
-                          !selectedProfile ||
-                          !selectedModel
+                        disabled={Boolean(submissionDisabledReason)}
+                        aria-describedby={
+                          submissionDisabledReason ? actionBlockReasonId : undefined
                         }
+                        title={submissionDisabledReason}
                       >
                         <Video size={14} />
                         提交视频任务
@@ -1842,14 +2497,11 @@ export function ProductionPanel({
                         className="button primary"
                         type="button"
                         onClick={() => void generateImage()}
-                        disabled={
-                          !writable ||
-                          busy ||
-                          !formReady ||
-                          productionAuthoring.loading ||
-                          !selectedProfile ||
-                          !selectedModel
+                        disabled={Boolean(submissionDisabledReason)}
+                        aria-describedby={
+                          submissionDisabledReason ? actionBlockReasonId : undefined
                         }
+                        title={submissionDisabledReason}
                       >
                         <WandSparkles size={14} />
                         生成图片
@@ -1885,7 +2537,7 @@ export function ProductionPanel({
                           <option value="generated-video">普通视频素材</option>
                         </select>
                       </label>
-                    ) : (
+                    ) : adapter.capability !== 'TEXT_TO_AUDIO' ? (
                       <>
                         <label className="asset-kind-field">
                           保存为
@@ -1905,7 +2557,7 @@ export function ProductionPanel({
                           </select>
                         </label>
                       </>
-                    )}
+                    ) : null}
                   </div>
                   {message && (
                     <span className={errors.length > 0 ? 'validation-error' : 'validation-ok'}>
@@ -1917,6 +2569,30 @@ export function ProductionPanel({
                     <span className="production-status-message">{generationStatus}</span>
                   )}
                 </div>
+                {adapter.capability === 'TEXT_TO_AUDIO' ? (
+                  <section className="production-audio-samples" aria-label="项目音频样本">
+                    <header>
+                      <h3>项目音频样本</h3>
+                      <span>{audioSamples.length}</span>
+                    </header>
+                    {audioSamplesLoading ? <p>正在读取音频样本…</p> : null}
+                    {audioSamplesError ? <p role="status">{audioSamplesError}</p> : null}
+                    {!audioSamplesLoading && !audioSamplesError && audioSamples.length === 0 ? (
+                      <p>尚无音频样本。</p>
+                    ) : null}
+                    {audioSamples.length > 0 ? (
+                      <ul>
+                        {audioSamples.map((audio) => (
+                          <AudioSamplePreview
+                            key={audio.id}
+                            projectId={projectId ?? ''}
+                            audio={audio}
+                          />
+                        ))}
+                      </ul>
+                    ) : null}
+                  </section>
+                ) : null}
                 {isVideoCapability(adapter.capability) && videoJobs.length > 0 && (
                   <section className="video-task-center" aria-label="视频任务">
                     <header>
@@ -2032,6 +2708,28 @@ export function ProductionPanel({
   );
 }
 
+export function ProductionPanel({
+  capability,
+  projectId,
+  sceneId,
+  writable,
+  onOpenAssetLibrary,
+  ...mediaProps
+}: ProductionPanelProps) {
+  return (
+    <MediaProductionPanel
+      {...mediaProps}
+      capability={capability}
+      projectId={projectId}
+      shotId={capability === 'TEXT_TO_AUDIO' ? undefined : mediaProps.shotId}
+      sceneId={capability === 'TEXT_TO_AUDIO' ? undefined : sceneId}
+      sourceDocumentId={capability === 'TEXT_TO_AUDIO' ? undefined : mediaProps.sourceDocumentId}
+      writable={writable}
+      onOpenAssetLibrary={onOpenAssetLibrary}
+    />
+  );
+}
+
 interface ParameterFieldProps {
   field: AdapterUiField;
   property: AdapterParameterProperty;
@@ -2053,10 +2751,7 @@ function ParameterField({
   projectId,
   references,
 }: ParameterFieldProps) {
-  const callWorker = projectWorker();
   const inputId = `parameter-${field.key}`;
-  const [localFiles, setLocalFiles] = useState<Array<LocalImageSelection | undefined>>([]);
-  const [selectionError, setSelectionError] = useState('');
   const label = (
     <label htmlFor={inputId}>
       {property.title}
@@ -2100,281 +2795,96 @@ function ParameterField({
     );
   }
 
-  if (field.control === 'url-list') {
-    const minimumRows = Math.max(1, property.minItems ?? 1);
-    const currentItems = Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === 'string')
-      : [];
-    const items = Array.from(
-      { length: Math.max(minimumRows, currentItems.length) },
-      (_, index) => currentItems[index] ?? '',
-    );
-    const commitItems = (next: string[]) => {
-      setSelectionError('');
-      onChange(next);
-    };
-    const chooseLocalFile = async (file: File | undefined, index: number) => {
-      if (!file) return;
-      try {
-        const selected = await readLocalImageFile(file);
-        const next = [...items];
-        next[index] = selected.dataUrl;
-        if (totalLocalImageBytes(next) > MAX_LOCAL_IMAGE_TOTAL_BYTES) {
-          throw new Error('同一请求中的本地图片合计不能超过 20 MiB。');
-        }
-        setLocalFiles((current) => {
-          const updated = [...current];
-          updated[index] = selected;
-          return updated;
-        });
-        commitItems(next);
-      } catch (reason) {
-        setSelectionError(errorMessage(reason, '本地图片选择失败。'));
-      }
-    };
-    const clearItem = (index: number) => {
-      if (items.length <= minimumRows) {
-        const next = [...items];
-        next[index] = '';
-        setLocalFiles((current) => {
-          const updated = [...current];
-          updated[index] = undefined;
-          return updated;
-        });
-        commitItems(next);
-      } else {
-        setLocalFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
-        commitItems(items.filter((_, itemIndex) => itemIndex !== index));
-      }
-    };
-    const moveItem = (index: number, offset: number) => {
-      const destination = index + offset;
-      if (destination < 0 || destination >= items.length) return;
-      const next = [...items];
-      [next[index], next[destination]] = [next[destination]!, next[index]!];
-      setLocalFiles((current) => {
-        const updated = [...current];
-        [updated[index], updated[destination]] = [updated[destination], updated[index]];
-        return updated;
-      });
-      commitItems(next);
-    };
-    const visibleError = selectionError || error;
-    const dropAssets = async (event: React.DragEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      try {
-        const raw = event.dataTransfer.getData('application/x-ai-video-asset+json');
-        const payload = JSON.parse(raw) as {
-          version?: number;
-          projectId?: string;
-          assets?: Array<{ id: string; kind: string }>;
-        };
-        if (payload.version !== 1 || payload.projectId !== projectId || !payload.assets?.length)
-          throw new Error('只能拖入当前项目的素材。');
-        if (payload.assets.some((item) => item.kind.includes('video')))
-          throw new Error('此参数只接受图片素材。');
-        const maximum = property.maxItems ?? 20;
-        if (payload.assets.length > maximum) throw new Error(`最多可拖入 ${maximum} 项素材。`);
-        await Promise.all(
-          payload.assets.map((item) => callWorker('asset.mediaSource', { assetId: item.id })),
-        );
-        const next = payload.assets.map((item) => `asset://${item.id}`);
-        while (next.length < minimumRows) next.push('');
-        commitItems(next);
-      } catch (reason) {
-        setSelectionError(errorMessage(reason, '素材拖入失败。'));
-      }
-    };
+  if (field.control === 'url-list')
     return (
-      <div
-        className={`parameter-field asset-drop-target ${visibleError ? 'invalid' : ''}`}
-        onDragOver={(event) => {
-          event.preventDefault();
-          event.dataTransfer.dropEffect = 'copy';
-        }}
-        onDrop={(event) => void dropAssets(event)}
-      >
-        <div className="parameter-field-heading">
-          {label}
-          {(property.maxItems === undefined || items.length < property.maxItems) && (
-            <button
-              className="button secondary url-list-add"
-              type="button"
-              title="添加图片输入"
-              onClick={() => commitItems([...items, ''])}
-            >
-              <Plus size={14} />
-              添加图片
-            </button>
-          )}
-        </div>
-        {description}
-        <div className="url-list">
-          {items.map((item, index) => {
-            const selectedFile = localFiles[index];
-            const localFile = selectedFile?.dataUrl === item ? selectedFile : undefined;
-            const orderedRole = property.minItems === 2 && property.maxItems === 2;
-            const rowLabel = orderedRole ? (index === 0 ? '首帧' : '尾帧') : undefined;
-            const fileInputId = `${inputId}-file-${index}`;
-            const assetId = imageAssetId(item);
-            const hasImage = isLocalImageDataUrl(item) || Boolean(assetId);
-            const imageName = assetId ? '素材库图片' : (localFile?.name ?? '本地图片');
-            const previewLabel = `${rowLabel ?? property.title}：${imageName}`;
-            return (
-              <div
-                className={`url-list-item ${hasImage ? 'is-image' : 'is-url'}`}
-                key={`${field.key}-${index}`}
-              >
-                {rowLabel && <span className="url-row-role">{rowLabel}</span>}
-                <div className={`url-row${hasImage ? ' has-image' : ''}`}>
-                  {hasImage ? (
-                    <div className="local-image-value" id={index === 0 ? inputId : undefined}>
-                      <ParameterImagePreview
-                        value={item}
-                        projectId={projectId}
-                        label={previewLabel}
-                      />
-                    </div>
-                  ) : (
-                    <input
-                      id={index === 0 ? inputId : undefined}
-                      aria-label={rowLabel ? `${rowLabel} URL` : undefined}
-                      type="url"
-                      value={item}
-                      placeholder={rowLabel ? `输入${rowLabel}公开 URL` : field.placeholder}
-                      onChange={(event) => {
-                        const next = [...items];
-                        next[index] = event.target.value;
-                        setLocalFiles((current) => {
-                          const updated = [...current];
-                          updated[index] = undefined;
-                          return updated;
-                        });
-                        commitItems(next);
-                      }}
-                    />
-                  )}
-                  <div className="url-row-actions">
-                    <label
-                      className="icon-button subtle file-picker-button"
-                      htmlFor={fileInputId}
-                      title={item ? '替换为本地图片' : '选择本地图片'}
-                    >
-                      <ImagePlus size={14} />
-                      <input
-                        id={fileInputId}
-                        className="url-file-input"
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp,.jpg,.jpeg,.png,.webp"
-                        aria-label={`为${rowLabel ?? property.title}选择本地图片`}
-                        onChange={(event) => {
-                          const file = event.currentTarget.files?.[0];
-                          event.currentTarget.value = '';
-                          void chooseLocalFile(file, index);
-                        }}
-                      />
-                    </label>
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title="上移"
-                      onClick={() => moveItem(index, -1)}
-                      disabled={index === 0}
-                    >
-                      <ChevronUp size={13} />
-                    </button>
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title="下移"
-                      onClick={() => moveItem(index, 1)}
-                      disabled={index >= items.length - 1}
-                    >
-                      <ChevronDown size={13} />
-                    </button>
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title={item ? '清除此图片输入' : '移除此输入行'}
-                      onClick={() => clearItem(index)}
-                      disabled={!item && items.length <= minimumRows}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        {visibleError && <small className="parameter-error">{visibleError}</small>}
-      </div>
+      <ImageListParameterField
+        field={field}
+        property={property}
+        value={value}
+        error={error}
+        onChange={onChange}
+        projectId={projectId}
+        inputId={inputId}
+        label={label}
+        description={description}
+      />
     );
-  }
 
   const enumValues = property.enum ?? [];
   return (
-    <div
-      className={`parameter-field ${field.control === 'textarea' ? 'prompt-field ' : ''}${error ? 'invalid' : ''}`}
+    <StructuredAssetDrop
+      schema={property}
+      value={value}
+      projectId={projectId}
+      onChange={onChange}
+      mediaKind={
+        ['video', 'video_url'].includes(field.key) && property.type === 'string'
+          ? 'video'
+          : undefined
+      }
     >
-      {label}
-      {description}
-      {field.control === 'select' ? (
-        <select
-          id={inputId}
-          value={parameterScalarText(value)}
-          onChange={(event) =>
-            onChange(
-              property.type === 'integer' || property.type === 'number'
-                ? Number(event.target.value)
-                : event.target.value,
-            )
-          }
-        >
-          {enumValues.map((item) => (
-            <option key={parameterScalarText(item)} value={parameterScalarText(item)}>
-              {parameterScalarText(item)}
-            </option>
-          ))}
-        </select>
-      ) : field.control === 'textarea' ? (
-        references.length && field.key === 'prompt' ? (
-          <PromptReferenceEditor
+      <div
+        className={`parameter-field ${field.control === 'textarea' ? 'prompt-field ' : ''}${error ? 'invalid' : ''}`}
+      >
+        {label}
+        {description}
+        {field.control === 'select' ? (
+          <select
             id={inputId}
-            label={property.title}
-            value={typeof value === 'string' ? value : ''}
-            references={references}
-            projectId={projectId}
-            maxLength={property.maxLength}
-            onChange={onChange}
-          />
-        ) : (
-          <textarea
-            id={inputId}
-            value={typeof value === 'string' ? value : ''}
-            maxLength={property.maxLength}
-            onChange={(event) => onChange(event.target.value)}
-          />
-        )
-      ) : (
-        <input
-          id={inputId}
-          type={field.control === 'number' ? 'number' : 'text'}
-          value={typeof value === 'number' || typeof value === 'string' ? value : ''}
-          min={property.minimum}
-          max={property.maximum}
-          onChange={(event) =>
-            onChange(
-              field.control === 'number'
-                ? event.target.value
+            value={parameterScalarText(value)}
+            onChange={(event) =>
+              onChange(
+                property.type === 'integer' || property.type === 'number'
                   ? Number(event.target.value)
-                  : undefined
-                : event.target.value,
-            )
-          }
-        />
-      )}
-      {error && <small className="parameter-error">{error}</small>}
-    </div>
+                  : event.target.value,
+              )
+            }
+          >
+            {enumValues.map((item) => (
+              <option key={parameterScalarText(item)} value={parameterScalarText(item)}>
+                {parameterScalarText(item)}
+              </option>
+            ))}
+          </select>
+        ) : field.control === 'textarea' ? (
+          references.length && field.key === 'prompt' ? (
+            <PromptReferenceEditor
+              id={inputId}
+              label={property.title}
+              value={typeof value === 'string' ? value : ''}
+              references={references}
+              projectId={projectId}
+              maxLength={property.maxLength}
+              onChange={onChange}
+            />
+          ) : (
+            <textarea
+              id={inputId}
+              value={typeof value === 'string' ? value : ''}
+              maxLength={property.maxLength}
+              onChange={(event) => onChange(event.target.value)}
+            />
+          )
+        ) : (
+          <input
+            id={inputId}
+            type={field.control === 'number' ? 'number' : 'text'}
+            value={typeof value === 'number' || typeof value === 'string' ? value : ''}
+            min={property.minimum}
+            max={property.maximum}
+            onChange={(event) =>
+              onChange(
+                field.control === 'number'
+                  ? event.target.value
+                    ? Number(event.target.value)
+                    : undefined
+                  : event.target.value,
+              )
+            }
+          />
+        )}
+        {error && <small className="parameter-error">{error}</small>}
+      </div>
+    </StructuredAssetDrop>
   );
 }

@@ -158,7 +158,7 @@
 | 作品名称 | `projects.name` 同时作为项目名称和作品名称，不维护第二个作品标题字段 |
 | 章节命名 | 章节顺序由 `position` 管理，`display_label` 保存“第十二章/序章/番外一”等结构标签，版本 `title_snapshot` 只保存章名 |
 | 项目资料视图 | 默认只展示非章节项目资料；章节正文通过章节导航展示，“全部文档”筛选才包含章节 |
-| 约束权威 | 生产约束继续使用专用约束实体；普通文档不得通过标题、role 或正文获得约束权限 |
+| 约束边界 | 剧情约束使用 `documents.kind=constraint` 的项目文档；制作参数约束继续使用专用约束实体；右侧会话约束只作用于当前轮提示词 |
 | 占位恢复 | 无草稿的失败/取消章节占位自动归档并可恢复；已有草稿的章节保持 active |
 | 后台任务 | 页面和窗口关闭不取消任务；应用退出执行有界停止并持久化恢复状态，不运行独立系统守护进程 |
 
@@ -181,7 +181,7 @@
 | D9 | 章序、章名和显示标签如何管理 | `position` 是排序权威；`display_label` 是可编辑结构字段并支持序章、终章和番外；普通数字章由系统生成默认 label；版本 `title_snapshot` 只保存章名 | 已确认 | P1 |
 | D10 | 项目资料是否默认展示章节正文 | 默认排除章节正文；章节树是正文主入口，“全部文档”筛选可查看全部 Document Repository 投影 | 已确认 | P6 |
 | D11 | 失败或取消后的章节占位如何处理 | 无正式草稿时自动归档并允许从任务日志恢复；已有草稿时保留 active，不自动删除 | 已确认 | P5 |
-| D12 | 写作约束由文档还是专用实体承载 | 专用约束实体是唯一权威源；项目文档只能解释或引用约束，不能替代约束记录 | 已确认 | P1 |
+| D12 | 剧情约束与制作约束如何承载 | 剧情约束使用 `documents.kind=constraint` 文档并按需检索；制作参数约束继续使用专用约束实体；项目文档不能冒充制作约束记录 | 已确认 | P1 |
 | D13 | `document_bindings` 如何保证外键和单一来源 | 使用具体可空 FK 和 project-or-exactly-one-target CHECK；章节正文不写 binding，其他项目资料每文档一个主 binding | 已确认 | P1 |
 | D14 | 创作模式中输入文本是否直接执行 | 是；模式即副作用授权，明确文本指令直接执行，按钮只预填 action，普通聊天仍零写入 | 已确认 | P3 |
 | D15 | 后台任务生命周期 | UI 视图关闭后继续；应用退出有界取消并保存恢复点；首期不创建脱离应用进程的后台服务 | 已确认 | P3 |
@@ -301,7 +301,7 @@
 17. `position` 是章节排序权威，`display_label` 是章节结构标签，二者由 Worker/CAS 管理且不属于 LLM 正文工具输出；章名只来自版本 `title_snapshot`。
 18. `current_version_id` 表示工作版本，`published_version_id` 是唯一默认权威版本。
 19. 草稿和未完成产物默认不进入其他任务上下文；当前修改任务只能显式引用自己的目标草稿。
-20. 生产约束的唯一权威源是专用约束实体；文档 role、标题和正文不能提升为生产约束。
+20. 剧情约束的项目文档使用 `documents.kind=constraint` 并按需检索；制作参数约束的唯一权威源是专用约束实体；文档标题、正文或 role 不能把普通文档提升为制作约束记录，右侧会话约束只属于当前轮提示词。
 21. 相同幂等键和相同请求哈希返回首次结果；幂等键相同但请求不同必须拒绝。
 22. 工具成功、文档版本创建、章节关联、任务产物、任务状态和事件必须在同一事务中完成。
 23. 工具日志只保存目标 ID、正文哈希、正文长度和有界摘要，不能复制完整章节正文。
@@ -657,7 +657,7 @@ updated_at
 - 触发器校验目标实体、document 和 binding 的 `project_id` 一致；
 - 触发器拒绝任何已经作为 `novel_chapters.document_id` 的正文文档写入 binding，防止章节正文出现第二个归属来源；
 - `volume-outline` 只能绑定 volume；scene/shot role 只能绑定对应短剧实体；其他 role/domain 组合由固定矩阵校验；
-- `writing-constraint` 不属于 role 枚举，生产约束继续由专用约束实体承载；
+- 剧情约束使用 `documents.kind=constraint`，不新增 `writing-constraint` role；制作参数约束继续由专用约束实体承载；
 - `document_id UNIQUE` 表示首期每个非章节文档只有一个主绑定；未来多关联使用独立 link 表，不放宽本表语义。
 
 `needs_review` 只用于旧数据迁移异常，默认项目资料列表提供单独“待迁移确认”筛选，但 ContextCompiler、Agent list/read 默认查询和导出全部排除。`role` 是由系统、明确用户动作或受限 AgentIntent 确定的业务元数据，不依赖标题、文件名或旧 `documents.kind`。项目资料默认查询排除 `novel_chapters.document_id` 指向的正文；“全部文档”查询再合并章节投影。所有文档仍使用同一个编辑器，正文只在 `document_versions`。
@@ -1295,7 +1295,7 @@ model_context_window
 - 不再使用固定全局预算适配所有模型；
 - 先去重，再摘要，再裁剪低优先级来源；
 - 生产约束、用户本次要求和目标基础版本不能静默丢失；
-- `document_bindings.role`、文档标题和正文不得被解释为生产约束；普通说明文档按已发布权威资料优先级处理；
+- `documents.kind=constraint` 表示按需检索的剧情约束文档，不授予制作参数约束权限；`document_bindings.role`、标题和正文也不得被解释为制作约束；普通说明文档按已发布权威资料优先级处理；
 - 仍超限时返回 `CONTEXT_BUDGET_EXCEEDED` 和可解释的来源清单；
 - 上下文快照记录来源版本、内容哈希、Token 估算、裁剪和编译器版本。
 
@@ -1707,7 +1707,7 @@ export.completed
 - 实现小说资料、卷、章节创建、列表、`position/display_label` 编辑、排序、归档和 CAS；未分卷/分卷 position 分别使用 partial unique index，并以事务化重排处理冲突；
 - 实现章节占位与唯一文档绑定；以 database trigger 保证每次章节 publication 同事务写入不可变结构快照，缺失快照必须使 publication 回滚；旧非原子发布入口在章节文档上被拒绝；
 - 实现非章节资料主 binding；章节正文只使用 `novel_chapters.document_id`；
-- 生产约束继续使用专用约束实体，不增加 `writing-constraint` 文档 role；
+- 剧情约束文档使用 `documents.kind=constraint`；制作参数约束继续使用专用约束实体，不增加 `writing-constraint` 文档 role；
 - 实施 12.13 的旧文档固定映射和维护报告；
 - 保证正文和审核状态不在小说表重复保存。
 
@@ -1883,7 +1883,7 @@ export.completed
 工作项：
 
 - 按任务类型和 binding `domain_scope` 选择小说写作或短剧制作上下文；共享项目资料和固定来源版本，但系统提示词、工具白名单、Token 预算及产物权限按领域隔离；
-- 生产约束只从专用约束实体读取，文档 role 不得提升约束权限；
+- 剧情约束从 `documents.kind=constraint` 文档按需读取；制作参数约束只从专用约束实体读取，普通文档 role 不得提升制作约束权限；
 - 按小说层级和任务意图编译来源；
 - 按第 17.5 节默认值/硬上限动态计算输入、输出、总 Token 和费用预算；
 - 实现已发布章节摘要缓存和失效；

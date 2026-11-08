@@ -33,13 +33,16 @@ import type {
   AssetMediaSourceParams,
 } from '@ai-video/contracts';
 import type { AssetRecord, JobRecord } from '@ai-video/domain';
-import { createRepositories, DubbingRepository } from '@ai-video/persistence';
+import {
+  createRepositories,
+  DubbingRepository,
+  roughCutReferenceCount,
+} from '@ai-video/persistence';
 import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
 import { NetworkAdmissionError } from '@ai-video/llm';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
 import { withNetworkResponse } from './network-transfer.js';
-import { ProductionService } from './production-service.js';
 import { ExecutionPool, mapConcurrent } from './execution-pool.js';
 
 const DOWNLOAD_TIMEOUT_MS = 30_000;
@@ -108,18 +111,6 @@ export class ImageGenerationService {
           throw new Error('目标不是有效的制作道具。');
         if (params.productionSource || params.shotId)
           throw new Error('道具生图不能使用角色、场景或镜头制作来源。');
-      } else if (params.sourceDocumentId || params.shotId) {
-        const kind = params.sourceDocumentId
-          ? sourceDocument?.kind === 'character'
-            ? 'character'
-            : 'setting'
-          : 'shot';
-        new ProductionService(this.projects).assertSource(
-          params.productionSource,
-          { kind, id: (params.sourceDocumentId ?? params.shotId)! },
-          params.adapterKey,
-          { parameters: params.parameters, inputs: params.mediaInputReferences },
-        );
       }
       if (params.productionSource && !params.sourceDocumentId && !params.shotId)
         throw new Error('制作来源缺少目标对象。');
@@ -922,6 +913,7 @@ export class ImageGenerationService {
       if (!asset || asset.projectId !== project.id) throw new Error('Asset was not found.');
       if (asset.deletedAt) return { deleted: true as const, referenceCount: 0 };
       const referenceCount =
+        roughCutReferenceCount(database, project.id, assetId) +
         repositories.assets.countDraftReferences(assetId) +
         Number(
           (
@@ -1015,6 +1007,8 @@ export class ImageGenerationService {
           .get(assetId)
       )
         throw new Error('素材仍被场次角色引用，请先解除绑定。');
+      if (roughCutReferenceCount(database, project.id, assetId))
+        throw new Error('素材仍被粗剪序列引用，请先移除相应片段。');
       const path = resolveProjectRelativePath(project.rootPath, asset.trashRelativePath);
       rmSync(path, { force: true });
       const now = new Date().toISOString();
@@ -1685,6 +1679,9 @@ function contentTypeFor(relativePath: string): string {
     '.webp': 'image/webp',
     '.gif': 'image/gif',
     '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.mkv': 'video/x-matroska',
     '.webm': 'video/webm',
   };
   return known[extension] ?? 'application/octet-stream';
@@ -1697,6 +1694,9 @@ const OPENABLE_ASSET_EXTENSIONS = new Set([
   '.webp',
   '.gif',
   '.mp4',
+  '.m4v',
+  '.mov',
+  '.mkv',
   '.webm',
 ]);
 

@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { getAdapterCatalog } from '@ai-video/generation-adapters';
+import { createRepositories } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
@@ -33,6 +34,56 @@ const wan = () =>
       a.capability === 'TEXT_TO_VIDEO' &&
       a.provider === 'wan-video',
   )!;
+
+it('keeps all three selected shot images and reports frame/reference incompatibility', async () => {
+  const f = await setup();
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回头', prompt: '雨中回头' });
+  const inputImages = [
+    { assetId: 'actor', role: 'character' as const },
+    { assetId: 'scene', role: 'scene' as const },
+    { assetId: 'frame', role: 'first-frame' as const },
+  ];
+  for (const image of inputImages) {
+    const project = f.projects.current()!;
+    const relativePath = `${image.assetId}.png`;
+    await writeFile(
+      join(project.rootPath, relativePath),
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==',
+        'base64',
+      ),
+    );
+    f.projects.access(true, (db) =>
+      createRepositories(db).assets.save({
+        id: image.assetId,
+        projectId: project.id,
+        kind: 'generated-image',
+        relativePath,
+        contentHash: image.assetId,
+        sizeBytes: 70,
+        createdAt: 'now',
+      }),
+    );
+  }
+  const adapter = getAdapterCatalog().adapters.find(
+    (item) =>
+      item.contractId === 'cn.bytedance.seedance2-0.video' &&
+      item.provider === 'unicompapi' &&
+      item.capability === 'IMAGE_TO_VIDEO',
+  )!;
+  const compiled = f.service.compile({
+    target: { kind: 'shot', id: shot.id },
+    adapterKey: adapter.key,
+    inputImages,
+  });
+  expect(compiled.source?.inputImages).toEqual(inputImages);
+  expect(
+    (compiled.parameters.content as { role?: string }[])
+      .filter((item) => item.role)
+      .map((item) => item.role),
+  ).toEqual(['reference_image', 'reference_image', 'first_frame']);
+  expect(compiled.issues).toEqual([expect.objectContaining({ code: 'INPUT_SELECTION_CONFLICT' })]);
+});
 
 it('compiles the verbatim IR prompt and explicit timing without interpreting open data', async () => {
   const f = await setup();
@@ -210,7 +261,7 @@ it('revalidates child IR references and does not report out-of-range references'
   expect(f.service.read(target, [first.id]).issues).toEqual([]);
 });
 
-it('inherits scene cast for unscoped shots without inventing segments across unknown timing', async () => {
+it('builds scene cast only from shot references, never from scene-level bindings', async () => {
   const f = await setup();
   const actor = f.content.saveDocument({
     kind: 'character',
@@ -236,7 +287,16 @@ it('inherits scene cast for unscoped shots without inventing segments across unk
       timing: { estimatedDurationSeconds: 4, rationale: '空镜时长' },
     },
   });
-  const second = f.content.saveShot({ sceneId: f.scene.id, title: '继承角色', prompt: '人物出现' });
+  const second = f.content.saveShot({
+    sceneId: f.scene.id,
+    title: '角色镜头',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '人物出现',
+      references: { characterDocumentIds: [actor.id] },
+    },
+  });
   const target = { kind: 'scene' as const, id: f.scene.id };
   const range = f.service.compile({
     target,
@@ -247,4 +307,8 @@ it('inherits scene cast for unscoped shots without inventing segments across unk
   expect(range.segments).toEqual([]);
   const empty = f.service.compile({ target, adapterKey: wan().key, shotIds: [first.id] });
   expect(empty.sceneInputs?.scene.characterBindings).toEqual([]);
+  expect(
+    f.service.compile({ target, adapterKey: wan().key, shotIds: [second.id] }).sceneInputs?.scene
+      .characterBindings,
+  ).toMatchObject([{ characterDocumentId: actor.id }]);
 });

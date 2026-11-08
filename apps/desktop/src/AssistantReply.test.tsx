@@ -8,6 +8,16 @@ afterEach(() => {
 });
 
 describe('AssistantReply', () => {
+  it('keeps all assistant content visible even when it contains a final-report marker', () => {
+    const content =
+      "Confirmed: the source is consistent.\n\nInteresting: the schema requires authoringIR.\n\nNow let me compose the final response.\n\nSummary of what I'll report:\n\n已完成：已修正镜头。";
+    render(<AssistantReply content={content} />);
+    expect(screen.getByText(/Confirmed/)).toBeVisible();
+    expect(screen.getByText(/Summary of what I'll report/)).toBeVisible();
+    expect(screen.getByText('已完成：已修正镜头。')).toBeVisible();
+    expect(screen.queryByText('工作过程（已折叠）')).toBeNull();
+  });
+
   it('coalesces rapid updates every 40ms without postponing the timer', async () => {
     vi.useFakeTimers();
     const { rerender } = render(<AssistantReply content="" streaming />);

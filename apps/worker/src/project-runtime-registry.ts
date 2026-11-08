@@ -8,9 +8,12 @@ import type {
 } from '@ai-video/contracts';
 import type { ProjectService } from './project-service.js';
 
+export type RuntimeStopReason =
+  'project_unload' | 'host_shutdown' | 'host_disconnect' | 'worker_restart';
+
 export interface ProjectRuntimeBundle {
   projectService: ProjectService;
-  stop(): Promise<void>;
+  stop(reason?: RuntimeStopReason): Promise<void>;
   recover(): void;
   isBusy(): boolean;
 }
@@ -70,9 +73,9 @@ export class ProjectRuntimeRegistry<T extends ProjectRuntimeBundle> {
   all(): T[] {
     return [this.fallback, ...[...this.loaded.values()].map((runtime) => runtime.services)];
   }
-  shutdown(): Promise<void> {
+  shutdown(reason: RuntimeStopReason = 'project_unload'): Promise<void> {
     return this.control(async () => {
-      for (const id of [...this.loaded.keys()]) await this.unloadNow(id);
+      for (const id of [...this.loaded.keys()]) await this.unloadNow(id, false, reason);
     });
   }
   current(): T {
@@ -274,12 +277,16 @@ export class ProjectRuntimeRegistry<T extends ProjectRuntimeBundle> {
     this.loaded.set(project.id, runtime);
     return runtime;
   }
-  private async unloadNow(projectId: string, disableRecovery = false): Promise<void> {
+  private async unloadNow(
+    projectId: string,
+    disableRecovery = false,
+    reason: RuntimeStopReason = 'project_unload',
+  ): Promise<void> {
     const runtime = this.loaded.get(projectId)!;
     if (disableRecovery) this.save(runtime, false);
     runtime.state = 'draining';
     try {
-      await runtime.services.stop();
+      await runtime.services.stop(reason);
     } catch (error) {
       // A missing/moved container must still be fenced and its connection closed.
       let available = true;

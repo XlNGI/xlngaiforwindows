@@ -4,6 +4,7 @@ import { matchesViewport, safePanelLayoutStorage } from './panel-layout-storage'
 
 interface ResizableAppLayoutProps {
   projectId?: string;
+  startupMode?: boolean;
   sidebarOpen: boolean;
   onSidebarOpenChange: (open: boolean) => void;
   sidebar: ReactNode;
@@ -12,6 +13,7 @@ interface ResizableAppLayoutProps {
 
 export function ResizableAppLayout({
   projectId,
+  startupMode = false,
   sidebarOpen,
   onSidebarOpenChange,
   sidebar,
@@ -20,7 +22,7 @@ export function ResizableAppLayout({
   const sidebarRef = usePanelRef();
   const [narrow, setNarrow] = useState(() => matchesViewport('(max-width: 660px)', 660));
   const persistedLayout = useDefaultLayout({
-    id: `ai-video.app-shell.v1:${projectId ?? 'no-project'}`,
+    id: `ai-video.app-shell.v1:${projectId ?? 'no-project'}${startupMode ? ':startup' : ''}`,
     panelIds: ['project-navigation', 'workbench'],
     storage: safePanelLayoutStorage,
     onlySaveAfterUserInteractions: true,
@@ -47,14 +49,14 @@ export function ResizableAppLayout({
       <Group
         className="app-pane-group"
         orientation="horizontal"
-        defaultLayout={persistedLayout.defaultLayout}
+        defaultLayout={startupMode ? undefined : persistedLayout.defaultLayout}
         onLayoutChanged={persistedLayout.onLayoutChanged}
         resizeTargetMinimumSize={{ fine: 6, coarse: 20 }}
       >
         <Panel
           id="project-navigation"
           panelRef={sidebarRef}
-          defaultSize="208px"
+          defaultSize={startupMode ? '216px' : '208px'}
           minSize="180px"
           maxSize="360px"
           collapsedSize="0px"

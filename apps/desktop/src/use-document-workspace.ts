@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useProjectViewState } from './use-project-view-state';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type {
@@ -13,6 +13,7 @@ import { readMarkdownDocument } from './markdown-import-client';
 export interface UseDocumentWorkspaceOptions {
   writable: boolean;
   syncDetachedPanel: (entityId?: string) => void;
+  closeDetachedPanel?: (entityId: string) => void;
   openDocumentWorkspace: (kind?: DocumentKind) => void;
   closeDocumentPanel: () => void;
 }
@@ -20,6 +21,7 @@ export interface UseDocumentWorkspaceOptions {
 export function useDocumentWorkspace({
   writable,
   syncDetachedPanel: syncDetachedPanelCallback,
+  closeDetachedPanel: closeDetachedPanelCallback,
   openDocumentWorkspace: openDocumentWorkspaceCallback,
   closeDocumentPanel: closeDocumentPanelCallback,
 }: UseDocumentWorkspaceOptions) {
@@ -31,10 +33,16 @@ export function useDocumentWorkspace({
   const openDocumentWorkspace: UseDocumentWorkspaceOptions['openDocumentWorkspace'] = (...args) => {
     if (isCurrentWorkerScope(scope)) openDocumentWorkspaceCallback(...args);
   };
+  const closeDetachedPanel: NonNullable<UseDocumentWorkspaceOptions['closeDetachedPanel']> = (
+    entityId,
+  ) => {
+    if (isCurrentWorkerScope(scope)) closeDetachedPanelCallback?.(entityId);
+  };
   const closeDocumentPanel = () => {
     if (isCurrentWorkerScope(scope)) closeDocumentPanelCallback();
   };
   const [documents, setDocuments] = useProjectViewState<DocumentSummary[]>([]);
+  const [archivedDocuments, setArchivedDocuments] = useProjectViewState<DocumentSummary[]>([]);
   const [document, setDocument] = useProjectViewState<DocumentDetail>();
   const [documentTitle, setDocumentTitle] = useProjectViewState('');
   const [documentKind, setDocumentKind] = useProjectViewState<DocumentKind>('outline');
@@ -43,19 +51,67 @@ export function useDocumentWorkspace({
   const [contentBusy, setContentBusy] = useProjectViewState(false);
   const [contentMessage, setContentMessage] = useProjectViewState('');
   const [documentCloseConfirmation, setDocumentCloseConfirmation] = useProjectViewState(false);
+  const [documentArchiveConfirmation, setDocumentArchiveConfirmation] = useProjectViewState(false);
+  const [documentArchiveTarget, setDocumentArchiveTarget] = useProjectViewState<DocumentSummary>();
   const documentRequest = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    if (!scope) {
+      setArchivedDocuments([]);
+      return () => {
+        active = false;
+      };
+    }
+    void callWorker('document.archived.list', {})
+      .then((rows) => {
+        if (active && isCurrentWorkerScope(scope)) setArchivedDocuments(rows);
+      })
+      .catch(() => {
+        if (active && isCurrentWorkerScope(scope)) setArchivedDocuments([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [scope?.projectId, scope?.projectSessionId]);
 
   const documentEditorWritable =
     writable &&
+    (!document || !document.publishedVersionId) &&
     (!document ||
-      ['draft', 'changes_requested', 'published'].includes(
-        document.currentVersion?.state ?? 'draft',
-      ));
+      ['draft', 'changes_requested'].includes(document.currentVersion?.state ?? 'draft'));
   const documentDirty = document
     ? document.title !== documentTitle ||
       document.kind !== documentKind ||
       (document.currentVersion?.contentMarkdown ?? '') !== documentContent
     : Boolean(documentTitle.trim() || documentContent.trim());
+
+  const editorState = useRef({ document, documentDirty });
+  editorState.current = { document, documentDirty };
+  const refreshCommittedDocuments = async () => {
+    const selectedId = editorState.current.document?.id;
+    const requestId = documentRequest.current;
+    const nextDocuments = await callWorker('document.list', {});
+    if (!isCurrentWorkerScope(scope)) return;
+    setDocuments(nextDocuments);
+    if (!selectedId || editorState.current.documentDirty) return;
+    const [detail, history] = await Promise.all([
+      callWorker('document.get', { documentId: selectedId }),
+      callWorker('document.versions', { documentId: selectedId }),
+    ]);
+    if (
+      !isCurrentWorkerScope(scope) ||
+      documentRequest.current !== requestId ||
+      editorState.current.document?.id !== selectedId ||
+      editorState.current.documentDirty
+    )
+      return;
+    setDocument(detail);
+    setDocumentTitle(detail.title);
+    setDocumentKind(detail.kind);
+    setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
+    setVersions(history);
+  };
 
   const applyDocument = async (nextDocument: DocumentDetail, openPanel = false): Promise<void> => {
     setDocument(nextDocument);
@@ -160,7 +216,11 @@ export function useDocumentWorkspace({
 
   const saveDocument = async (): Promise<DocumentDetail | undefined> => {
     if (!documentEditorWritable) {
-      setContentMessage('审核中的版本不可编辑，请先退回修改或完成发布。');
+      setContentMessage(
+        document?.publishedVersionId
+          ? '已发布文档只读，请先取消发布。'
+          : '审核中的版本不可编辑，请先退回修改或完成发布。',
+      );
       return undefined;
     }
     setContentBusy(true);
@@ -180,6 +240,192 @@ export function useDocumentWorkspace({
       return saved;
     } catch (reason) {
       setContentMessage(reason instanceof Error ? reason.message : '保存失败');
+      return undefined;
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
+  const requestArchiveDocument = (target?: DocumentSummary) => {
+    const archiveTarget = target ?? document;
+    if (!archiveTarget || !writable || contentBusy) return;
+    setDocumentArchiveTarget(archiveTarget);
+    setContentMessage('');
+    setDocumentArchiveConfirmation(true);
+  };
+
+  const confirmArchiveDocument = async (
+    saveUnsavedChanges: boolean,
+  ): Promise<DocumentDetail | undefined> => {
+    if (!documentArchiveTarget || !writable || contentBusy) return undefined;
+    const isCurrentDocument = document?.id === documentArchiveTarget.id;
+    if (!isCurrentDocument) {
+      setContentBusy(true);
+      setContentMessage('');
+      try {
+        const archived = await callWorker('document.archive', {
+          documentId: documentArchiveTarget.id,
+          expectedDocumentRowVersion: documentArchiveTarget.rowVersion,
+        });
+        closeDetachedPanel(archived.id);
+        setDocumentArchiveConfirmation(false);
+        setDocumentArchiveTarget(undefined);
+        setDocuments((current) => current.filter((item) => item.id !== archived.id));
+        setArchivedDocuments((current) => [
+          archived,
+          ...current.filter((item) => item.id !== archived.id),
+        ]);
+        setContentMessage(`已归档“${archived.title}”，可在已归档文档中恢复。`);
+        try {
+          const [activeRows, archivedRows] = await Promise.all([
+            callWorker('document.list', {}),
+            callWorker('document.archived.list', {}),
+          ]);
+          setDocuments(activeRows);
+          setArchivedDocuments(archivedRows);
+        } catch {
+          // Keep the optimistic list update after a successful lifecycle change.
+        }
+        return archived;
+      } catch (reason) {
+        setContentMessage(reason instanceof Error ? reason.message : '归档失败');
+        return undefined;
+      } finally {
+        setContentBusy(false);
+      }
+    }
+    if (!document || !writable || contentBusy) return undefined;
+    if (saveUnsavedChanges && documentDirty && !documentEditorWritable) {
+      setContentMessage('当前版本不可保存，请放弃未保存更改后归档。');
+      return undefined;
+    }
+    if (saveUnsavedChanges && documentDirty && !documentTitle.trim()) {
+      setContentMessage('保存并归档前请填写文档标题。');
+      return undefined;
+    }
+
+    let target = document;
+    setContentBusy(true);
+    setContentMessage('');
+    try {
+      if (saveUnsavedChanges && documentDirty) {
+        target = await callWorker('document.draft.save', {
+          documentId: document.id,
+          kind: documentKind,
+          title: documentTitle,
+          contentMarkdown: documentContent,
+          expectedDocumentRowVersion: document.rowVersion,
+        });
+        setDocument(target);
+        setDocuments((current) => [target, ...current.filter((item) => item.id !== target.id)]);
+        if (target.currentVersion) {
+          setVersions((current) => [
+            target.currentVersion!,
+            ...current.filter((item) => item.id !== target.currentVersion!.id),
+          ]);
+        }
+      }
+      const archived = await callWorker('document.archive', {
+        documentId: target.id,
+        expectedDocumentRowVersion: target.rowVersion,
+      });
+      documentRequest.current += 1;
+      closeDetachedPanel(document.id);
+      syncDetachedPanel();
+      setDocument(undefined);
+      setDocumentTitle('');
+      setDocumentKind('note');
+      setDocumentContent('');
+      setVersions([]);
+      setDocumentArchiveConfirmation(false);
+      setDocumentArchiveTarget(undefined);
+      closeDocumentPanel();
+      setDocuments((current) => current.filter((item) => item.id !== archived.id));
+      setArchivedDocuments((current) => [
+        archived,
+        ...current.filter((item) => item.id !== archived.id),
+      ]);
+      setContentMessage(`已归档“${archived.title}”，可在已归档文档中恢复。`);
+      try {
+        const [activeRows, archivedRows] = await Promise.all([
+          callWorker('document.list', {}),
+          callWorker('document.archived.list', {}),
+        ]);
+        setDocuments(activeRows);
+        setArchivedDocuments(archivedRows);
+      } catch {
+        // Keep the optimistic list update after a successful lifecycle change.
+      }
+      return archived;
+    } catch (reason) {
+      if (target !== document) {
+        setDocument(target);
+        setDocuments((current) => [target, ...current.filter((item) => item.id !== target.id)]);
+      }
+      setContentMessage(reason instanceof Error ? reason.message : '归档失败');
+      return undefined;
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
+  const applyArchivedDocuments = async (archived: DocumentSummary[]) => {
+    const ids = new Set(archived.map((item) => item.id));
+    documentRequest.current += 1;
+    for (const id of ids) closeDetachedPanel(id);
+    setDocuments((rows) => rows.filter((item) => !ids.has(item.id)));
+    setArchivedDocuments((rows) => [...archived, ...rows.filter((item) => !ids.has(item.id))]);
+    if (document && ids.has(document.id)) {
+      syncDetachedPanel();
+      setDocument(undefined);
+      setDocumentTitle('');
+      setDocumentKind('note');
+      setDocumentContent('');
+      setVersions([]);
+      closeDocumentPanel();
+    }
+    const [activeRows, archivedRows] = await Promise.all([
+      callWorker('document.list', {}),
+      callWorker('document.archived.list', {}),
+    ]);
+    setDocuments(activeRows);
+    setArchivedDocuments(archivedRows);
+  };
+
+  const restoreArchivedDocument = async (
+    archivedDocument: DocumentSummary,
+  ): Promise<DocumentDetail | undefined> => {
+    if (!writable || contentBusy) return undefined;
+    setContentBusy(true);
+    setContentMessage('');
+    try {
+      const restored = await callWorker('document.unarchive', {
+        documentId: archivedDocument.id,
+        expectedDocumentRowVersion: archivedDocument.rowVersion,
+      });
+      setDocuments((current) => [restored, ...current.filter((item) => item.id !== restored.id)]);
+      setArchivedDocuments((current) => current.filter((item) => item.id !== restored.id));
+      setDocument(restored);
+      setDocumentTitle(restored.title);
+      setDocumentKind(restored.kind);
+      setDocumentContent(restored.currentVersion?.contentMarkdown ?? '');
+      setVersions(await callWorker('document.versions', { documentId: restored.id }));
+      syncDetachedPanel(restored.id);
+      openDocumentWorkspace(restored.kind);
+      setContentMessage(`已恢复“${restored.title}”`);
+      try {
+        const [activeRows, archivedRows] = await Promise.all([
+          callWorker('document.list', {}),
+          callWorker('document.archived.list', {}),
+        ]);
+        setDocuments(activeRows);
+        setArchivedDocuments(archivedRows);
+      } catch {
+        // Keep the optimistic list update after a successful lifecycle change.
+      }
+      return restored;
+    } catch (reason) {
+      setContentMessage(reason instanceof Error ? reason.message : '恢复失败');
       return undefined;
     } finally {
       setContentBusy(false);
@@ -231,6 +477,29 @@ export function useDocumentWorkspace({
     }
   };
 
+  const unpublishDocument = async () => {
+    if (!document?.publishedVersionId) return;
+    setContentBusy(true);
+    setContentMessage('');
+    try {
+      const next = await callWorker('document.unpublish', {
+        documentId: document.id,
+        expectedDocumentRowVersion: document.rowVersion,
+      });
+      setDocument(next);
+      setDocumentTitle(next.title);
+      setDocumentKind(next.kind);
+      setDocumentContent(next.currentVersion?.contentMarkdown ?? '');
+      setDocuments(await callWorker('document.list', {}));
+      setVersions(await callWorker('document.versions', { documentId: next.id }));
+      setContentMessage('已取消发布，文档已恢复为草稿，可继续编辑。');
+    } catch (reason) {
+      setContentMessage(reason instanceof Error ? reason.message : '取消发布失败');
+    } finally {
+      setContentBusy(false);
+    }
+  };
+
   /**
    * Saves the editor content and publishes it in one user action. The Worker
    * still creates and approves a review record inside a single transaction, so
@@ -239,7 +508,11 @@ export function useDocumentWorkspace({
    */
   const saveAndPublishDocument = async () => {
     if (!documentEditorWritable) {
-      setContentMessage('审核中的版本不可编辑，请先退回修改。');
+      setContentMessage(
+        document?.publishedVersionId
+          ? '已发布文档只读，请先取消发布。'
+          : '审核中的版本不可编辑，请先退回修改。',
+      );
       return;
     }
     if (!documentTitle.trim()) {
@@ -351,6 +624,7 @@ export function useDocumentWorkspace({
   const reset = () => {
     documentRequest.current += 1;
     setDocuments([]);
+    setArchivedDocuments([]);
     setDocument(undefined);
     setDocumentTitle('');
     setDocumentKind('note');
@@ -359,11 +633,16 @@ export function useDocumentWorkspace({
     setContentBusy(false);
     setContentMessage('');
     setDocumentCloseConfirmation(false);
+    setDocumentArchiveConfirmation(false);
+    setDocumentArchiveTarget(undefined);
   };
 
   return {
     documents,
     setDocuments,
+    refreshCommittedDocuments,
+    archivedDocuments,
+    setArchivedDocuments,
     document,
     setDocument,
     documentTitle,
@@ -380,14 +659,24 @@ export function useDocumentWorkspace({
     setContentMessage,
     documentCloseConfirmation,
     setDocumentCloseConfirmation,
+    documentArchiveConfirmation,
+    setDocumentArchiveConfirmation,
+    documentArchiveTarget,
+    setDocumentArchiveTarget,
+    documentDirty,
     documentEditorWritable,
     selectDocument,
     openDocumentById,
     newDocument,
     importMarkdownDocument,
     saveDocument,
+    requestArchiveDocument,
+    confirmArchiveDocument,
+    applyArchivedDocuments,
+    restoreArchivedDocument,
     requestDocumentChanges,
     publishDocument,
+    unpublishDocument,
     saveAndPublishDocument,
     restoreVersion,
     openCreatedDocument,

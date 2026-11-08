@@ -177,6 +177,13 @@ export function projectLibraryFtsEnabled(database: Database.Database): boolean {
   );
 }
 
+export function getProjectLibraryRevision(database: Database.Database, projectId: string): number {
+  const row = database
+    .prepare('SELECT revision FROM project_library_revisions WHERE project_id = ?')
+    .get(projectId) as { revision: number } | undefined;
+  return row?.revision ?? 0;
+}
+
 export function probeFts5Trigram(database: Database.Database): boolean {
   try {
     database.exec(
@@ -651,6 +658,23 @@ export function listProjectStructureNodes(
 }
 
 /** Search only the deterministic structure metadata, without returning body text. */
+function hasProductionLifecycle(database: Database.Database): boolean {
+  return (database.prepare('PRAGMA table_info(scenes)').all() as Array<{ name: string }>).some(
+    (column) => column.name === 'archived_at',
+  );
+}
+
+function activeProductionSource(alias: string): string {
+  return `NOT EXISTS (SELECT 1 FROM scenes lifecycle_scene
+    WHERE lifecycle_scene.archived_at IS NOT NULL
+      AND ${alias}.source_type = 'scene' AND ${alias}.source_id = lifecycle_scene.id)
+    AND NOT EXISTS (SELECT 1 FROM shots lifecycle_shot JOIN scenes lifecycle_parent
+      ON lifecycle_parent.id = lifecycle_shot.scene_id
+      WHERE (lifecycle_shot.archived_at IS NOT NULL OR lifecycle_parent.archived_at IS NOT NULL)
+      AND ((${alias}.source_type = 'shot' AND ${alias}.source_id = lifecycle_shot.id)
+        OR ${alias}.document_id = lifecycle_shot.document_id))`;
+}
+
 export function searchProjectStructureNodesPage(
   database: Database.Database,
   params: ProjectStructureSearchQuery,
@@ -668,6 +692,7 @@ export function searchProjectStructureNodesPage(
     filters.push("nodes.source_type <> 'conversation'");
   }
   if (!params.includeArchived) {
+    if (hasProductionLifecycle(database)) filters.push(activeProductionSource('nodes'));
     filters.push(`NOT EXISTS (
       SELECT 1 FROM documents archived
       WHERE archived.id = nodes.document_id AND archived.lifecycle_status = 'archived'
@@ -1277,6 +1302,7 @@ function* loadSearchCandidates(
     values.push(params.scopeId);
   }
   if (!params.includeArchived) {
+    if (hasProductionLifecycle(database)) filters.push(activeProductionSource('chunks'));
     filters.push(`NOT EXISTS (
       SELECT 1 FROM documents archived
       WHERE archived.id = chunks.document_id AND archived.lifecycle_status = 'archived'
@@ -1496,6 +1522,7 @@ function catalogDocuments(database: Database.Database, projectId: string): Libra
        FROM documents
        LEFT JOIN novel_chapters chapters ON chapters.document_id = documents.id
        WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+         ${hasProductionLifecycle(database) ? `AND NOT EXISTS (SELECT 1 FROM shots JOIN scenes ON scenes.id=shots.scene_id WHERE shots.document_id=documents.id AND (shots.archived_at IS NOT NULL OR scenes.archived_at IS NOT NULL))` : ''}
          AND documents.current_version_id IS NOT NULL
        ORDER BY documents.updated_at DESC, documents.id LIMIT ?`,
     )
@@ -1608,7 +1635,7 @@ function catalogScenes(database: Database.Database, projectId: string): LibraryC
   return (
     database
       .prepare(
-        'SELECT id, title, updated_at FROM scenes WHERE project_id = ? ORDER BY updated_at DESC, id LIMIT ?',
+        `SELECT id, title, updated_at FROM scenes WHERE project_id = ? ${hasProductionLifecycle(database) ? 'AND archived_at IS NULL' : ''} ORDER BY updated_at DESC, id LIMIT ?`,
       )
       .all(projectId, CATALOG_LIMIT_PER_TYPE) as Array<{
       id: string;
@@ -1632,6 +1659,7 @@ function catalogShots(database: Database.Database, projectId: string): LibraryCa
         `SELECT shots.id, shots.title, shots.updated_at, shots.status
          FROM shots INNER JOIN scenes ON scenes.id = shots.scene_id
          WHERE scenes.project_id = ?
+           ${hasProductionLifecycle(database) ? 'AND scenes.archived_at IS NULL AND shots.archived_at IS NULL' : ''}
          ORDER BY shots.updated_at DESC, shots.id LIMIT ?`,
       )
       .all(projectId, CATALOG_LIMIT_PER_TYPE) as Array<{

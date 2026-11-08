@@ -1,6 +1,18 @@
+const model: Model<'openai-responses'> = {
+  id: 'model',
+  name: 'Model',
+  api: 'openai-responses',
+  provider: 'native',
+  baseUrl: 'native://provider',
+  reasoning: true,
+  input: ['text'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 128_000,
+  maxTokens: 8_192,
+};
 import type { NativeProviderStreamStartParams, SidecarEnvelope } from '@ai-video/contracts';
 import type { AssistantMessageEvent, Model } from '@earendil-works/pi-ai';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createPiStreamFunction,
   JsonLineWriter,
@@ -78,6 +90,37 @@ describe('JsonLineWriter', () => {
 });
 
 describe('NativeProviderBridge', () => {
+  it('closes host admission before settling pending work and never resubmits after shutdown', async () => {
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value);
+    const stream = bridge.start(params, { onEvent: vi.fn() });
+    const pending = bridge.request('provider.dubbing.submit', {});
+    const error = {
+      code: 'INTERRUPTED' as const,
+      message: 'Worker stopped for recovery.',
+      retryable: true,
+    };
+    bridge.close(error);
+    await expect(pending).rejects.toMatchObject({ hostError: error });
+    await expect(stream.done).resolves.toMatchObject({ type: 'failed', error });
+    const sent = io.sent.length;
+    expect(sent).toBe(3); // Stream, one-shot and the owned stream cancellation.
+    bridge.close(error);
+    await expect(bridge.request('provider.dubbing.submit', {})).rejects.toMatchObject({
+      hostError: { code: 'REQUEST_NOT_SENT' },
+    });
+    expect(() => bridge.start(params, { onEvent: vi.fn() })).toThrow('request was not sent');
+    expect(io.sent).toHaveLength(sent);
+    expect(
+      bridge.handleEnvelope({
+        kind: 'host.response',
+        requestId: io.sent[1]!.requestId,
+        ok: true,
+        result: {},
+      }),
+    ).toBe(true);
+  });
+
   it('preserves an observed numeric HTTP status for safe query retries', async () => {
     const io = transport();
     const bridge = new NativeProviderBridge(io.value, () => 'dubbing-poll');
@@ -265,6 +308,34 @@ describe('NativeProviderBridge', () => {
     void aborted;
   });
 
+  it('validates rebuilt native tool pairs and rejects duplicate or opaque history', () => {
+    const turn = {
+      calls: [{ id: 'c1', name: 'library.read', argumentsJson: '{}' }],
+      outputs: [{ callId: 'c1', output: 'receipt' }],
+    };
+    for (const contextTurns of [
+      [{ ...turn, outputs: [] }],
+      [turn, turn],
+      [{ ...turn, outputs: [{ callId: 'other', output: 'receipt' }] }],
+    ])
+      expect(() =>
+        new NativeProviderBridge(transport().value).start(
+          { ...params, contextTurns },
+          { onEvent: vi.fn() },
+        ),
+      ).toThrow();
+    expect(() =>
+      new NativeProviderBridge(transport().value).start(
+        {
+          ...params,
+          contextTurns: [turn],
+          continuation: { protocol: 'openai-responses', previousResponseId: 'opaque', outputs: [] },
+        },
+        { onEvent: vi.fn() },
+      ),
+    ).toThrow();
+  });
+
   it('rejects secrets, headers, authorization handles, signed URLs, and unknown fields', () => {
     const bridge = new NativeProviderBridge(transport().value, () => 'request');
     for (const unsafe of [
@@ -368,18 +439,7 @@ describe('NativeProviderBridge', () => {
 });
 
 describe('createPiStreamFunction', () => {
-  const model: Model<'openai-responses'> = {
-    id: 'model',
-    name: 'Model',
-    api: 'openai-responses',
-    provider: 'native',
-    baseUrl: 'native://provider',
-    reasoning: true,
-    input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 8_192,
-  };
+  afterEach(() => vi.useRealTimers());
 
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'rejects malformed and truncated tool arguments before Pi execution (%s)',
@@ -551,6 +611,409 @@ describe('createPiStreamFunction', () => {
     });
   });
 
+  it.each([500, 502, 503, 504, 520, 524, 529, 599])(
+    'retries retryable HTTP %s with the same completed tool context and independent accounting',
+    async (providerStatus) => {
+      vi.useFakeTimers();
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value);
+      const observe = vi.fn();
+      const reserveRetry = vi.fn();
+      const recoverContext = vi.fn(() => true);
+      const continuationParams = {
+        ...params,
+        continuation: {
+          protocol: 'openai-responses' as const,
+          previousResponseId: 'already-completed-response',
+          outputs: [{ callId: 'saved-draft', output: '{"status":"succeeded","id":"draft"}' }],
+        },
+      };
+      const resolveParams = vi.fn(() => continuationParams);
+      const stream = createPiStreamFunction(
+        bridge,
+        resolveParams,
+        observe,
+        undefined,
+        reserveRetry,
+        recoverContext,
+      )(model, { messages: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      bridge.handleEnvelope(
+        event(io.sent[0]!.requestId, 0, {
+          type: 'failed',
+          projectSessionId: 'session',
+          error: {
+            code: 'PROVIDER_FAILED',
+            message: `Provider HTTP ${providerStatus}: Service Error`,
+            retryable: true,
+            providerStatus,
+          },
+        }),
+      );
+      expect(io.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(io.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(io.sent).toHaveLength(2);
+      expect(io.sent[1]!.requestId).not.toBe(io.sent[0]!.requestId);
+      expect(io.sent[1]!.params).toEqual(continuationParams);
+      expect(resolveParams).toHaveBeenCalledTimes(2);
+      expect(reserveRetry).toHaveBeenCalledTimes(1);
+      expect(recoverContext).not.toHaveBeenCalled();
+      bridge.handleEnvelope(
+        event(io.sent[1]!.requestId, 0, {
+          type: 'text_delta',
+          projectSessionId: 'session',
+          delta: '已完成。',
+        }),
+      );
+      bridge.handleEnvelope(
+        event(io.sent[1]!.requestId, 1, {
+          type: 'complete',
+          projectSessionId: 'session',
+          finishReason: 'stop',
+        }),
+      );
+      const events: AssistantMessageEvent[] = [];
+      for await (const item of stream) events.push(item);
+      expect(events.filter((item) => item.type === 'error')).toEqual([]);
+      expect(events.filter((item) => item.type === 'start')).toHaveLength(1);
+      await expect(stream.result()).resolves.toMatchObject({
+        stopReason: 'stop',
+        content: [{ type: 'text', text: '已完成。' }],
+      });
+      expect(observe.mock.calls.filter(([, stage]) => stage === 'failed')).toHaveLength(1);
+      expect(observe.mock.calls.filter(([, stage]) => stage === 'complete')).toHaveLength(1);
+      expect(observe).toHaveBeenCalledWith(expect.any(String), 'retry_wait', {
+        retryAttempt: 1,
+        delayMs: 1000,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(['WINHTTP_RESPONSE_HEADERS', 'WINHTTP_REQUEST_SEND'])(
+    'retries explicitly classified %s transport failure before output',
+    async (providerErrorCode) => {
+      vi.useFakeTimers();
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value);
+      const observe = vi.fn();
+      const reserveRetry = vi.fn();
+      const stream = createPiStreamFunction(
+        bridge,
+        () => params,
+        observe,
+        undefined,
+        reserveRetry,
+      )(model, { messages: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      bridge.handleEnvelope(
+        event(io.sent[0]!.requestId, 0, {
+          type: 'failed',
+          projectSessionId: 'session',
+          error: {
+            code: 'PROVIDER_FAILED',
+            message: 'LLM transport failed before receiving output',
+            retryable: true,
+            providerErrorCode,
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(io.sent).toHaveLength(2);
+      expect(reserveRetry).toHaveBeenCalledTimes(1);
+      bridge.handleEnvelope(
+        event(io.sent[1]!.requestId, 0, {
+          type: 'text_delta',
+          projectSessionId: 'session',
+          delta: '已恢复。',
+        }),
+      );
+      bridge.handleEnvelope(
+        event(io.sent[1]!.requestId, 1, {
+          type: 'complete',
+          projectSessionId: 'session',
+          finishReason: 'stop',
+        }),
+      );
+      for await (const item of stream) void item;
+      await expect(stream.result()).resolves.toMatchObject({
+        stopReason: 'stop',
+        content: [{ type: 'text', text: '已恢复。' }],
+      });
+      expect(observe).toHaveBeenCalledWith(
+        expect.any(String),
+        'failed',
+        expect.objectContaining({
+          failureOrigin: 'provider',
+          providerErrorCode,
+        }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([503, 520])(
+    'stops after two HTTP %s retries and leaves every request terminal',
+    async (providerStatus) => {
+      vi.useFakeTimers();
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value);
+      const observe = vi.fn();
+      const reserveRetry = vi.fn();
+      const stream = createPiStreamFunction(
+        bridge,
+        () => params,
+        observe,
+        undefined,
+        reserveRetry,
+      )(model, { messages: [] });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await vi.advanceTimersByTimeAsync(attempt * 1000);
+        expect(io.sent).toHaveLength(attempt + 1);
+        bridge.handleEnvelope(
+          event(io.sent[attempt]!.requestId, 0, {
+            type: 'failed',
+            projectSessionId: 'session',
+            error: {
+              code: 'PROVIDER_FAILED',
+              message: `Provider HTTP ${providerStatus}: unavailable`,
+              retryable: true,
+              providerStatus,
+            },
+          }),
+        );
+      }
+      for await (const item of stream) void item;
+      await expect(stream.result()).resolves.toMatchObject({
+        stopReason: 'error',
+        errorMessage: `Provider HTTP ${providerStatus}: unavailable`,
+      });
+      expect(reserveRetry).toHaveBeenCalledTimes(2);
+      expect(observe.mock.calls.filter(([, stage]) => stage === 'failed')).toHaveLength(3);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('records local context refusal separately from a bridge or provider error without sending', async () => {
+    const io = transport();
+    const observe = vi.fn();
+    const stream = createPiStreamFunction(
+      new NativeProviderBridge(io.value),
+      () => {
+        throw new Error('CONTEXT_BUDGET_EXCEEDED: 本地预算不足');
+      },
+      observe,
+    )(model, { messages: [] });
+    for await (const item of stream) void item;
+    expect(io.sent).toHaveLength(0);
+    expect(observe).toHaveBeenCalledWith(
+      expect.any(String),
+      'failed',
+      expect.objectContaining({
+        errorCode: 'CONTEXT_BUDGET_EXCEEDED',
+        failureOrigin: 'local_context',
+      }),
+    );
+  });
+
+  it.each(['cancel', 'budget', 'stale-session'] as const)(
+    'does not dispatch a retry after %s',
+    async (reason) => {
+      vi.useFakeTimers();
+      const io = transport();
+      const bridge = new NativeProviderBridge(io.value);
+      const observe = vi.fn();
+      const controller = new AbortController();
+      let resolutions = 0;
+      const reserveRetry = vi.fn(() => {
+        if (reason === 'budget') throw new Error('AGENT_TURN_QUOTA_EXHAUSTED');
+      });
+      const stream = createPiStreamFunction(
+        bridge,
+        () => {
+          if (++resolutions > 1 && reason === 'stale-session') throw new Error('STALE_SESSION');
+          return params;
+        },
+        observe,
+        undefined,
+        reserveRetry,
+      )(model, { messages: [] }, { signal: controller.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      bridge.handleEnvelope(
+        event(io.sent[0]!.requestId, 0, {
+          type: 'failed',
+          projectSessionId: 'session',
+          error: {
+            code: 'PROVIDER_FAILED',
+            message: 'Provider HTTP 502',
+            retryable: true,
+            providerStatus: 502,
+          },
+        }),
+      );
+      if (reason === 'cancel') controller.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      for await (const item of stream) void item;
+      expect(io.sent).toHaveLength(1);
+      await expect(stream.result()).resolves.toMatchObject({
+        stopReason: reason === 'cancel' ? 'aborted' : 'error',
+      });
+      const prepared = observe.mock.calls.filter(([, stage]) => stage === 'preparing');
+      expect(prepared).toHaveLength(2);
+      for (const [id] of prepared)
+        expect(
+          observe.mock.calls.some(
+            ([key, stage]) => key === id && ['failed', 'cancelled'].includes(stage as string),
+          ),
+        ).toBe(true);
+      expect(reserveRetry).toHaveBeenCalledTimes(reason === 'cancel' ? 0 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    { type: 'text_delta', delta: 'partial' },
+    { type: 'thinking_delta', delta: 'internal' },
+    { type: 'tool_call_start', callId: 'call', name: 'save' },
+    { type: 'tool_call_end', call: { id: 'call', name: 'save', argumentsJson: '{}' } },
+    { type: 'usage', usage: { inputTokens: 10 } },
+    { type: 'request_progress', stage: 'tool_arguments', argumentBytes: 12 },
+  ] as const)('does not replay after receiving $type', async (output) => {
+    vi.useFakeTimers();
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value);
+    const stream = createPiStreamFunction(bridge, () => params)(model, { messages: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.handleEnvelope(
+      event(io.sent[0]!.requestId, 0, { ...output, projectSessionId: 'session' }),
+    );
+    bridge.handleEnvelope(
+      event(io.sent[0]!.requestId, 1, {
+        type: 'failed',
+        projectSessionId: 'session',
+        error: {
+          code: 'PROVIDER_FAILED',
+          message: 'HTTP 520 after output',
+          retryable: true,
+          providerStatus: 520,
+        },
+      }),
+    );
+    for await (const item of stream) void item;
+    expect(io.sent).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles the stream when a project switch also prevents terminal accounting', async () => {
+    vi.useFakeTimers();
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value);
+    let closed = false;
+    const stream = createPiStreamFunction(
+      bridge,
+      () => {
+        if (closed) throw new Error('Project session changed during generation.');
+        return params;
+      },
+      () => {
+        if (closed) throw new Error('Project session changed during accounting.');
+      },
+    )(model, { messages: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.handleEnvelope(
+      event(io.sent[0]!.requestId, 0, {
+        type: 'failed',
+        projectSessionId: 'session',
+        error: {
+          code: 'PROVIDER_FAILED',
+          message: 'Provider HTTP 500',
+          retryable: true,
+          providerStatus: 500,
+        },
+      }),
+    );
+    closed = true;
+    await vi.advanceTimersByTimeAsync(1000);
+    for await (const item of stream) void item;
+    await expect(stream.result()).resolves.toMatchObject({
+      stopReason: 'error',
+      errorMessage: 'Project session changed during generation.',
+    });
+    expect(io.sent).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { code: 'PROVIDER_FAILED', providerStatus: 401, retryable: true },
+    { code: 'PROVIDER_FAILED', providerStatus: 429, retryable: true },
+    { code: 'PROVIDER_FAILED', providerStatus: 500, retryable: false },
+    { code: 'PROVIDER_FAILED', providerStatus: 520, retryable: false },
+    { code: 'PROVIDER_FAILED', retryable: true },
+    { code: 'PROVIDER_FAILED', providerErrorCode: 'WINHTTP_RESPONSE_HEADERS', retryable: false },
+    {
+      code: 'PROVIDER_FAILED',
+      providerStatus: 429,
+      providerErrorCode: 'WINHTTP_RESPONSE_HEADERS',
+      retryable: true,
+    },
+    { code: 'TIMEOUT', providerStatus: 504, retryable: true },
+    { code: 'SUBMISSION_UNKNOWN', providerStatus: 500, retryable: true },
+  ] as const)('does not infer recovery from ambiguous or refused errors: %j', async (error) => {
+    vi.useFakeTimers();
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value);
+    const stream = createPiStreamFunction(bridge, () => params)(model, { messages: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.handleEnvelope(
+      event(io.sent[0]!.requestId, 0, {
+        type: 'failed',
+        projectSessionId: 'session',
+        error: { ...error, message: 'Provider HTTP 500' },
+      }),
+    );
+    for await (const item of stream) void item;
+    expect(io.sent).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('records bounded Provider failure diagnostics after redacting credentials and URL queries', async () => {
+    const io = transport();
+    const bridge = new NativeProviderBridge(io.value, () => 'provider-failure');
+    const observe = vi.fn();
+    const stream = createPiStreamFunction(bridge, () => params, observe)(model, { messages: [] });
+    await Promise.resolve();
+    await Promise.resolve();
+    bridge.handleEnvelope(
+      event('provider-failure', 0, {
+        type: 'failed',
+        projectSessionId: 'session',
+        error: {
+          code: 'PROVIDER_FAILED',
+          message:
+            'HTTP 429 api_key=secret Bearer hidden https://provider.invalid/path?token=private',
+          retryable: true,
+          providerStatus: 429,
+          providerErrorCode: 'rate_limit_exceeded',
+        },
+      }),
+    );
+    for await (const _item of stream) void _item;
+
+    expect(observe).toHaveBeenCalledWith(
+      expect.any(String),
+      'failed',
+      expect.objectContaining({
+        errorCode: 'PROVIDER_FAILED',
+        providerStatus: 429,
+        providerErrorCode: 'rate_limit_exceeded',
+        providerErrorMessage:
+          'HTTP 429 api_key=[redacted] Bearer [redacted] https://provider.invalid/path?[query redacted]',
+      }),
+    );
+  });
+
   it('encodes resolver failures as Pi error events instead of throwing', async () => {
     const streamFn = createPiStreamFunction(new NativeProviderBridge(transport().value), () => {
       throw new Error('runtime unavailable');
@@ -564,4 +1027,161 @@ describe('createPiStreamFunction', () => {
       error: { errorMessage: 'runtime unavailable' },
     });
   });
+});
+
+it.each([
+  { providerStatus: 429, providerErrorCode: 'rate_limit_exceeded' },
+  { providerStatus: 402, providerErrorCode: 'insufficient_quota' },
+  { providerStatus: undefined, providerErrorCode: 'NETWORK_ERROR' },
+])('does not classify a provider failure as context overflow: %j', async (error) => {
+  vi.useFakeTimers();
+  const io = transport(),
+    bridge = new NativeProviderBridge(io.value),
+    recover = vi.fn(() => true);
+  const stream = createPiStreamFunction(
+    bridge,
+    () => params,
+    undefined,
+    undefined,
+    undefined,
+    recover,
+  )(model, { messages: [] });
+  await vi.advanceTimersByTimeAsync(0);
+  bridge.handleEnvelope(
+    event(io.sent[0]!.requestId, 0, {
+      type: 'failed',
+      projectSessionId: 'session',
+      error: {
+        code: 'PROVIDER_FAILED',
+        message: 'context mention in unrelated error',
+        retryable: true,
+        ...error,
+      },
+    }),
+  );
+  for await (const item of stream) void item;
+  expect(recover).not.toHaveBeenCalled();
+  expect(io.sent).toHaveLength(1);
+});
+it('bounds context recovery to two retries and rebuilds each request', async () => {
+  vi.useFakeTimers();
+  const io = transport(),
+    bridge = new NativeProviderBridge(io.value),
+    recover = vi.fn(() => true),
+    resolver = vi.fn(() => ({ ...params, prompt: `rebuilt-${resolver.mock.calls.length}` }));
+  const stream = createPiStreamFunction(
+    bridge,
+    resolver,
+    undefined,
+    undefined,
+    undefined,
+    recover,
+  )(model, { messages: [] });
+  for (let i = 0; i < 3; i++) {
+    await vi.advanceTimersByTimeAsync(i * 1000);
+    bridge.handleEnvelope(
+      event(io.sent[i]!.requestId, 0, {
+        type: 'failed',
+        projectSessionId: 'session',
+        error: {
+          code: 'PROVIDER_FAILED',
+          message: 'context exceeded',
+          retryable: false,
+          providerErrorCode: 'CONTEXT_BUDGET_EXCEEDED',
+        },
+      }),
+    );
+  }
+  for await (const item of stream) void item;
+  expect(resolver).toHaveBeenCalledTimes(3);
+  expect(recover).toHaveBeenCalledTimes(2);
+  expect(io.sent).toHaveLength(3);
+});
+it('does not dispatch an unchanged context-rejected request or mislabel the local failure', async () => {
+  vi.useFakeTimers();
+  const io = transport();
+  const bridge = new NativeProviderBridge(io.value);
+  const recover = vi.fn(() => true);
+  const observe = vi.fn();
+  const stream = createPiStreamFunction(
+    bridge,
+    () => params,
+    observe,
+    undefined,
+    undefined,
+    recover,
+  )(model, { messages: [] });
+  await vi.advanceTimersByTimeAsync(0);
+  bridge.handleEnvelope(
+    event(io.sent[0]!.requestId, 0, {
+      type: 'failed',
+      projectSessionId: 'session',
+      error: {
+        code: 'PROVIDER_FAILED',
+        message: 'CONTEXT_BUDGET_EXCEEDED: native protocol estimate 45106 > input budget 44800',
+        providerErrorCode: 'CONTEXT_BUDGET_EXCEEDED',
+        retryable: false,
+      },
+    }),
+  );
+  await vi.advanceTimersByTimeAsync(4000);
+  const events = [];
+  for await (const item of stream) events.push(item);
+  expect(io.sent).toHaveLength(1);
+  expect(recover).toHaveBeenCalledTimes(1);
+  expect(events.at(-1)).toMatchObject({
+    type: 'error',
+    error: { errorMessage: expect.stringContaining('same rejected request') as unknown },
+  });
+  expect(observe.mock.calls.filter(([, stage]) => stage === 'failed')).toEqual([
+    expect.arrayContaining([expect.objectContaining({ failureOrigin: 'local_context' })]),
+    expect.arrayContaining([expect.objectContaining({ failureOrigin: 'local_context' })]),
+  ]);
+});
+it('recovers local assembly overflow without dispatching impossible requests', async () => {
+  vi.useFakeTimers();
+  const io = transport(),
+    bridge = new NativeProviderBridge(io.value),
+    recover = vi.fn(() => true),
+    resolver = vi.fn(() => {
+      throw new Error('CONTEXT_BUDGET_EXCEEDED: required context');
+    });
+  const stream = createPiStreamFunction(
+    bridge,
+    resolver,
+    undefined,
+    undefined,
+    undefined,
+    recover,
+  )(model, { messages: [] });
+  await vi.advanceTimersByTimeAsync(4000);
+  for await (const item of stream) void item;
+  expect(resolver).toHaveBeenCalledTimes(3);
+  expect(recover).toHaveBeenCalledTimes(2);
+  expect(io.sent).toHaveLength(0);
+});
+it('allows a model request larger than 2 MiB while preserving the ordinary envelope bound', async () => {
+  const io = transport(),
+    bridge = new NativeProviderBridge(io.value);
+  const handle = bridge.start(
+    {
+      ...params,
+      prompt: 'x'.repeat(3 * 1024 * 1024),
+      modelCapabilities: {
+        modelId: params.modelId,
+        contextWindow: 1000000,
+        capabilitySource: 'manual_config',
+      },
+    },
+    { onEvent: () => undefined },
+  );
+  expect(io.sent).toHaveLength(1);
+  bridge.handleEnvelope(
+    event(handle.requestId, 0, {
+      type: 'complete',
+      projectSessionId: 'session',
+      finishReason: 'stop',
+    }),
+  );
+  await handle.done;
 });

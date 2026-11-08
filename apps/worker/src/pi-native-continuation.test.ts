@@ -18,7 +18,408 @@ import type { AgentProviderToolExecutor } from './agent-provider-tool-gateway.js
 const supplementalInputs = ['仅补充：保留蓝色衣服。', '对白保持原文。', '仅补充：保留蓝色衣服。'];
 
 describe('Pi native continuation', () => {
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'retains three complete sources above the soft threshold through tool loading and image preparation (%s)',
+    async (protocol) => {
+      const directory = await mkdtemp(join(tmpdir(), 'pi-three-source-reuse-'));
+      const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+      try {
+        projects.create(join(directory, 'project'), 'Three sources');
+        const content = new ContentService(projects);
+        const conversation = content.createConversation({ scopeType: 'project' });
+        const generations = new GenerationService(
+          projects,
+          content,
+          new ContextService(projects),
+          {
+            status: () => ({ key: 'test', name: 'Test', model: 'test', configured: false }),
+            stream: () => Promise.reject(new Error('No external requests')),
+          },
+          {
+            selectionResolver: {
+              resolveLlmSelection: () => ({
+                providerProfileId: 'profile',
+                providerName: 'Test',
+                modelId: 'model',
+                modelName: 'Test',
+                remoteModelId: 'mock',
+                protocol,
+                baseUrl: 'https://example.invalid/v1',
+              }),
+            },
+          },
+        );
+        const prepared = generations.prepare({
+          conversationId: conversation.id,
+          prompt: 'u'.repeat(70000),
+          providerProfileId: 'profile',
+          modelId: 'model',
+        });
+        const definitions: LlmToolDefinition[] = ['library.read', 'media.image.prepare'].map(
+          (name) => ({
+            name,
+            description: name === 'library.read' ? 't'.repeat(16000) : 'Prepare an image intent',
+            parameters: { type: 'object', properties: {}, additionalProperties: true },
+            authorizationHandle: 'worker-only',
+          }),
+        );
+        generations.configureAgentTools(prepared.stream, definitions);
+        const bodies = [5918, 6109, 4703].map((length, i) =>
+          `资料${i}正文`.repeat(length).slice(0, length),
+        );
+        const requests: NativeProviderStreamStartParams[] = [];
+        const bridge = new NativeProviderBridge({
+          send(envelope) {
+            if (envelope.method !== 'provider.stream.start') return Promise.resolve();
+            const params = envelope.params as NativeProviderStreamStartParams;
+            const index = requests.push(structuredClone(params)) - 1;
+            const common = { projectSessionId: prepared.stream.projectSessionId };
+            const calls =
+              index === 0
+                ? bodies.map((_, i) => ({
+                    id: `source-${i}`,
+                    name: 'library.read',
+                    argumentsJson: JSON.stringify({ sourceHandle: `h${i}` }),
+                  }))
+                : index === 1
+                  ? [
+                      {
+                        id: 'load-images',
+                        name: 'tools.load',
+                        argumentsJson: '{"names":["media.image.prepare"]}',
+                      },
+                    ]
+                  : index < 5
+                    ? [
+                        {
+                          id: `image-${index - 2}`,
+                          name: 'media.image.prepare',
+                          argumentsJson: JSON.stringify({ prompt: bodies[index - 2] }),
+                        },
+                      ]
+                    : [];
+            const events: NativeProviderHostEvent[] = calls.length
+              ? [
+                  ...calls.map((call) => ({ ...common, type: 'tool_call_end' as const, call })),
+                  {
+                    ...common,
+                    type: 'complete',
+                    providerResponseId: `r${index}`,
+                    finishReason: 'tool_calls',
+                  },
+                ]
+              : [
+                  { ...common, type: 'text_delta', delta: '三个图片制作意图已准备。' },
+                  {
+                    ...common,
+                    type: 'complete',
+                    providerResponseId: 'final',
+                    finishReason: 'stop',
+                  },
+                ];
+            events.forEach((event, sequence) =>
+              bridge.handleEnvelope({
+                kind: 'host.event',
+                requestId: envelope.requestId,
+                sequence,
+                event,
+              }),
+            );
+            return Promise.resolve();
+          },
+        });
+        const providerTools = {
+          startProviderStep: vi.fn(),
+          completeProviderStep: vi.fn(),
+          terminateGeneration: vi.fn(() => 0),
+          confirmTool: vi.fn(),
+          selectMedia: vi.fn(),
+          executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>((params) =>
+            Promise.resolve({
+              tools: definitions,
+              continuation: {
+                protocol: 'openai-responses',
+                previousResponseId: params.providerResponseId,
+                outputs: params.calls.map((call) => ({
+                  callId: call.id,
+                  output: JSON.stringify(
+                    call.name === 'library.read'
+                      ? {
+                          status: 'read',
+                          sourceId: call.id,
+                          versionId: 'v1',
+                          sourceType: 'document',
+                          sourceStatus: 'draft',
+                          readMode: 'source',
+                          startOffset: 0,
+                          endOffset: bodies[Number(call.id.slice(-1))]!.length,
+                          truncated: false,
+                          content: bodies[Number(call.id.slice(-1))],
+                        }
+                      : { status: 'prepared', preparationId: call.id },
+                  ),
+                })),
+              },
+            }),
+          ),
+        } satisfies AgentProviderToolExecutor;
+        const runtime = new PiConversationRuntime({
+          generation: generations,
+          providerTools,
+          bridge,
+          plans: {} as never,
+          createGateway: () => {
+            throw new Error('No planning');
+          },
+        });
+        await runtime.start({
+          ...prepared.stream,
+          identity: prepared.stream,
+          taskId: 'three-source-task',
+          mode: 'document',
+          prompt: '使用三份资料分别准备图片',
+        });
+        await runtime.wait(prepared.stream.generationId);
+        const result = generations.get(prepared.stream.generationId);
+        expect(result.status, result.error).toBe('complete');
+        expect(requests).toHaveLength(6);
+        const calls = providerTools.executeTools.mock.calls.flatMap(([params]) => params.calls);
+        expect(calls.filter((call) => call.name === 'library.read')).toHaveLength(3);
+        expect(calls.filter((call) => call.name === 'media.image.prepare')).toHaveLength(3);
+        const accounting = result.assistantMessage.attempt!.accounting!;
+        expect(accounting.requests[1]!.context!.estimatedInputTokens).toBeGreaterThan(44800 * 0.8);
+        expect(
+          accounting.requests.every((request) => request.context?.compactionCount === 0),
+          JSON.stringify(accounting.requests.map((request) => request.context)),
+        ).toBe(true);
+        for (const body of bodies) expect(JSON.stringify(requests[1])).toContain(body);
+        expect(JSON.stringify(requests)).not.toContain('reread_required');
+        if (protocol === 'openai-chat-completions')
+          for (const body of bodies) expect(JSON.stringify(requests.at(-1))).toContain(body);
+        else
+          expect(
+            requests
+              .slice(1)
+              .every((request) => request.continuation?.protocol === 'openai-responses'),
+          ).toBe(true);
+      } finally {
+        projects.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(
+    (['openai-responses', 'openai-chat-completions'] as const).flatMap((protocol) => [
+      { protocol, adaptiveOutput: false, declaredOutput: false },
+      { protocol, adaptiveOutput: true, declaredOutput: true },
+      { protocol, adaptiveOutput: true, declaredOutput: false },
+    ]),
+  )(
+    'dispatches $protocol with full long input and three images (adaptiveOutput=$adaptiveOutput, declaredOutput=$declaredOutput)',
+    async ({ protocol, adaptiveOutput, declaredOutput }) => {
+      const directory = await mkdtemp(join(tmpdir(), 'pi-visual-budget-'));
+      const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+      try {
+        projects.create(join(directory, 'project'), 'Visual budget test');
+        const content = new ContentService(projects);
+        const conversation = content.createConversation({ scopeType: 'project' });
+        const generations = new GenerationService(
+          projects,
+          content,
+          new ContextService(projects),
+          {
+            status: () => ({ key: 'test', name: 'Test', model: 'test', configured: false }),
+            stream: () => Promise.reject(new Error('No external requests in this test')),
+          },
+          {
+            selectionResolver: {
+              resolveLlmSelection: () => ({
+                providerProfileId: 'profile',
+                providerName: 'Test',
+                modelId: 'model',
+                modelName: 'Test model',
+                remoteModelId: 'test-model',
+                protocol,
+                baseUrl: 'https://example.invalid/v1',
+                ...(declaredOutput
+                  ? {
+                      inferenceSettings: {
+                        maxOutputTokens: 16000,
+                        outputTokenParameter:
+                          protocol === 'openai-responses'
+                            ? ('max_output_tokens' as const)
+                            : ('max_tokens' as const),
+                        reasoning: 'provider_default' as const,
+                      },
+                    }
+                  : {}),
+              }),
+            },
+          },
+        );
+        const prepared = generations.prepare({
+          conversationId: conversation.id,
+          prompt: 'u'.repeat(adaptiveOutput ? 68544 : 26544),
+          providerProfileId: 'profile',
+          modelId: 'model',
+        });
+        const definitions: LlmToolDefinition[] = [
+          {
+            name: 'library.read',
+            description: 't'.repeat(17900),
+            parameters: { type: 'object', additionalProperties: true, properties: {} },
+            authorizationHandle: 'worker-only',
+          },
+        ];
+        generations.configureAgentTools(prepared.stream, definitions);
+        const initial = generations.runtime(prepared.stream);
+        const images = Array.from({ length: 3 }, (_, index) => ({
+          mimeType: 'image/png',
+          data: Buffer.from(`image-${index}`).toString('base64'),
+        }));
+        const referenceText = 'Reference state. '.repeat(1800);
+        const requests: NativeProviderStreamStartParams[] = [];
+        const bridge = new NativeProviderBridge({
+          send(envelope) {
+            if (envelope.method !== 'provider.stream.start') return Promise.resolve();
+            const params = envelope.params as NativeProviderStreamStartParams;
+            requests.push(structuredClone(params));
+            const common = { projectSessionId: prepared.stream.projectSessionId };
+            const events: NativeProviderHostEvent[] =
+              requests.length === 1
+                ? [
+                    {
+                      ...common,
+                      type: 'tool_call_end',
+                      call: {
+                        id: 'visual-read',
+                        name: 'library.read',
+                        argumentsJson: '{"sourceHandle":"confirmed-source"}',
+                      },
+                    },
+                    {
+                      ...common,
+                      type: 'complete',
+                      providerResponseId: 'visual-read-response',
+                      finishReason: 'tool_calls',
+                    },
+                  ]
+                : [
+                    { ...common, type: 'text_delta', delta: '已核对三张参考图。' },
+                    {
+                      ...common,
+                      type: 'complete',
+                      providerResponseId: 'visual-final-response',
+                      finishReason: 'stop',
+                    },
+                  ];
+            events.forEach((event, sequence) =>
+              bridge.handleEnvelope({
+                kind: 'host.event',
+                requestId: envelope.requestId,
+                sequence,
+                event,
+              }),
+            );
+            return Promise.resolve();
+          },
+        });
+        const providerTools = {
+          reserveTurn: vi.fn(),
+          startProviderStep: vi.fn(),
+          completeProviderStep: vi.fn(),
+          terminateGeneration: vi.fn(() => 0),
+          confirmTool: vi.fn(),
+          selectMedia: vi.fn(),
+          executeTools: vi.fn<AgentProviderToolExecutor['executeTools']>((params) =>
+            Promise.resolve({
+              tools: definitions,
+              continuation: {
+                protocol: 'openai-responses' as const,
+                previousResponseId: params.providerResponseId,
+                outputs: params.calls.map((call) => ({
+                  callId: call.id,
+                  output: JSON.stringify({
+                    status: 'read',
+                    sourceId: 'reference-source',
+                    versionId: 'v1',
+                    content: referenceText,
+                  }),
+                  images,
+                })),
+              },
+            }),
+          ),
+        } satisfies AgentProviderToolExecutor;
+        const runtime = new PiConversationRuntime({
+          generation: generations,
+          plans: {} as never,
+          bridge,
+          providerTools,
+          createGateway: () => {
+            throw new Error('Unexpected planning');
+          },
+        });
+        await runtime.start({
+          ...prepared.stream,
+          identity: prepared.stream,
+          taskId: 'visual-budget-task',
+          mode: 'document',
+          prompt: initial.prompt,
+        });
+        await runtime.wait(prepared.stream.generationId);
+        const result = generations.get(prepared.stream.generationId);
+        expect(result.status, result.error).toBe('complete');
+        expect(requests).toHaveLength(2);
+        expect(requests[1]!.prompt).toBe(initial.prompt);
+        expect(requests[1]!.continuation!.outputs[0]!.images).toEqual(images);
+        expect(requests[1]!.continuation!.outputs[0]!.output).toContain(referenceText);
+        expect(result.assistantMessage.attempt!.accounting!.requests.at(-1)!.context).toMatchObject(
+          {
+            contextWindowTokens: 512000,
+            windowSource: 'fallback',
+            limitEnforcement: 'advisory_fallback',
+            compactionCount: 0,
+            estimatedInputTokens: expect.any(Number) as number,
+          },
+        );
+        const context = result.assistantMessage.attempt!.accounting!.requests.at(-1)!.context!;
+        if (adaptiveOutput) {
+          expect(context.estimatedInputTokens).toBeGreaterThan(44800);
+          expect(requests[1]!.inferenceSettings!.maxOutputTokens).toBe(
+            declaredOutput ? 16000 : 16384,
+          );
+          expect(requests[1]!.inferenceSettings!.maxOutputTokens).toBe(
+            context.reservedOutputTokens,
+          );
+          expect(requests[1]!.inferenceSettings!.outputTokenParameter).toBe(
+            protocol === 'openai-responses' ? 'max_output_tokens' : 'max_tokens',
+          );
+          expect(requests[1]!.inferenceSettings!.reasoning).toBe('provider_default');
+        } else expect(context.estimatedInputTokens).toBeLessThan(44800);
+      } finally {
+        projects.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
+    {
+      protocol: 'openai-chat-completions',
+      responseIds: true,
+      failRead: false,
+      outcome: 'recovered',
+      supplementMode: 'none',
+    },
+    {
+      protocol: 'openai-responses',
+      responseIds: true,
+      failRead: false,
+      outcome: 'recovered',
+      supplementMode: 'none',
+    },
     {
       protocol: 'openai-chat-completions',
       responseIds: true,
@@ -164,7 +565,8 @@ describe('Pi native continuation', () => {
             if (envelope.method !== 'provider.stream.start') return Promise.resolve();
             const params = envelope.params as NativeProviderStreamStartParams;
             requests.push(structuredClone(params));
-            const ordinal = requests.length;
+            const attempt = requests.length;
+            const ordinal = outcome === 'recovered' && attempt > 3 ? attempt - 1 : attempt;
             if (ordinal === 1 && supplementMode === 'text')
               supplementalInputs.forEach((input, index) =>
                 generations.supplement(
@@ -184,6 +586,19 @@ describe('Pi native continuation', () => {
             };
             const session = { projectSessionId: prepared.stream.projectSessionId };
             emit({ type: 'started', ...session });
+            if (outcome === 'recovered' && attempt === 3) {
+              emit({
+                type: 'failed',
+                ...session,
+                error: {
+                  code: 'PROVIDER_FAILED',
+                  message: 'Provider HTTP 500: Service Error',
+                  retryable: true,
+                  providerStatus: 500,
+                },
+              });
+              return Promise.resolve();
+            }
             if (outcome !== 'missing') {
               const usage = {
                 inputTokens: ordinal * 100 - 1,
@@ -261,6 +676,7 @@ describe('Pi native continuation', () => {
           },
         });
         const providerTools = {
+          reserveTurn: vi.fn(),
           startProviderStep: vi.fn(),
           completeProviderStep: vi.fn(),
           terminateGeneration: vi.fn(() => 0),
@@ -309,7 +725,9 @@ describe('Pi native continuation', () => {
         });
         await runtime.wait(prepared.stream.generationId);
 
-        const expectedStatus = ['complete', 'missing'].includes(outcome) ? 'complete' : outcome;
+        const expectedStatus = ['complete', 'missing', 'recovered'].includes(outcome)
+          ? 'complete'
+          : outcome;
         const result = generations.get(prepared.stream.generationId);
         expect(result.status).toBe(expectedStatus);
         if (protocol === 'openai-responses' && !responseIds) {
@@ -352,14 +770,24 @@ describe('Pi native continuation', () => {
               .items.find((message) => message.id === result.assistantMessage.id)?.attempt,
           ).toMatchObject({ usage: expectedUsage, estimatedCost });
         }
-        expect(requests).toHaveLength(3);
+        expect(requests).toHaveLength(outcome === 'recovered' ? 4 : 3);
+        expect(providerTools.reserveTurn).toHaveBeenCalledTimes(requests.length);
+        if (outcome === 'recovered') {
+          expect(requests[3]).toEqual(requests[2]);
+          expect(result.assistantMessage.attempt?.accounting?.requests).toHaveLength(4);
+          expect(
+            result.assistantMessage.attempt?.accounting?.requests.filter(
+              (request) => request.stage === 'failed',
+            ),
+          ).toHaveLength(1);
+        }
         expect(providerTools.executeTools).toHaveBeenCalledTimes(supplementMode === 'text' ? 1 : 3);
         for (const request of requests) {
           expect(request.systemInstruction).toBe(requests[0]?.systemInstruction);
           expect(request.systemInstruction).toContain('unified project Agent');
           expect(request.systemInstruction).toContain('# Agent project library policy');
-          expect(request.systemInstruction).toContain(initial.context);
-          expect(request.context).toBe('');
+          expect(request.systemInstruction).not.toContain('[FROZEN PROJECT CONTEXT]');
+          expect(request.context).toBe(initial.context);
           expect(request.prompt).toBe(initial.prompt);
           expect(JSON.stringify(request)).not.toContain('worker-only');
         }

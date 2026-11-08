@@ -1,16 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import type {
-  AssetInfo,
-  ShotContinuityContext,
-  ShotContinuityMode,
-  ShotContinuityPreview,
-} from '@ai-video/contracts';
+import type { AssetInfo, ShotContinuityContext } from '@ai-video/contracts';
+import { continuityReferenceImageIds, continuitySourceImageIds } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
-import { useDubbingMedia } from './dubbing/media';
-import { ImagePreview } from './ImagePreview';
 import { AssetImagePreview } from './AssetImagePreview';
 import { referenceAssetName } from './ReferenceCard';
-import { streamPreparedLlmGeneration, type LlmStreamRun } from './llm-client';
+import { ContinuitySourceSelector } from './ContinuitySourceSelector';
+import { ContinuityAssetPicker } from './ContinuityAssetPicker';
+import { resolveAssetDrop, useAssetDrop } from './assets/use-asset-drop';
 
 export function ShotContinuityPanel(props: {
   projectId: string;
@@ -21,44 +17,50 @@ export function ShotContinuityPanel(props: {
   assets: AssetInfo[];
   llm?: { providerProfileId: string; modelId: string; name: string; vision: boolean };
   onChange: (context: ShotContinuityContext) => void;
-  onGenerate: (mode: 'image' | 'video', context: ShotContinuityContext) => void;
+  onGenerate: (mode: 'image', context: ShotContinuityContext) => void;
+  onAskAgent?: (context: ShotContinuityContext) => Promise<void> | void;
 }) {
   const callWorker = projectWorker();
   const [context, setContext] = useState<ShotContinuityContext>();
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const [videoId, setVideoId] = useState('');
-  const [timeMs, setTimeMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(0);
-  const [frames, setFrames] = useState<ShotContinuityPreview[]>([]);
-  const [anchor, setAnchor] = useState<number>();
-  const [mode, setMode] = useState<ShotContinuityMode>('continue');
+  const [selectionPending, setSelectionPending] = useState(false);
   const [notes, setNotes] = useState('');
   const [imagePrompt, setImagePrompt] = useState('');
-  const [videoPrompt, setVideoPrompt] = useState('');
-  const [generating, setGenerating] = useState<'image' | 'video'>();
-  const video = useRef<HTMLVideoElement>(null);
-  const run = useRef<LlmStreamRun | undefined>(undefined);
-  const cancelPromptRequested = useRef(false);
+  const [outputIds, setOutputIds] = useState<string[]>([]);
+  const [firstFrame, setFirstFrame] = useState('');
+  const [outputAssets, setOutputAssets] = useState<AssetInfo[]>([]);
+  const edited = useRef({ notes: false, prompt: false, outputs: false });
   const alive = useRef(true);
+  const running = useRef(false);
   const version = useRef<number | undefined>(undefined);
   const callbacks = useRef(props);
   callbacks.current = props;
-  const media = useDubbingMedia(props.projectId, videoId || undefined, false);
-  const adopt = (next: ShotContinuityContext) => {
+  const adopt = (next: ShotContinuityContext, preserveEdits = false) => {
     version.current = next.rowVersion;
     setContext(next);
-    setImagePrompt(next.binding?.imagePrompt ?? '');
-    setVideoPrompt(next.binding?.videoPrompt ?? '');
-    setMode(next.binding?.mode ?? 'continue');
-    setNotes(next.binding?.notes ?? '');
+    if (!preserveEdits || !edited.current.prompt) setImagePrompt(next.binding?.imagePrompt ?? '');
+    if (!preserveEdits || !edited.current.notes) setNotes(next.binding?.notes ?? '');
+    if (!preserveEdits || !edited.current.outputs) {
+      setOutputIds(
+        next.binding
+          ? [
+              ...new Set([
+                ...continuityReferenceImageIds(next.binding),
+                ...(next.binding.firstFrameAssetId ? [next.binding.firstFrameAssetId] : []),
+              ]),
+            ]
+          : [],
+      );
+      setFirstFrame(next.binding?.firstFrameAssetId ?? '');
+    }
+    if (!preserveEdits) edited.current = { notes: false, prompt: false, outputs: false };
     callbacks.current.onChange(next);
   };
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
-      run.current?.detach();
     };
   }, []);
   useEffect(() => {
@@ -69,7 +71,7 @@ export function ShotContinuityPanel(props: {
         if (version.current === next.rowVersion) {
           setContext(next);
           callbacks.current.onChange(next);
-        } else adopt(next);
+        } else adopt(next, true);
       })
       .catch((error: unknown) => {
         if (active) setMessage(error instanceof Error ? error.message : '衔接设置读取失败。');
@@ -78,9 +80,9 @@ export function ShotContinuityPanel(props: {
       active = false;
     };
   }, [props.projectId, props.shotId, props.revision]);
-
   const action = async (work: () => Promise<void>) => {
-    if (busy) return;
+    if (running.current || !props.writable || props.sourceDirty) return;
+    running.current = true;
     setBusy(true);
     setMessage('');
     try {
@@ -88,157 +90,78 @@ export function ShotContinuityPanel(props: {
     } catch (error) {
       if (alive.current) setMessage(error instanceof Error ? error.message : '衔接操作失败。');
     } finally {
+      running.current = false;
       if (alive.current) setBusy(false);
     }
   };
-  const extract = () =>
+  const changed = () => window.dispatchEvent(new CustomEvent('production-source-updated'));
+  const reconfirm = () =>
     action(async () => {
-      const selectedVideo = videoId;
-      const result = await callWorker('shot.continuity.preview', {
+      if (
+        !context?.binding ||
+        !context.reconfirmable ||
+        context.currentShotRowVersion === undefined
+      )
+        return;
+      const next = await callWorker('shot.continuity.reconfirm', {
         shotId: props.shotId,
-        videoAssetId: selectedVideo,
-        timeMs,
-      });
-      if (!alive.current) return;
-      if (frames.some((frame) => frame.sourceToken !== result.sourceToken)) {
-        setFrames([]);
-        setAnchor(undefined);
-        throw new Error('来源内容已变化，请重新添加候选帧。');
-      }
-      setDurationMs(result.durationMs);
-      setFrames((current) =>
-        [...current.filter((frame) => frame.timeMs !== result.timeMs), result].sort(
-          (a, b) => a.timeMs - b.timeMs,
-        ),
-      );
-    });
-  const confirm = () =>
-    action(async () => {
-      if (!context || anchor === undefined || !frames.length) return;
-      const next = await callWorker('shot.continuity.confirm', {
-        shotId: props.shotId,
-        videoAssetId: videoId,
-        sourceToken: frames[0]!.sourceToken,
-        timesMs: frames.map((frame) => frame.timeMs),
-        anchorTimeMs: anchor,
-        mode,
-        notes,
         expectedRowVersion: context.rowVersion,
+        expectedTargetRowVersion: context.currentShotRowVersion,
       });
       if (!alive.current) return;
-      adopt(next);
-      setFrames([]);
-      setAnchor(undefined);
-      window.dispatchEvent(new CustomEvent('production-source-updated'));
-      setMessage('选帧已确认。现在可以让 LLM 生成提示词。');
+      adopt(next, true);
+      changed();
+      setMessage('已确认沿用现有选帧，可以填充本镜视频表单。');
     });
-  const generatePrompt = (kind: 'image' | 'video') =>
+  const askAgent = () =>
     action(async () => {
-      if (!context?.binding || !props.llm) return;
-      const expected = context.rowVersion;
-      cancelPromptRequested.current = false;
-      setGenerating(kind);
-      try {
-        const prepared = await callWorker('shot.continuity.prompt.prepare', {
-          shotId: props.shotId,
-          expectedRowVersion: expected,
-          kind,
-          providerProfileId: props.llm.providerProfileId,
-          modelId: props.llm.modelId,
-        });
-        if (!alive.current || cancelPromptRequested.current) {
-          await callWorker('llm.generation.cancel', { generationId: prepared.stream.generationId });
-          return;
-        }
-        let complete = false;
-        let failed = '';
-        let text = '';
-        const task = streamPreparedLlmGeneration(prepared, {
-          onDelta() {},
-          onState(state) {
-            if (state.status === 'complete') {
-              complete = true;
-              text = state.assistantMessage.content;
-            }
-            if (state.status === 'failed' || state.status === 'cancelled')
-              failed = state.error ?? '提示词生成已停止。';
-          },
-        });
-        run.current = task;
-        await task.completion;
-        if (!alive.current) return;
-        const latest = await callWorker('shot.continuity.get', { shotId: props.shotId });
-        if (!alive.current) return;
-        if (
-          latest.rowVersion !== expected ||
-          latest.stale ||
-          version.current !== expected ||
-          callbacks.current.sourceDirty
-        )
-          throw new Error('选帧或下一镜头内容已变化，旧提示词未采用，请重新确认后生成。');
-        if (!complete || failed || !text.trim())
-          throw new Error(failed || 'LLM 未返回完整提示词，请重试。');
-        if (kind === 'image') setImagePrompt(text);
-        else setVideoPrompt(text);
-        setMessage('LLM 提示词已生成，可以修改后保存并进入制作。');
-      } finally {
-        run.current = undefined;
-        if (alive.current) setGenerating(undefined);
-      }
+      if (!context || !props.onAskAgent) return;
+      const next =
+        notes.trim() === context.binding?.notes
+          ? context
+          : await callWorker('shot.continuity.intent.save', {
+              shotId: props.shotId,
+              expectedRowVersion: context.rowVersion,
+              notes,
+            });
+      if (!alive.current) return;
+      adopt(next, true);
+      await props.onAskAgent(next);
+      if (alive.current)
+        setMessage('已交给 Agent。可在会话中继续说明目标，保存后的图片提示词会显示在这里。');
     });
-  const usePrompt = (kind: 'image' | 'video') =>
+  const savePrompt = (fill: boolean) =>
     action(async () => {
       if (!context) return;
+      const intended =
+        notes.trim() === context.binding?.notes
+          ? context
+          : await callWorker('shot.continuity.intent.save', {
+              shotId: props.shotId,
+              expectedRowVersion: context.rowVersion,
+              notes,
+            });
+      if (!alive.current) return;
       const next = await callWorker('shot.continuity.prompt.save', {
         shotId: props.shotId,
-        expectedRowVersion: context.rowVersion,
-        kind,
-        prompt: kind === 'image' ? imagePrompt : videoPrompt,
+        expectedRowVersion: intended.rowVersion,
+        kind: 'image',
+        prompt: imagePrompt,
       });
       if (!alive.current) return;
-      adopt(next);
-      window.dispatchEvent(
-        new CustomEvent('production-source-updated', {
-          detail: { authoring: kind === 'video' },
-        }),
-      );
-      props.onGenerate(kind, next);
+      edited.current.prompt = false;
+      edited.current.notes = false;
+      adopt(next, true);
+      changed();
+      if (fill) props.onGenerate('image', next);
+      else setMessage('参考图提示词已保存。');
     });
-  const bindFirstFrame = (assetId: string) =>
-    action(async () => {
-      if (!context || !assetId) return;
-      const next = await callWorker('shot.continuity.firstFrame', {
-        shotId: props.shotId,
-        expectedRowVersion: context.rowVersion,
-        assetId,
-      });
-      if (!alive.current) return;
-      adopt(next);
-      window.dispatchEvent(new CustomEvent('production-source-updated'));
-    });
-  const seek = (nextMs: number) => {
-    const next = Math.max(0, Math.min(Math.max(0, durationMs - 1), Math.round(nextMs)));
-    setTimeMs(next);
-    if (video.current) {
-      video.current.pause();
-      video.current.currentTime = next / 1000;
-    }
-  };
   const writable = props.writable && !busy && !props.sourceDirty;
-  const selectionPending = Boolean(
-    frames.length ||
-    (videoId &&
-      context?.binding &&
-      (videoId !== context.binding.sourceVideoAssetId ||
-        mode !== context.binding.mode ||
-        notes !== context.binding.notes)),
-  );
   const ready = writable && Boolean(context?.binding) && !context?.stale && !selectionPending;
-  const canAskLlm = ready && props.llm?.vision;
   const binding = context?.binding;
   const images = [
     ...new Map(
-      [...props.assets, ...(context?.images ?? [])]
+      [...props.assets, ...(context?.images ?? []), ...outputAssets]
         .filter(
           (asset) =>
             asset.projectId === props.projectId &&
@@ -248,257 +171,270 @@ export function ShotContinuityPanel(props: {
         .map((asset) => [asset.id, asset]),
     ).values(),
   ];
-
+  const toggleOutput = (asset: AssetInfo) => {
+    if (!outputIds.includes(asset.id) && outputIds.length >= 12) {
+      setMessage('本镜头最多绑定 12 张图片。');
+      return;
+    }
+    edited.current.outputs = true;
+    setOutputAssets((current) => [
+      ...new Map([...current, asset].map((item) => [item.id, item])).values(),
+    ]);
+    setOutputIds((current) =>
+      current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
+    );
+    if (firstFrame === asset.id) setFirstFrame('');
+  };
+  const outputDrop = useAssetDrop<HTMLDivElement>({
+    enabled: ready,
+    onDrop: (raw) => {
+      void action(async () => {
+        const { payload } = await resolveAssetDrop(
+          raw,
+          props.projectId,
+          ['image'],
+          12 - outputIds.length,
+        );
+        const assets = await callWorker('shot.continuity.assets', {
+          shotId: props.shotId,
+          assetIds: payload.assets.map((asset) => asset.id),
+        });
+        if (!alive.current) return;
+        edited.current.outputs = true;
+        setOutputAssets((current) => [
+          ...new Map([...current, ...assets].map((asset) => [asset.id, asset])).values(),
+        ]);
+        setOutputIds((current) => [...new Set([...current, ...assets.map((asset) => asset.id)])]);
+      });
+    },
+  });
+  const saveOutputs = () =>
+    action(async () => {
+      if (!context) return;
+      const next = await callWorker('shot.continuity.references', {
+        shotId: props.shotId,
+        expectedRowVersion: context.rowVersion,
+        assetIds: outputIds,
+        firstFrameAssetId: firstFrame || undefined,
+      });
+      if (!alive.current) return;
+      edited.current.outputs = false;
+      adopt(next, true);
+      changed();
+      setMessage('本镜头参考图片已确认绑定。');
+    });
   return (
     <section className="shot-continuity-panel" aria-label="镜头衔接">
       <h2>镜头衔接</h2>
-      <p>选择上一镜头画面作为首帧，确认后生成衔接提示词。</p>
-      {props.sourceDirty && <p role="status">下一镜头内容有未保存修改，请先保存镜头提示词。</p>}
-      {!context?.previousShot ? (
-        <p>当前镜头没有同场次的上一镜头。</p>
-      ) : (
-        <>
-          <label>
-            上一镜头：{context.previousShot.title}
-            <select
-              aria-label="上一镜头视频"
-              value={videoId}
-              disabled={!writable}
-              onChange={(event) => {
-                setVideoId(event.target.value);
-                setFrames([]);
-                setAnchor(undefined);
-                setTimeMs(0);
-                setDurationMs(0);
-              }}
-            >
-              <option value="">人工选择视频</option>
-              {context.videos.map((asset) => (
-                <option key={asset.id} value={asset.id}>
-                  {referenceAssetName(asset)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {!context.videos.length && <p>上一镜头还没有成功保存的视频。</p>}
-          {videoId && (
-            <>
-              {media?.src && (
-                <video
-                  ref={video}
-                  key={media.src}
-                  src={media.src}
-                  controls
-                  preload="metadata"
-                  aria-label="上一镜头选帧播放器"
-                  onLoadedMetadata={(event) =>
-                    setDurationMs(Math.round(event.currentTarget.duration * 1000))
-                  }
-                  onTimeUpdate={(event) =>
-                    setTimeMs(Math.round(event.currentTarget.currentTime * 1000))
-                  }
-                />
-              )}
-              {media?.error && <p role="status">{media.error}</p>}
-              <div className="shot-continuity-actions">
-                <label>
-                  选帧时间（秒）
-                  <input
-                    aria-label="选帧时间（秒）"
-                    type="number"
-                    min="0"
-                    max={Math.max(0, durationMs - 1) / 1000}
-                    step="0.001"
-                    value={timeMs / 1000}
-                    disabled={!writable}
-                    onChange={(event) => seek(Number(event.target.value) * 1000)}
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={!writable || !durationMs}
-                  onClick={() => seek(timeMs - 1000 / (frames[0]?.fps ?? 25))}
-                >
-                  前移约一帧
-                </button>
-                <button
-                  type="button"
-                  disabled={!writable || !durationMs}
-                  onClick={() => seek(timeMs + 1000 / (frames[0]?.fps ?? 25))}
-                >
-                  后移约一帧
-                </button>
-                <button
-                  type="button"
-                  disabled={!writable || !durationMs || frames.length >= 4}
-                  onClick={() => void extract()}
-                >
-                  添加此画面
-                </button>
-              </div>
-              <div className="shot-continuity-frames">
-                {frames.map((frame) => (
-                  <article key={frame.timeMs}>
-                    <ImagePreview
-                      src={frame.dataUrl}
-                      alt={`${(frame.timeMs / 1000).toFixed(3)} 秒候选帧`}
-                    />
-                    <label>
-                      <input
-                        type="radio"
-                        name={`continuity-anchor-${props.shotId}`}
-                        checked={anchor === frame.timeMs}
-                        disabled={!writable}
-                        onChange={() => setAnchor(frame.timeMs)}
-                      />
-                      {(frame.timeMs / 1000).toFixed(3)}s · 用作衔接基准
-                    </label>
-                    <button
-                      type="button"
-                      disabled={!writable}
-                      onClick={() => {
-                        setFrames((current) =>
-                          current.filter((item) => item.timeMs !== frame.timeMs),
-                        );
-                        if (anchor === frame.timeMs) setAnchor(undefined);
-                      }}
-                    >
-                      移除此帧
-                    </button>
-                  </article>
-                ))}
-              </div>
-              <label>
-                衔接方式
-                <select
-                  aria-label="衔接方式"
-                  value={mode}
-                  disabled={!writable}
-                  onChange={(event) => setMode(event.target.value as ShotContinuityMode)}
-                >
-                  <option value="continue">同机位续拍：直接使用基准帧</option>
-                  <option value="reframe">换机位：先生成并确认新首帧</option>
-                </select>
-              </label>
-              <label>
-                连续性要求
-                <textarea
-                  aria-label="连续性要求"
-                  value={notes}
-                  maxLength={4000}
-                  disabled={!writable}
-                  placeholder="例如：仍站在第三根桥柱旁，双脚保持原位，只转头看向桥头。"
-                  onChange={(event) => setNotes(event.target.value)}
-                />
-              </label>
-              <button
-                type="button"
-                className="button primary"
-                disabled={!writable || !frames.length || anchor === undefined}
-                onClick={() => void confirm()}
-              >
-                确认所选画面
-              </button>
-            </>
-          )}
-        </>
-      )}
+      {props.sourceDirty && <p role="status">本镜头内容有未保存修改，请先保存镜头提示词。</p>}
+      <ContinuitySourceSelector
+        key={`${props.projectId}:${props.shotId}`}
+        projectId={props.projectId}
+        shotId={props.shotId}
+        context={context}
+        writable={writable}
+        notes={notes}
+        onConfirm={adopt}
+        onPending={setSelectionPending}
+      />
       {binding && (
         <>
           <h3>已确认的衔接</h3>
-          <p>
-            {binding.mode === 'continue' ? '同机位续拍' : '换机位'} ·{' '}
-            {binding.notes || '未补充连续性要求'}
-          </p>
-          {context.stale && <p role="alert">剧情或衔接来源已变化，请重新选择并确认画面。</p>}
-          {selectionPending && (
-            <p role="status">选帧或衔接要求尚未确认，请先确认画面，再生成提示词。</p>
-          )}
+          {context.stale &&
+            (context.reconfirmable ? (
+              <>
+                <p role="alert">镜头提示词已变化，请核对现有参考画面，再明确确认是否沿用。</p>
+                <button
+                  type="button"
+                  disabled={
+                    !writable || selectionPending || context.currentShotRowVersion === undefined
+                  }
+                  onClick={() => void reconfirm()}
+                >
+                  确认沿用现有选帧
+                </button>
+              </>
+            ) : (
+              <p role="alert">剧情或衔接来源已变化，请重新选择并确认画面。</p>
+            ))}
+          {selectionPending && <p role="status">参考画面尚未确认，请确认或放弃本次选择。</p>}
           <div className="shot-continuity-frames">
-            {binding.frames.map((frame) => {
-              const asset = context.images.find((item) => item.id === frame.assetId);
+            {continuitySourceImageIds(binding).map((assetId) => {
+              const asset = context.images.find((item) => item.id === assetId);
+              const frame = binding.frames.find((item) => item.assetId === assetId);
               return (
-                <article key={frame.assetId}>
-                  {asset && <AssetImagePreview asset={asset} />}
+                <article key={assetId}>
+                  {asset && <AssetImagePreview asset={asset} resolution="original" />}
                   <span>
-                    {(frame.timeMs / 1000).toFixed(3)}s
-                    {frame.assetId === binding.anchorAssetId ? ' · 衔接基准' : ''}
+                    {frame ? `${(frame.timeMs / 1000).toFixed(3)}s` : '参考图片'}
+                    {assetId === binding.anchorAssetId ? ' · 衔接基准' : ''}
                   </span>
                 </article>
               );
             })}
           </div>
-          {binding.mode === 'reframe' && (
-            <label>
-              确认下一视频首帧
-              <select
-                aria-label="确认下一视频首帧"
-                value={binding.firstFrameAssetId ?? ''}
-                disabled={!ready}
-                onChange={(event) => void bindFirstFrame(event.target.value)}
-              >
-                <option value="">生成新构图后，人工选择图片</option>
-                {images
-                  .filter((asset) => !binding.frames.some((frame) => frame.assetId === asset.id))
-                  .map((asset) => (
-                    <option key={asset.id} value={asset.id}>
-                      {referenceAssetName(asset)}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          )}
+          <label>
+            生成要求
+            <textarea
+              aria-label="参考图生成要求"
+              value={notes}
+              maxLength={4000}
+              disabled={!writable}
+              placeholder="例如：本镜头中人物已转身后的侧面中景，保持服装、持物和其他人物位置。"
+              onChange={(event) => {
+                edited.current.notes = true;
+                setNotes(event.target.value);
+              }}
+            />
+          </label>
           <p>
             {props.llm
-              ? `提示词 LLM：${props.llm.name}${props.llm.vision ? '' : '（当前模型不支持看图）'}`
-              : '请先在会话中选择支持看图的 LLM 连接和模型。'}
+              ? `模型：${props.llm.name}${props.llm.vision ? '' : '（不支持看图）'}`
+              : '未选择视觉模型，可手填提示词。'}
           </p>
-          {binding.mode === 'reframe' && (
-            <>
-              <button
-                type="button"
-                disabled={!canAskLlm}
-                onClick={() => void generatePrompt('image')}
-              >
-                LLM 生成首帧图片提示词
-              </button>
-              <textarea
-                aria-label="衔接首帧图片提示词"
-                value={imagePrompt}
-                maxLength={20000}
+          <button
+            type="button"
+            aria-label="交给 Agent 编写参考图提示词"
+            disabled={!ready || !props.llm?.vision || !props.onAskAgent}
+            onClick={() => void askAgent()}
+          >
+            Agent 编写
+          </button>
+          <label>
+            图片提示词
+            <textarea
+              aria-label="参考图图片提示词"
+              value={imagePrompt}
+              maxLength={20000}
+              disabled={!ready}
+              onChange={(event) => {
+                edited.current.prompt = true;
+                setImagePrompt(event.target.value);
+              }}
+            />
+          </label>
+          <div className="shot-continuity-actions">
+            <button
+              type="button"
+              aria-label="保存图片提示词"
+              disabled={!ready || !imagePrompt.trim()}
+              onClick={() => void savePrompt(false)}
+            >
+              保存提示词
+            </button>
+            <button
+              type="button"
+              className="continuity-primary-action"
+              aria-label="填充参考图生图表单"
+              disabled={!ready || !imagePrompt.trim()}
+              onClick={() => void savePrompt(true)}
+            >
+              填充生图表单
+            </button>
+          </div>
+          <h3>绑定本镜头图片</h3>
+          <div
+            ref={outputDrop.ref}
+            {...outputDrop.handlers}
+            className={`continuity-output-selector ${outputDrop.hovering ? 'is-asset-drag-over' : ''}`}
+          >
+            <ContinuityAssetPicker
+              projectId={props.projectId}
+              selectedIds={outputIds}
+              onToggle={toggleOutput}
+              disabled={!ready}
+              imagesOnly
+              label="从项目选择本镜图片"
+            />
+            <label>
+              添加本镜头图片
+              <select
+                aria-label="添加本镜头图片"
+                value=""
                 disabled={!ready}
-                onChange={(event) => setImagePrompt(event.target.value)}
-              />
-              <button
-                type="button"
-                disabled={!ready || !imagePrompt.trim()}
-                onClick={() => void usePrompt('image')}
+                onChange={(event) => {
+                  const asset = images.find((item) => item.id === event.target.value);
+                  if (asset) toggleOutput(asset);
+                }}
               >
-                保存并制作新首帧
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            disabled={!canAskLlm || !binding.firstFrameAssetId}
-            onClick={() => void generatePrompt('video')}
-          >
-            LLM 生成后续视频提示词
-          </button>
-          <textarea
-            aria-label="衔接视频提示词"
-            value={videoPrompt}
-            maxLength={20000}
-            disabled={!ready}
-            onChange={(event) => setVideoPrompt(event.target.value)}
-          />
-          <button
-            type="button"
-            disabled={!ready || !binding.firstFrameAssetId || !videoPrompt.trim()}
-            onClick={() => void usePrompt('video')}
-          >
-            保存并制作衔接视频
-          </button>
+                <option value="">选择图片加入或移除</option>
+                {images.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {referenceAssetName(asset)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="shot-continuity-frames">
+              {outputIds.map((assetId, index) => {
+                const asset = images.find((item) => item.id === assetId);
+                return (
+                  <article key={assetId}>
+                    {asset && <AssetImagePreview asset={asset} resolution="original" />}
+                    <span>
+                      图片 {index + 1}
+                      {firstFrame === assetId ? ' · 首帧' : ' · 普通参考图'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={!ready || index === 0}
+                      onClick={() => {
+                        edited.current.outputs = true;
+                        setOutputIds((current) => {
+                          const next = [...current];
+                          [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
+                          return next;
+                        });
+                      }}
+                    >
+                      前移图片 {index + 1}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!ready}
+                      onClick={() => {
+                        if (asset) toggleOutput(asset);
+                        else {
+                          edited.current.outputs = true;
+                          setOutputIds((current) => current.filter((id) => id !== assetId));
+                          if (firstFrame === assetId) setFirstFrame('');
+                        }
+                      }}
+                    >
+                      移除图片 {index + 1}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+            <label>
+              本镜头首帧
+              <select
+                aria-label="本镜头首帧"
+                value={firstFrame}
+                disabled={!ready || !outputIds.length}
+                onChange={(event) => {
+                  edited.current.outputs = true;
+                  setFirstFrame(event.target.value);
+                }}
+              >
+                <option value="">全部作为普通参考图</option>
+                {outputIds.map((assetId, index) => (
+                  <option key={assetId} value={assetId}>
+                    图片 {index + 1}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {edited.current.outputs && <p role="status">图片绑定待确认。</p>}
+            <button
+              type="button"
+              disabled={!ready || !edited.current.outputs}
+              onClick={() => void saveOutputs()}
+            >
+              确认绑定图片
+            </button>
+          </div>
           <button
             type="button"
             disabled={!writable}
@@ -510,7 +446,7 @@ export function ShotContinuityPanel(props: {
                 });
                 if (alive.current) {
                   adopt(next);
-                  window.dispatchEvent(new CustomEvent('production-source-updated'));
+                  changed();
                 }
               })
             }
@@ -519,18 +455,7 @@ export function ShotContinuityPanel(props: {
           </button>
         </>
       )}
-      {generating && (
-        <button
-          type="button"
-          onClick={() => {
-            cancelPromptRequested.current = true;
-            void run.current?.cancel();
-          }}
-        >
-          停止生成提示词
-        </button>
-      )}
-      {busy && <p role="status">{generating ? '正在生成提示词…' : '正在处理选帧…'}</p>}
+      {busy && <p role="status">正在处理…</p>}
       {message && <p role="status">{message}</p>}
     </section>
   );

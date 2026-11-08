@@ -58,6 +58,10 @@ export function SceneCastEditor({
   actions,
   scopeNote = '本场绑定供同场镜头共用。图片可拖入或选择。',
   sceneLabel,
+  heading = '角色与场景绑定',
+  allowRosterChanges = true,
+  showVoiceReferences = true,
+  showDialogueSettings = true,
 }: {
   projectId: string;
   characters: SceneCharacterBindingInfo[];
@@ -76,6 +80,10 @@ export function SceneCastEditor({
   actions?: ReactNode;
   scopeNote?: string;
   sceneLabel?: string;
+  heading?: string;
+  allowRosterChanges?: boolean;
+  showVoiceReferences?: boolean;
+  showDialogueSettings?: boolean;
 }) {
   const callWorker = projectWorker();
   const [selected, setSelected] = useState('');
@@ -138,7 +146,7 @@ export function SceneCastEditor({
       <div className="scene-prompt-heading">
         <div>
           <div className="workspace-section-heading">
-            <h2>角色与场景绑定</h2>
+            <h2>{heading}</h2>
             <span className="workspace-count">
               {characters.length} 位角色 · {sceneLabel ? `场景：${sceneLabel}` : '场景未绑定'}
             </span>
@@ -147,41 +155,43 @@ export function SceneCastEditor({
         </div>
         {actions}
       </div>
-      <div className="scene-cast-add">
-        <select
-          aria-label="选择出场角色"
-          value={selected}
-          disabled={!writable}
-          onChange={(event) => setSelected(event.target.value)}
-        >
-          <option value="">选择角色…</option>
-          {candidates
-            .filter(
-              (document) => !characters.some((item) => item.characterDocumentId === document.id),
-            )
-            .map((document) => (
-              <option key={document.id} value={document.id}>
-                {document.title}
-              </option>
-            ))}
-        </select>
-        <button
-          className="button secondary"
-          type="button"
-          disabled={!writable || !selected || characters.length >= 30}
-          onClick={() => {
-            onChange([
-              ...characters,
-              {
-                characterDocumentId: selected,
-              },
-            ]);
-            setSelected('');
-          }}
-        >
-          添加角色
-        </button>
-      </div>
+      {allowRosterChanges && (
+        <div className="scene-cast-add">
+          <select
+            aria-label="选择出场角色"
+            value={selected}
+            disabled={!writable}
+            onChange={(event) => setSelected(event.target.value)}
+          >
+            <option value="">选择角色…</option>
+            {candidates
+              .filter(
+                (document) => !characters.some((item) => item.characterDocumentId === document.id),
+              )
+              .map((document) => (
+                <option key={document.id} value={document.id}>
+                  {document.title}
+                </option>
+              ))}
+          </select>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!writable || !selected || characters.length >= 30}
+            onClick={() => {
+              onChange([
+                ...characters,
+                {
+                  characterDocumentId: selected,
+                },
+              ]);
+              setSelected('');
+            }}
+          >
+            添加角色
+          </button>
+        </div>
+      )}
       <div className="shot-reference-grid">
         {characters.map((character) => {
           const document = documents.find((item) => item.id === character.characterDocumentId);
@@ -266,102 +276,115 @@ export function SceneCastEditor({
               }
             >
               {document?.lifecycleStatus === 'archived' && <small>角色已归档，请调整绑定。</small>}
-              <label>
-                声音参考
-                <select
-                  aria-label={`${name}声音样本`}
-                  value={
-                    character.voiceDisabled
-                      ? 'none'
-                      : (character.voiceReferenceVersionId ?? 'default')
-                  }
+              {showVoiceReferences && (
+                <>
+                  <label>
+                    声音参考
+                    <select
+                      aria-label={`${name}声音样本`}
+                      value={
+                        character.voiceDisabled
+                          ? 'none'
+                          : (character.voiceReferenceVersionId ?? 'default')
+                      }
+                      disabled={!writable}
+                      onChange={(event) =>
+                        update(character.characterDocumentId, {
+                          voiceReferenceVersionId: ['default', 'none'].includes(event.target.value)
+                            ? undefined
+                            : event.target.value,
+                          voiceDisabled: event.target.value === 'none' ? true : undefined,
+                        })
+                      }
+                    >
+                      <option value="default">角色默认声音</option>
+                      <option value="none">不使用声音参考</option>
+                      {stale && (
+                        <option value={character.voiceReferenceVersionId}>
+                          原声音版本已更新，请重新选择
+                        </option>
+                      )}
+                      {voice && (
+                        <option value={voice.versionId}>
+                          {voice.audioName} · 版本 {voice.revision}
+                        </option>
+                      )}
+                    </select>
+                  </label>
+                  {stale && (
+                    <small role="status">
+                      声音样本已更新，重新选择后再生成；已保存任务不受影响。
+                    </small>
+                  )}
+                  {selectedVoice && (
+                    <AudioPreview projectId={projectId} audioId={selectedVoice.audioId} />
+                  )}
+                </>
+              )}
+              {allowRosterChanges && (
+                <button
+                  className="text-button"
+                  type="button"
                   disabled={!writable}
-                  onChange={(event) =>
-                    update(character.characterDocumentId, {
-                      voiceReferenceVersionId: ['default', 'none'].includes(event.target.value)
-                        ? undefined
-                        : event.target.value,
-                      voiceDisabled: event.target.value === 'none' ? true : undefined,
-                    })
+                  onClick={() =>
+                    onChange(
+                      characters.filter(
+                        (item) => item.characterDocumentId !== character.characterDocumentId,
+                      ),
+                    )
                   }
                 >
-                  <option value="default">角色默认声音</option>
-                  <option value="none">不使用声音参考</option>
-                  {stale && (
-                    <option value={character.voiceReferenceVersionId}>
-                      原声音版本已更新，请重新选择
-                    </option>
-                  )}
-                  {voice && (
-                    <option value={voice.versionId}>
-                      {voice.audioName} · 版本 {voice.revision}
-                    </option>
-                  )}
-                </select>
-              </label>
-              {stale && (
-                <small role="status">声音样本已更新，重新选择后再生成；已保存任务不受影响。</small>
+                  移除{name}
+                </button>
               )}
-              {selectedVoice && (
-                <AudioPreview projectId={projectId} audioId={selectedVoice.audioId} />
-              )}
-              <button
-                className="text-button"
-                type="button"
-                disabled={!writable}
-                onClick={() =>
-                  onChange(
-                    characters.filter(
-                      (item) => item.characterDocumentId !== character.characterDocumentId,
-                    ),
-                  )
-                }
-              >
-                移除{name}
-              </button>
             </ReferenceCard>
           );
         })}
         {children}
       </div>
-      <details className="workspace-extra scene-dialogue-settings" open={Boolean(dialogueAudioId)}>
-        <summary>完整对白{dialogueAudioId ? ' · 已绑定' : ' · 可选'}</summary>
-        <label className="scene-dialogue-picker">
-          本场完整对白
-          <select
-            aria-label="场次完整对白音频"
-            value={dialogueAudioId ?? ''}
-            disabled={!writable}
-            onChange={(event) => onDialogueChange(event.target.value || undefined)}
-          >
-            <option value="">不绑定完整对白</option>
-            {dialogueAudioId && !audios.some((audio) => audio.id === dialogueAudioId) && (
-              <option value={dialogueAudioId}>原对白音频不可用</option>
-            )}
-            {audios
-              .filter(
-                (audio) =>
-                  audio.kind !== 'reference' && !audio.deletedAt && audio.projectId === projectId,
-              )
-              .map((audio) => (
-                <option key={audio.id} value={audio.id}>
-                  {audio.name} · {(audio.durationMs / 1000).toFixed(1)} 秒
-                </option>
-              ))}
-          </select>
-        </label>
-        <button
-          className="button secondary"
-          type="button"
-          disabled={!writable || importing}
-          onClick={() => void importDialogue()}
+      {showDialogueSettings && (
+        <details
+          className="workspace-extra scene-dialogue-settings"
+          open={Boolean(dialogueAudioId)}
         >
-          {importing ? '正在导入…' : '导入完整对白'}
-        </button>
-        {message && <p role="status">{message}</p>}
-        <p className="workspace-hint">绑定完整录音，用于音频驱动画面。</p>
-        <AudioPreview projectId={projectId} audioId={dialogueAudioId} />
-      </details>
+          <summary>完整对白{dialogueAudioId ? ' · 已绑定' : ' · 可选'}</summary>
+          <label className="scene-dialogue-picker">
+            本场完整对白
+            <select
+              aria-label="场次完整对白音频"
+              value={dialogueAudioId ?? ''}
+              disabled={!writable}
+              onChange={(event) => onDialogueChange(event.target.value || undefined)}
+            >
+              <option value="">不绑定完整对白</option>
+              {dialogueAudioId && !audios.some((audio) => audio.id === dialogueAudioId) && (
+                <option value={dialogueAudioId}>原对白音频不可用</option>
+              )}
+              {audios
+                .filter(
+                  (audio) =>
+                    audio.kind !== 'reference' && !audio.deletedAt && audio.projectId === projectId,
+                )
+                .map((audio) => (
+                  <option key={audio.id} value={audio.id}>
+                    {audio.name} · {(audio.durationMs / 1000).toFixed(1)} 秒
+                  </option>
+                ))}
+            </select>
+          </label>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!writable || importing}
+            onClick={() => void importDialogue()}
+          >
+            {importing ? '正在导入…' : '导入完整对白'}
+          </button>
+          {message && <p role="status">{message}</p>}
+          <p className="workspace-hint">绑定完整录音，用于音频驱动画面。</p>
+          <AudioPreview projectId={projectId} audioId={dialogueAudioId} />
+        </details>
+      )}
     </section>
   );
 }

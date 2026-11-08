@@ -249,7 +249,7 @@ export function SceneSettingCard({
           disabled={!writable || busy}
           onClick={onRestore}
         >
-          恢复场次场景图
+          恢复默认场景图
         </button>
       )}
       {boundDocumentIds.length <= 1 && documentId && onOpen && (

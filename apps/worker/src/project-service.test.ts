@@ -252,6 +252,37 @@ describe('ProjectService', () => {
     expect(contents).not.toContain('token');
   });
 
+  it('renames a writable project and updates recent metadata', async () => {
+    const base = await temporaryRoot('rename');
+    const root = join(base, 'project');
+    const recent = join(base, 'recent.json');
+    const writer = service(recent);
+    writer.create(root, 'Before Rename');
+
+    const renamed = writer.rename('After Rename');
+
+    expect(renamed).toMatchObject({ name: 'After Rename', mode: 'read-write' });
+    expect(writer.current()).toMatchObject({ name: 'After Rename' });
+    expect((JSON.parse(await readFile(recent, 'utf8')) as unknown[])[0]).toMatchObject({
+      name: 'After Rename',
+      rootPath: root,
+    });
+    writer.close();
+    expect(service(join(base, 'reopen-recent.json')).open(root)).toMatchObject({
+      name: 'After Rename',
+    });
+  });
+
+  it('rejects renaming a read-only project', async () => {
+    const base = await temporaryRoot('rename-readonly');
+    const root = join(base, 'project');
+    service(join(base, 'writer-recent.json')).create(root, 'Locked Project');
+    const reader = service(join(base, 'reader-recent.json'));
+    reader.open(root);
+
+    expect(() => reader.rename('New Name')).toThrow('read-only');
+  });
+
   it('keeps create and open sessions usable when recent-project metadata cannot be written', async () => {
     const base = await temporaryRoot('recent-write-failure');
     const root = join(base, 'project');

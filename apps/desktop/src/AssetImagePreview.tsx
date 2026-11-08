@@ -4,8 +4,11 @@ import type { AssetInfo, AssetMediaSourceInfo, ProjectRuntimeScope } from '@ai-v
 import { projectWorker, workerMediaUrl, workerScope } from './worker-scope';
 import { ImagePreview } from './ImagePreview';
 
-type AssetImagePreviewProps =
-  { asset: AssetInfo } | { assetId: string; projectId?: string; alt: string };
+type AssetImagePreviewProps = (
+  { asset: AssetInfo } | { assetId: string; projectId?: string; alt: string }
+) & {
+  resolution?: 'thumbnail' | 'original';
+};
 
 const pending = new Map<string, Promise<AssetMediaSourceInfo>>();
 function source(
@@ -49,11 +52,12 @@ export function AssetImagePreview(props: AssetImagePreviewProps) {
       : props.alt;
   return (
     <Preview
-      key={`${projectId}:${scope?.projectSessionId}:${assetId}`}
+      key={`${projectId}:${scope?.projectSessionId}:${assetId}:${props.resolution ?? 'thumbnail'}`}
       projectId={projectId}
       assetId={assetId}
       name={name}
       scope={scope}
+      original={props.resolution === 'original'}
     />
   );
 }
@@ -63,11 +67,13 @@ function Preview({
   assetId,
   name,
   scope,
+  original,
 }: {
   projectId?: string;
   assetId: string;
   name: string;
   scope?: ProjectRuntimeScope;
+  original: boolean;
 }) {
   const element = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(false);
@@ -98,7 +104,7 @@ function Preview({
     let active = true;
     if (visible) {
       setMedia(undefined);
-      void source(projectId, assetId, true, scope)
+      void source(projectId, assetId, !original, scope)
         .then((src) => {
           if (active) setMedia({ src });
         })
@@ -109,11 +115,11 @@ function Preview({
     return () => {
       active = false;
     };
-  }, [projectId, assetId, scope?.projectId, scope?.projectSessionId, visible, retry]);
+  }, [projectId, assetId, scope?.projectId, scope?.projectSessionId, visible, retry, original]);
   return (
     <span ref={element} className="asset-image-preview">
       {media?.src ? (
-        <ImagePreview src={media.src} alt={name} loadFullSrc={full} />
+        <ImagePreview src={media.src} alt={name} loadFullSrc={original ? undefined : full} />
       ) : (
         <span className="image-preview-error">
           {media?.failed ? (

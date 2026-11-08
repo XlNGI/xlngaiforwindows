@@ -1,10 +1,22 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { LoaderCircle, Pause, Plus, Volume2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { CharacterVoiceReferenceInfo } from '@ai-video/contracts';
 import { projectWorker } from '../worker-scope';
 import { useDubbingMedia } from './media';
+import './dubbing.css';
 
-export function VoiceReferencePanel({
+export function VoiceReferencePanel(props: {
+  projectId: string;
+  characterDocumentId: string;
+  writable: boolean;
+}) {
+  return (
+    <VoiceReferenceEditor key={`${props.projectId}:${props.characterDocumentId}`} {...props} />
+  );
+}
+
+function VoiceReferenceEditor({
   projectId,
   characterDocumentId,
   writable,
@@ -16,25 +28,50 @@ export function VoiceReferencePanel({
   const callWorker = projectWorker();
   const [reference, setReference] = useState<CharacterVoiceReferenceInfo>();
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const active = useRef(true);
   useEffect(() => {
     active.current = true;
     setReference(undefined);
-    void Promise.resolve()
-      .then(() => callWorker('characterVoiceReference.list', {}))
-      .then((values) => {
-        if (active.current)
-          setReference(values.find((value) => value.characterDocumentId === characterDocumentId));
-      })
-      .catch(() => undefined);
+    setLoading(true);
+    setMessage('');
+    const refresh = () => {
+      void callWorker('characterVoiceReference.list', {})
+        .then((references) => {
+          if (!active.current) return;
+          setReference(
+            references.find((value) => value.characterDocumentId === characterDocumentId),
+          );
+        })
+        .catch((error: unknown) => {
+          if (active.current)
+            setMessage(error instanceof Error ? error.message : '角色声音读取失败。');
+        })
+        .finally(() => {
+          if (active.current) setLoading(false);
+        });
+    };
+    const refreshForCharacter = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string; characterDocumentId?: string }>)
+        .detail;
+      if (
+        (!detail?.projectId || detail.projectId === projectId) &&
+        (!detail?.characterDocumentId || detail.characterDocumentId === characterDocumentId)
+      )
+        refresh();
+    };
+    refresh();
+    window.addEventListener('character-voice-profile-updated', refreshForCharacter);
+    window.addEventListener('character-voice-reference-updated', refreshForCharacter);
     return () => {
       active.current = false;
+      window.removeEventListener('character-voice-profile-updated', refreshForCharacter);
+      window.removeEventListener('character-voice-reference-updated', refreshForCharacter);
     };
   }, [projectId, characterDocumentId]);
-  const media = useDubbingMedia(projectId, reference?.audioId, true);
   const importSample = async () => {
-    if (!writable || busy) return;
+    if (!writable || busy || loading) return;
     if (!('__TAURI_INTERNALS__' in window)) {
       setMessage('请在 Windows 桌面应用中导入本地声音样本。');
       return;
@@ -61,7 +98,6 @@ export function VoiceReferencePanel({
             detail: { projectId, characterDocumentId },
           }),
         );
-        setMessage('角色声音样本已保存，制作视频时可选择复用。');
       }
     } catch (error) {
       if (active.current) setMessage(error instanceof Error ? error.message : '样本保存失败。');
@@ -70,30 +106,106 @@ export function VoiceReferencePanel({
     }
   };
   return (
-    <section className="dubbing-panel">
-      <h2>视频声音样本</h2>
-      <p>
-        保存清晰的单人 WAV／MP3 录音，供万相、Seedance 和 MiniMax
-        视频模型参考。样本保存在当前项目，确认生成后才发送给所选供应商。
-      </p>
-      {reference && (
-        <>
-          <p>
-            {reference.audioName} · {(reference.durationMs / 1000).toFixed(1)} 秒 · 声音版本{' '}
-            {reference.revision}
-          </p>
-          {media?.src && <audio controls src={media.src} />}
-        </>
-      )}
-      <button
-        className="button secondary"
-        type="button"
-        disabled={!writable || busy}
-        onClick={() => void importSample()}
-      >
-        {busy ? '正在导入…' : reference ? '更换声音样本' : '导入声音样本'}
-      </button>
+    <section className="character-audio" aria-label="角色音频">
+      <div className="character-audio-items">
+        <button
+          className="button secondary"
+          type="button"
+          disabled={!writable || busy || loading}
+          onClick={() => void importSample()}
+        >
+          <Plus size={14} aria-hidden="true" />
+          {busy ? '正在添加…' : '添加音频'}
+        </button>
+        {reference && (
+          <VoiceReferencePreview
+            key={reference.versionId}
+            projectId={projectId}
+            reference={reference}
+          />
+        )}
+      </div>
       {message && <p role="status">{message}</p>}
     </section>
+  );
+}
+
+function VoiceReferencePreview({
+  projectId,
+  reference,
+}: {
+  projectId: string;
+  reference: CharacterVoiceReferenceInfo;
+}) {
+  const [requested, setRequested] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [message, setMessage] = useState('');
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const media = useDubbingMedia(projectId, requested ? reference.audioId : undefined, true);
+  const loading = requested && !media;
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!media?.src || !audio) return;
+    let active = true;
+    void audio.play().catch(() => {
+      if (active) setMessage('音频暂时无法播放，请重试。');
+    });
+    return () => {
+      active = false;
+      audio.pause();
+    };
+  }, [media?.src]);
+
+  const togglePlayback = () => {
+    setMessage('');
+    if (!requested) {
+      setRequested(true);
+      return;
+    }
+    const audio = audioRef.current;
+    if (!audio || !media?.src) return;
+    if (audio.paused) {
+      void audio.play().catch(() => setMessage('音频暂时无法播放，请重试。'));
+    } else {
+      audio.pause();
+    }
+  };
+
+  return (
+    <>
+      <button
+        className={`character-audio-preview${playing ? ' is-playing' : ''}`}
+        type="button"
+        aria-label={`${playing ? '暂停试听' : '试听'} ${reference.audioName}`}
+        aria-pressed={playing}
+        aria-busy={loading}
+        title={`${reference.audioName} · ${(reference.durationMs / 1000).toFixed(1)} 秒`}
+        disabled={loading}
+        onClick={togglePlayback}
+      >
+        {loading ? (
+          <LoaderCircle size={20} aria-hidden="true" />
+        ) : playing ? (
+          <Pause size={20} aria-hidden="true" />
+        ) : (
+          <Volume2 size={20} aria-hidden="true" />
+        )}
+      </button>
+      <audio
+        ref={audioRef}
+        hidden
+        preload="none"
+        src={media?.src}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onError={() => {
+          setPlaying(false);
+          setMessage('音频暂时无法播放，请重试。');
+        }}
+      />
+      {(message || media?.error) && <p role="status">{message || media?.error}</p>}
+    </>
   );
 }

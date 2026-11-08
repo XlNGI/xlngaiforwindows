@@ -21,6 +21,12 @@ import {
   type AudioFileInfo,
   type AudioImportParams,
   type AudioImportResult,
+  type AudioSampleGeneratePrepareParams,
+  type AudioSampleGenerateConfirmParams,
+  type AudioSampleGenerateConfirmResult,
+  type CharacterVoiceReferenceGenerateParams,
+  type CharacterVoiceReferencePrepareParams,
+  type CharacterVoiceReferenceInfo,
   type CharacterVoiceSaveParams,
   type DubbingBudgetSnapshot,
   type DubbingCueInfo,
@@ -36,8 +42,13 @@ import {
   type NativeDubbingPollResult,
   type NativeDubbingSpeechResult,
   type NativeDubbingSubmitResult,
+  type MediaSubmissionConfirmationRequest,
 } from '@ai-video/contracts';
-import { createRepositories, DubbingRepository } from '@ai-video/persistence';
+import {
+  createRepositories,
+  DubbingRepository,
+  VoiceReferenceRepository,
+} from '@ai-video/persistence';
 import { AppSettingsService } from './app-settings-service.js';
 import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { NativeProviderRequestError, type NativeProviderBridge } from './native-provider-bridge.js';
@@ -45,6 +56,7 @@ import { ProjectService, resolveProjectRelativePath } from './project-service.js
 import { assertStorageCapacity } from './storage-capacity.js';
 import { ExecutionPool, mapConcurrent, type ExecutionStage } from './execution-pool.js';
 import { assertProjectTaskAdmission } from './task-admission.js';
+import { getAdapter, validateAdapterParameters } from '@ai-video/generation-adapters';
 
 const ACTIVE_STATUSES = new Set(['pending', 'running', 'interrupted', 'cancelling']);
 const SPEECH_MODELS = new Set(['speech-2.8-hd', 'speech-2.8-turbo']);
@@ -84,6 +96,30 @@ interface RunningJob {
   controller: AbortController;
   sessionId: string;
   done: Promise<void>;
+}
+interface PreparedVoiceReferenceSubmission {
+  context: { root: string; projectId: string; sessionId: string };
+  characterDocumentId: string;
+  expectedVoiceVersionId: string;
+  expectedRowVersion: number;
+  text: string;
+  voiceId: string;
+  speed: number;
+  pitch: number;
+  emotion?: string;
+  expiresAt: string;
+  confirmation: MediaSubmissionConfirmationRequest;
+}
+interface PreparedAudioSampleSubmission {
+  context: { root: string; projectId: string; sessionId: string };
+  providerProfileId: string;
+  modelId: string;
+  text: string;
+  voiceId: string;
+  speed: number;
+  pitch: number;
+  emotion?: string;
+  expiresAt: string;
 }
 export interface DubbingServiceOptions {
   capacity?: ExecutionPool;
@@ -256,6 +292,17 @@ export class DubbingService {
   private readonly running = new Map<string, RunningJob>();
   private readonly capacity: ExecutionPool;
   private readonly nativeOperations = new Map<string, Map<string, object>>();
+  private readonly voiceReferenceGenerations = new Map<
+    string,
+    { controller: AbortController; done: Promise<void> }
+  >();
+  private readonly activeVoiceReferenceCharacters = new Set<string>();
+  private readonly preparedVoiceReferences = new Map<string, PreparedVoiceReferenceSubmission>();
+  private readonly preparedAudioSamples = new Map<string, PreparedAudioSampleSubmission>();
+  private readonly audioSampleGenerations = new Map<
+    string,
+    { controller: AbortController; done: Promise<void> }
+  >();
   private revision = 0;
 
   constructor(
@@ -580,6 +627,11 @@ export class DubbingService {
       cue?: DubbingCueInfo;
       voice?: VoiceProfileInfo;
       sourceJobId?: string;
+      characterVoiceReference?: {
+        characterDocumentId: string;
+        expectedVoiceVersionId: string;
+        expectedRowVersion: number;
+      };
     },
   ): AudioImportResult {
     this.assertCurrent(input.sessionId);
@@ -635,6 +687,30 @@ export class DubbingService {
             };
             repo.addTake(take);
           }
+          if (input.characterVoiceReference) {
+            const binding = input.characterVoiceReference;
+            const currentVoice = repo.getVoiceForCharacter(binding.characterDocumentId);
+            if (
+              !currentVoice ||
+              currentVoice.archivedAt ||
+              currentVoice.versionId !== binding.expectedVoiceVersionId
+            )
+              throw new DubbingValidationError('VOICE_CHANGED', '角色音色已变化，请重新生成试音。');
+            const references = new VoiceReferenceRepository(db, input.projectId);
+            const currentReference = references
+              .list()
+              .find((value) => value.characterDocumentId === binding.characterDocumentId);
+            if ((currentReference?.rowVersion ?? 0) !== binding.expectedRowVersion)
+              throw new DubbingValidationError(
+                'VOICE_REFERENCE_CHANGED',
+                '角色声音参考已变化，请刷新后重新生成。',
+              );
+            references.save({
+              characterDocumentId: binding.characterDocumentId,
+              audioId: audio.id,
+              expectedRowVersion: binding.expectedRowVersion,
+            });
+          }
           if (input.sourceJobId) {
             const job = repo.getJob(input.sourceJobId)!;
             if (job.status !== 'running')
@@ -656,6 +732,548 @@ export class DubbingService {
     } catch (error) {
       rmSync(destination, { force: true });
       throw error;
+    }
+  }
+
+  async generateVoiceReference(
+    params: CharacterVoiceReferenceGenerateParams,
+  ): Promise<CharacterVoiceReferenceInfo> {
+    if (params.costAcknowledged !== true)
+      throw new DubbingValidationError(
+        'COST_ACK_REQUIRED',
+        '请确认制作角色视频声音参考会产生供应商费用。',
+      );
+    const characterDocumentId = requiredId(params.characterDocumentId, '角色');
+    const expectedVoiceVersionId = requiredId(params.expectedVoiceVersionId, '角色音色版本');
+    const text = typeof params.text === 'string' ? params.text.trim() : '';
+    if (!text || [...text].length > DUBBING_LIMITS.cueTextMaxCharacters)
+      throw new DubbingValidationError('INVALID_TEXT', '声音参考文本应为 1～4000 个字符。');
+    if (!Number.isSafeInteger(params.expectedRowVersion) || params.expectedRowVersion < 0)
+      throw new DubbingValidationError('INVALID_VERSION', '角色声音参考版本无效。');
+
+    const context = this.capture();
+    const frozen = this.access(true, (repo, database) => {
+      const document = createRepositories(database).documents.get(characterDocumentId);
+      if (document?.kind !== 'character' || document.lifecycleStatus === 'archived')
+        throw new DubbingValidationError('CHARACTER_ARCHIVED', '角色资料已归档或不存在。');
+      const voice = repo.getVoiceForCharacter(characterDocumentId);
+      if (!voice || voice.archivedAt)
+        throw new DubbingValidationError('VOICE_REQUIRED', '请先保存角色音色。');
+      if (voice.versionId !== expectedVoiceVersionId)
+        throw new DubbingValidationError('VOICE_CHANGED', '角色音色已变化，请刷新后再生成。');
+      const reference = new VoiceReferenceRepository(database, context.projectId)
+        .list()
+        .find((value) => value.characterDocumentId === characterDocumentId);
+      if ((reference?.rowVersion ?? 0) !== params.expectedRowVersion)
+        throw new DubbingValidationError(
+          'VOICE_REFERENCE_CHANGED',
+          '角色声音参考已变化，请刷新后再生成。',
+        );
+      return voice;
+    });
+    const voiceId = params.voiceId ?? frozen.voiceId;
+    const speed = params.speed ?? frozen.speed;
+    const pitch = params.pitch ?? frozen.pitch;
+    if (
+      !voiceId.trim() ||
+      [...voiceId].length > 256 ||
+      [...voiceId].some((character) => character.charCodeAt(0) < 32) ||
+      !Number.isFinite(speed) ||
+      speed < 0.5 ||
+      speed > 2 ||
+      !Number.isInteger(pitch) ||
+      pitch < -12 ||
+      pitch > 12 ||
+      (params.emotion !== undefined && !EMOTIONS.has(params.emotion))
+    )
+      throw new DubbingValidationError('INVALID_VOICE_SETTINGS', '音色参数无效。');
+    const generationVoice = { ...frozen, voiceId, speed, pitch };
+    this.validateConnection(generationVoice.providerProfileId, 'speech', generationVoice.model);
+    if (!this.options.native?.request)
+      throw new DubbingValidationError('NATIVE_UNAVAILABLE', '配音服务当前不可用。');
+    if (this.activeVoiceReferenceCharacters.has(characterDocumentId))
+      throw new DubbingValidationError('GENERATION_ACTIVE', '该角色正在制作视频声音参考，请稍候。');
+
+    const operationId = randomUUID();
+    const controller = new AbortController();
+    this.activeVoiceReferenceCharacters.add(characterDocumentId);
+    const operation = Promise.resolve().then(() =>
+      this.runVoiceReferenceGeneration(
+        operationId,
+        controller.signal,
+        context,
+        characterDocumentId,
+        params.expectedRowVersion,
+        generationVoice,
+        text,
+        params.emotion,
+      ),
+    );
+    const done = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.voiceReferenceGenerations.set(operationId, { controller, done });
+    try {
+      await operation;
+    } finally {
+      this.voiceReferenceGenerations.delete(operationId);
+      this.activeVoiceReferenceCharacters.delete(characterDocumentId);
+    }
+    const result = this.access(false, (_repo, database) =>
+      new VoiceReferenceRepository(database, context.projectId)
+        .list()
+        .find((value) => value.characterDocumentId === characterDocumentId),
+    );
+    if (!result) throw new DubbingValidationError('REFERENCE_MISSING', '角色声音参考保存失败。');
+    return result;
+  }
+
+  prepareVoiceReferenceSubmission(params: CharacterVoiceReferencePrepareParams): {
+    confirmation: MediaSubmissionConfirmationRequest;
+  } {
+    const characterDocumentId = requiredId(params.characterDocumentId, '角色');
+    const adapter = getAdapter(params.adapterKey);
+    if (
+      !adapter ||
+      adapter.capability !== 'TEXT_TO_AUDIO' ||
+      adapter.provider !== 'minimax-speech' ||
+      adapter.model !== params.modelId
+    )
+      throw new DubbingValidationError('INVALID_ADAPTER', '音频 API 适配器与所选模型不匹配。');
+    const validation = validateAdapterParameters(
+      params.adapterKey,
+      params.parameters as import('@ai-video/contracts').AdapterParameters,
+    );
+    if (!validation.valid)
+      throw new DubbingValidationError('INVALID_PARAMETERS', '音频参数未通过 API Schema 校验。');
+
+    const setting = params.parameters.voice_setting as Record<string, unknown>;
+    const text = params.parameters.text as string;
+    const voiceId = setting.voice_id as string;
+    const speed = setting.speed as number;
+    const pitch = setting.pitch as number;
+    const emotion = typeof setting.emotion === 'string' ? setting.emotion : undefined;
+    const context = this.capture();
+    const frozen = this.access(false, (repo, database) => {
+      const document = createRepositories(database).documents.get(characterDocumentId);
+      if (document?.kind !== 'character' || document.lifecycleStatus !== 'active')
+        throw new DubbingValidationError('CHARACTER_ARCHIVED', '角色资料已归档或不存在。');
+      const voice = repo.getVoiceForCharacter(characterDocumentId);
+      if (!voice || voice.archivedAt)
+        throw new DubbingValidationError('VOICE_REQUIRED', '请先保存角色音色。');
+      if (voice.versionId !== params.expectedVoiceVersionId)
+        throw new DubbingValidationError('VOICE_CHANGED', '角色音色已变化，请刷新后再制作。');
+      if (voice.providerProfileId !== params.providerProfileId || voice.model !== params.modelId)
+        throw new DubbingValidationError(
+          'VOICE_CHANGED',
+          '所选连接或模型与角色当前音色不一致，请刷新角色声音后重试。',
+        );
+      const reference = new VoiceReferenceRepository(database, context.projectId)
+        .list()
+        .find((value) => value.characterDocumentId === characterDocumentId);
+      return {
+        voice,
+        expectedRowVersion: reference?.rowVersion ?? 0,
+      };
+    });
+    this.validateConnection(params.providerProfileId, 'speech', params.modelId);
+
+    const now = Date.now();
+    for (const [token, pending] of this.preparedVoiceReferences) {
+      if (Date.parse(pending.expiresAt) <= now) this.preparedVoiceReferences.delete(token);
+    }
+    if (this.preparedVoiceReferences.size >= 32)
+      throw new DubbingValidationError('TOO_MANY_PENDING', '待确认的音频任务过多，请稍后重试。');
+
+    const confirmationToken = randomUUID();
+    const expiresAt = new Date(now + 5 * 60_000).toISOString();
+    const profile = this.settings.getProfile(params.providerProfileId)!;
+    const model = this.settings
+      .listModels(params.providerProfileId)
+      .find((item) => item.remoteModelId === params.modelId)!;
+    const confirmation: MediaSubmissionConfirmationRequest = {
+      confirmationToken,
+      jobId: confirmationToken,
+      kind: 'audio',
+      draftVersion: 1,
+      providerName: profile.name,
+      modelName: model.displayName,
+      adapterKey: adapter.key,
+      parameterSummary: [
+        { key: '合成文本', value: text.length > 160 ? `${text.slice(0, 160)}…` : text },
+        { key: '音色 ID', value: voiceId },
+        { key: '语速', value: String(speed) },
+        { key: '音高', value: String(pitch) },
+        ...(emotion ? [{ key: '情绪', value: emotion }] : []),
+      ],
+      costNotice: {
+        required: true,
+        summary: '提交 MiniMax Speech 请求可能产生供应商费用。',
+      },
+      expiresAt,
+    };
+    this.preparedVoiceReferences.set(confirmationToken, {
+      context,
+      characterDocumentId,
+      expectedVoiceVersionId: frozen.voice.versionId,
+      expectedRowVersion: frozen.expectedRowVersion,
+      text,
+      voiceId,
+      speed,
+      pitch,
+      ...(emotion ? { emotion } : {}),
+      expiresAt,
+      confirmation,
+    });
+    return { confirmation };
+  }
+
+  async confirmVoiceReferenceSubmission(params: {
+    confirmationToken: string;
+    approved: boolean;
+  }): Promise<{ approved: false } | { approved: true; reference: CharacterVoiceReferenceInfo }> {
+    if (typeof params.confirmationToken !== 'string' || !UUID.test(params.confirmationToken))
+      throw new DubbingValidationError('INVALID_CONFIRMATION', '音频确认凭据无效。');
+    const pending = this.preparedVoiceReferences.get(params.confirmationToken);
+    this.preparedVoiceReferences.delete(params.confirmationToken);
+    if (!pending || Date.parse(pending.expiresAt) <= Date.now())
+      throw new DubbingValidationError('CONFIRMATION_EXPIRED', '音频确认已过期，请重新提交。');
+    this.assertCurrent(pending.context.sessionId);
+    if (!params.approved) return { approved: false };
+    const reference = await this.generateVoiceReference({
+      characterDocumentId: pending.characterDocumentId,
+      expectedVoiceVersionId: pending.expectedVoiceVersionId,
+      expectedRowVersion: pending.expectedRowVersion,
+      text: pending.text,
+      costAcknowledged: true,
+      voiceId: pending.voiceId,
+      speed: pending.speed,
+      pitch: pending.pitch,
+      ...(pending.emotion ? { emotion: pending.emotion } : {}),
+    });
+    return { approved: true, reference };
+  }
+
+  prepareAudioSampleSubmission(params: AudioSampleGeneratePrepareParams): {
+    confirmation: MediaSubmissionConfirmationRequest;
+  } {
+    const adapter = getAdapter(params.adapterKey);
+    if (
+      !adapter ||
+      adapter.capability !== 'TEXT_TO_AUDIO' ||
+      adapter.provider !== 'minimax-speech' ||
+      adapter.model !== params.modelId
+    )
+      throw new DubbingValidationError('INVALID_ADAPTER', '音频 API 适配器与所选模型不匹配。');
+    const validation = validateAdapterParameters(
+      params.adapterKey,
+      params.parameters as import('@ai-video/contracts').AdapterParameters,
+    );
+    if (!validation.valid)
+      throw new DubbingValidationError('INVALID_PARAMETERS', '音频参数未通过 API Schema 校验。');
+
+    const setting = params.parameters.voice_setting as Record<string, unknown>;
+    const text = params.parameters.text as string;
+    const voiceId = setting.voice_id as string;
+    const speed = setting.speed as number;
+    const pitch = setting.pitch as number;
+    const emotion = typeof setting.emotion === 'string' ? setting.emotion : undefined;
+    if (
+      !text.trim() ||
+      !voiceId.trim() ||
+      [...voiceId].some((character) => character.charCodeAt(0) < 32) ||
+      (emotion && !EMOTIONS.has(emotion))
+    )
+      throw new DubbingValidationError('INVALID_PARAMETERS', '请填写有效的文本和音色设置。');
+
+    const context = this.capture();
+    this.access(true, () => undefined);
+    this.validateConnection(params.providerProfileId, 'speech', params.modelId);
+    const profile = this.settings.getProfile(params.providerProfileId)!;
+    const model = this.settings
+      .listModels(params.providerProfileId)
+      .find((item) => item.remoteModelId === params.modelId)!;
+    const now = Date.now();
+    for (const [token, pending] of this.preparedAudioSamples) {
+      if (Date.parse(pending.expiresAt) <= now) this.preparedAudioSamples.delete(token);
+    }
+    if (this.preparedAudioSamples.size >= 32)
+      throw new DubbingValidationError('TOO_MANY_PENDING', '待确认的音频任务过多，请稍后重试。');
+
+    const confirmationToken = randomUUID();
+    const expiresAt = new Date(now + 5 * 60_000).toISOString();
+    const confirmation: MediaSubmissionConfirmationRequest = {
+      confirmationToken,
+      jobId: confirmationToken,
+      kind: 'audio',
+      draftVersion: 1,
+      providerName: profile.name,
+      modelName: model.displayName,
+      adapterKey: adapter.key,
+      parameterSummary: [
+        { key: '合成文本', value: text.length > 160 ? `${text.slice(0, 160)}…` : text },
+        { key: '音色 ID', value: voiceId },
+        { key: '语速', value: String(speed) },
+        { key: '音高', value: String(pitch) },
+        ...(emotion ? [{ key: '情绪', value: emotion }] : []),
+      ],
+      costNotice: {
+        required: true,
+        summary: '提交 MiniMax Speech 请求可能产生供应商费用。',
+      },
+      expiresAt,
+    };
+    this.preparedAudioSamples.set(confirmationToken, {
+      context,
+      providerProfileId: params.providerProfileId,
+      modelId: params.modelId,
+      text,
+      voiceId,
+      speed,
+      pitch,
+      ...(emotion ? { emotion } : {}),
+      expiresAt,
+    });
+    return { confirmation };
+  }
+
+  async confirmAudioSampleSubmission(
+    params: AudioSampleGenerateConfirmParams,
+  ): Promise<AudioSampleGenerateConfirmResult> {
+    if (typeof params.confirmationToken !== 'string' || !UUID.test(params.confirmationToken))
+      throw new DubbingValidationError('INVALID_CONFIRMATION', '音频确认凭据无效。');
+    const pending = this.preparedAudioSamples.get(params.confirmationToken);
+    this.preparedAudioSamples.delete(params.confirmationToken);
+    if (!pending || Date.parse(pending.expiresAt) <= Date.now())
+      throw new DubbingValidationError('CONFIRMATION_EXPIRED', '音频确认已过期，请重新提交。');
+    this.assertCurrent(pending.context.sessionId);
+    if (!params.approved) return { approved: false };
+    this.access(true, () => undefined);
+    this.validateConnection(pending.providerProfileId, 'speech', pending.modelId);
+    if (!this.options.native?.request)
+      throw new DubbingValidationError('NATIVE_UNAVAILABLE', '配音服务当前不可用。');
+
+    const operationId = randomUUID();
+    const controller = new AbortController();
+    const operation = Promise.resolve().then(() =>
+      this.runAudioSampleGeneration(operationId, pending, controller.signal),
+    );
+    const done = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.audioSampleGenerations.set(operationId, { controller, done });
+    try {
+      return await operation;
+    } finally {
+      this.audioSampleGenerations.delete(operationId);
+    }
+  }
+
+  private async runAudioSampleGeneration(
+    operationId: string,
+    pending: PreparedAudioSampleSubmission,
+    signal: AbortSignal,
+  ): Promise<AudioSampleGenerateConfirmResult> {
+    this.assertCurrent(pending.context.sessionId, signal);
+    const relativePath = posix.join('cache', 'dubbing', `sample-${operationId}.mp3`);
+    const staged = resolveDubbingFile(pending.context.root, relativePath, true);
+    mkdirSync(dirname(staged), { recursive: true });
+    assertStorageCapacity(dirname(staged), DUBBING_LIMITS.audioMaxBytes);
+    let submitted = false;
+    const cancel = () => {
+      void this.options.native
+        ?.request('provider.dubbing.cancel', { operationId }, 5000)
+        .catch(() => undefined);
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      const availability = await this.capacity.run(
+        'ffmpeg',
+        pending.context.projectId,
+        signal,
+        () => this.runtime.availability(),
+      );
+      if (!availability.available)
+        throw new DubbingValidationError(
+          'MEDIA_RUNTIME_UNAVAILABLE',
+          '本地媒体处理工具不可用，尚未提交音频样本请求。',
+        );
+      this.assertCurrent(pending.context.sessionId, signal);
+      const result = await this.capacity.run(
+        'speech',
+        pending.context.projectId,
+        signal,
+        async () => {
+          this.assertCurrent(pending.context.sessionId, signal);
+          this.validateConnection(pending.providerProfileId, 'speech', pending.modelId);
+          submitted = true;
+          return (await this.options.native!.request(
+            'provider.dubbing.speech',
+            {
+              projectRoot: pending.context.root,
+              providerProfileId: pending.providerProfileId,
+              model: pending.modelId,
+              voiceId: pending.voiceId,
+              text: pending.text,
+              speed: pending.speed,
+              pitch: pending.pitch,
+              ...(pending.emotion ? { emotion: pending.emotion } : {}),
+              outputRelativePath: relativePath,
+              operationId,
+            },
+            12 * 60_000,
+          )) as NativeDubbingSpeechResult;
+        },
+      );
+      this.assertCurrent(pending.context.sessionId, signal);
+      if (
+        !result ||
+        result.relativePath !== relativePath ||
+        result.mime !== 'audio/mpeg' ||
+        result.sizeBytes !== statSync(staged).size
+      )
+        throw new DubbingValidationError('INVALID_PROVIDER_OUTPUT', '音频样本结果不完整，未保存。');
+      const metadata = await this.inspectAudio(staged, signal);
+      this.assertCurrent(pending.context.sessionId, signal);
+      const committed = this.commitAudio(staged, metadata, {
+        ...pending.context,
+        kind: 'reference',
+        name: `音频样本 · ${pending.text.slice(0, 24)}`,
+      });
+      this.revision += 1;
+      return { approved: true, audio: committed.audio };
+    } catch (error) {
+      const unknown =
+        error instanceof NativeProviderRequestError &&
+        (['TIMEOUT', 'INTERRUPTED', 'SUBMISSION_UNKNOWN', 'INVALID_ENVELOPE'].includes(
+          error.hostError.code,
+        ) ||
+          (error.hostError.providerStatus ?? 0) >= 500 ||
+          error.hostError.providerStatus === 408);
+      const abortedAfterSubmit =
+        submitted &&
+        signal.aborted &&
+        !(
+          error instanceof NativeProviderRequestError &&
+          ['REQUEST_NOT_SENT', 'INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(
+            error.hostError.code,
+          )
+        );
+      if (submitted && (unknown || abortedAfterSubmit))
+        throw new DubbingValidationError(
+          'SUBMISSION_UNKNOWN',
+          '音频样本提交结果待核实，请先核对供应商记录，避免重复生成。',
+        );
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      rmSync(staged, { force: true });
+    }
+  }
+
+  private async runVoiceReferenceGeneration(
+    operationId: string,
+    signal: AbortSignal,
+    context: ReturnType<DubbingService['capture']>,
+    characterDocumentId: string,
+    expectedRowVersion: number,
+    voice: VoiceProfileInfo,
+    text: string,
+    emotion?: string,
+  ): Promise<void> {
+    const relativePath = posix.join('cache', 'dubbing', `reference-${operationId}.mp3`);
+    const staged = resolveDubbingFile(context.root, relativePath, true);
+    mkdirSync(dirname(staged), { recursive: true });
+    assertStorageCapacity(dirname(staged), DUBBING_LIMITS.audioMaxBytes);
+    let submitted = false;
+    const cancel = () => {
+      void this.options.native
+        ?.request('provider.dubbing.cancel', { operationId }, 5000)
+        .catch(() => undefined);
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      const availability = await this.capacity.run('ffmpeg', context.projectId, signal, () =>
+        this.runtime.availability(),
+      );
+      if (!availability.available)
+        throw new DubbingValidationError(
+          'MEDIA_RUNTIME_UNAVAILABLE',
+          '本地媒体处理工具不可用，尚未提交声音参考请求。',
+        );
+      this.assertCurrent(context.sessionId, signal);
+      this.validateConnection(voice.providerProfileId, 'speech', voice.model);
+      const result = await this.capacity.run('speech', context.projectId, signal, async () => {
+        this.assertCurrent(context.sessionId, signal);
+        this.validateConnection(voice.providerProfileId, 'speech', voice.model);
+        submitted = true;
+        return (await this.options.native!.request(
+          'provider.dubbing.speech',
+          {
+            projectRoot: context.root,
+            providerProfileId: voice.providerProfileId,
+            model: voice.model,
+            voiceId: voice.voiceId,
+            text,
+            speed: voice.speed,
+            pitch: voice.pitch,
+            ...(emotion ? { emotion } : {}),
+            outputRelativePath: relativePath,
+            operationId,
+          },
+          12 * 60_000,
+        )) as NativeDubbingSpeechResult;
+      });
+      this.assertCurrent(context.sessionId, signal);
+      if (
+        !result ||
+        result.relativePath !== relativePath ||
+        result.mime !== 'audio/mpeg' ||
+        result.sizeBytes !== statSync(staged).size
+      )
+        throw new DubbingValidationError('INVALID_PROVIDER_OUTPUT', '声音参考结果不完整，未保存。');
+      const metadata = await this.inspectAudio(staged, signal);
+      this.assertCurrent(context.sessionId, signal);
+      this.commitAudio(staged, metadata, {
+        ...context,
+        kind: 'reference',
+        name: `视频声音参考 · ${text.slice(0, 24)}`,
+        voice,
+        characterVoiceReference: {
+          characterDocumentId,
+          expectedVoiceVersionId: voice.versionId,
+          expectedRowVersion,
+        },
+      });
+      this.revision += 1;
+    } catch (error) {
+      const unknown =
+        error instanceof NativeProviderRequestError &&
+        (['TIMEOUT', 'INTERRUPTED', 'SUBMISSION_UNKNOWN', 'INVALID_ENVELOPE'].includes(
+          error.hostError.code,
+        ) ||
+          (error.hostError.providerStatus ?? 0) >= 500 ||
+          error.hostError.providerStatus === 408);
+      const abortedAfterSubmit =
+        submitted &&
+        signal.aborted &&
+        !(
+          error instanceof NativeProviderRequestError &&
+          ['REQUEST_NOT_SENT', 'INVALID_PARAMETERS', 'METHOD_NOT_FOUND'].includes(
+            error.hostError.code,
+          )
+        );
+      if (submitted && (unknown || abortedAfterSubmit))
+        throw new DubbingValidationError(
+          'SUBMISSION_UNKNOWN',
+          '角色声音参考提交结果待核实，请先核对供应商记录，避免重复生成。',
+        );
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      rmSync(staged, { force: true });
     }
   }
 
@@ -1840,8 +2458,14 @@ export class DubbingService {
   }
   async cancelAll(): Promise<void> {
     if (!this.projects.current()) return;
-    const active = [...this.running.values()].map((entry) => entry.done);
+    const active = [
+      ...[...this.running.values()].map((entry) => entry.done),
+      ...[...this.voiceReferenceGenerations.values()].map((entry) => entry.done),
+      ...[...this.audioSampleGenerations.values()].map((entry) => entry.done),
+    ];
     for (const job of this.listJobs()) if (ACTIVE_STATUSES.has(job.status)) this.cancel(job.id);
+    for (const generation of this.voiceReferenceGenerations.values()) generation.controller.abort();
+    for (const generation of this.audioSampleGenerations.values()) generation.controller.abort();
     await Promise.race([
       Promise.allSettled(active),
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),

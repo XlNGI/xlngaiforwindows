@@ -38,16 +38,17 @@ describe('voice panel identity changes', () => {
     const { rerender } = render(
       <VoiceProfilePanel projectId="project" characterDocumentId="张明" writable={false} />,
     );
-    await screen.findByText(/project-张明.wav/);
+    await screen.findByRole('button', { name: '试听 project-张明.wav' });
 
     for (const id of ['老周', '林芳', '张明', '林芳', '老周']) {
       rerender(<VoiceProfilePanel projectId="project" characterDocumentId={id} writable />);
-      await screen.findByText(new RegExp(`project-${id}.wav`));
-      expect(screen.getAllByRole('heading', { name: '视频声音样本' })).toHaveLength(1);
+      await screen.findByRole('button', { name: `试听 project-${id}.wav` });
       expect(screen.getAllByRole('heading', { name: '角色声音' })).toHaveLength(1);
-      expect(screen.getByRole('button', { name: '更换声音样本' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '添加音频' })).toBeEnabled();
       for (const reference of references.filter((item) => item.characterDocumentId !== id)) {
-        expect(screen.queryByText(new RegExp(reference.audioName))).not.toBeInTheDocument();
+        expect(
+          screen.queryByRole('button', { name: `试听 ${reference.audioName}` }),
+        ).not.toBeInTheDocument();
       }
     }
   });
@@ -60,19 +61,22 @@ describe('voice panel identity changes', () => {
     const { rerender } = render(
       <VoiceProfilePanel projectId="first" characterDocumentId="character" writable />,
     );
-    await screen.findByText(/first-character.wav/);
+    await screen.findByRole('button', { name: '试听 first-character.wav' });
 
     references = [sample('second', 'character')];
     rerender(<VoiceProfilePanel projectId="second" characterDocumentId="character" writable />);
-    await screen.findByText(/second-character.wav/);
-    expect(screen.queryByText(/first-character.wav/)).not.toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { name: '视频声音样本' })).toHaveLength(1);
+    await screen.findByRole('button', { name: '试听 second-character.wav' });
+    expect(
+      screen.queryByRole('button', { name: '试听 first-character.wav' }),
+    ).not.toBeInTheDocument();
 
     rerender(<VoiceProfilePanel projectId="second" writable />);
     await screen.findByText('请先在设置中添加 MiniMax 配音连接。密钥在连接设置中填写。');
     expect(screen.getByRole('heading', { name: '旁白声音' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: '视频声音样本' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '视频声音参考' })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '角色声音' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/second-character.wav/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '试听 second-character.wav' }),
+    ).not.toBeInTheDocument();
   });
 });

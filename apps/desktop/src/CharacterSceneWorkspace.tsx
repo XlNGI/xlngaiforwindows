@@ -1,26 +1,24 @@
 import { RotateCcw } from 'lucide-react';
+import type { SceneReferenceImageOptions } from '@ai-video/contracts';
 import type { AssetInfo, DocumentKind } from '@ai-video/contracts';
 import { AssetImagePreview } from './AssetImagePreview';
-import { VoiceProfilePanel } from './dubbing/VoiceProfilePanel';
+import { VoiceReferencePanel } from './dubbing/VoiceReferencePanel';
+import { MarkdownEditor } from './MarkdownEditor';
 
 export function CharacterSceneWorkspace({
   projectId,
   documentId,
-  title,
   kind,
   content,
-  stateLabel,
-  stateKey,
   writable,
   versions,
   currentVersionId,
   message,
   assets,
-  onTitleChange,
-  onKindChange,
+  sceneReference = {},
   onContentChange,
   onRestoreVersion,
-  onGenerate,
+  onSceneReferenceChange,
   onOpenAsset,
   boundScenes = [],
   onOpenScene,
@@ -30,75 +28,55 @@ export function CharacterSceneWorkspace({
   title: string;
   kind: DocumentKind;
   content: string;
-  stateLabel: string;
-  stateKey: string;
   writable: boolean;
   versions: Array<{ id: string; version: number; createdAt: string }>;
   currentVersionId?: string;
   message?: string;
   assets: AssetInfo[];
-  onTitleChange: (value: string) => void;
-  onKindChange: (value: DocumentKind) => void;
+  sceneReference?: SceneReferenceImageOptions;
   onContentChange: (value: string) => void;
   onRestoreVersion: (versionId: string) => void;
-  onGenerate: () => void;
+  onSceneReferenceChange?: (sceneReference: SceneReferenceImageOptions) => void;
   onOpenAsset?: (assetId: string) => void;
   boundScenes?: Array<{ id: string; title: string }>;
   onOpenScene?: (sceneId: string) => void;
 }) {
-  const generateLabel =
-    kind === 'scene' ? '生成场景图' : kind === 'prop' ? '生成道具图' : '生成角色图';
-  const heading =
-    kind === 'scene' ? '场景生图提示词' : kind === 'prop' ? '道具资料' : '角色生图提示词';
-
   return (
     <div
       className={`character-scene-workspace${kind === 'character' && projectId && documentId ? ' has-voice-profile' : ''}`}
     >
-      <section className="character-scene-prompt" aria-labelledby="character-scene-prompt-heading">
-        <div className="character-scene-prompt-heading">
-          <h2 id="character-scene-prompt-heading">{heading}</h2>
-        </div>
-        <div className="character-scene-identity">
-          <label className="title-field">
-            {'\u6807\u9898'}
-            <input
-              value={title}
-              onChange={(event) => onTitleChange(event.target.value)}
-              placeholder={
-                '\u8f93\u5165\u89d2\u8272\u3001\u573a\u666f\u6216\u9053\u5177\u540d\u79f0'
-              }
-              readOnly={!writable}
-            />
-          </label>
-          <label className="kind-field">
-            {'\u7c7b\u578b'}
-            <select
-              value={kind}
-              onChange={(event) => onKindChange(event.target.value as DocumentKind)}
-              disabled={!writable}
-              aria-label={'\u6587\u6863\u7c7b\u578b'}
-            >
-              <option value="character">{'\u89d2\u8272'}</option>
-              <option value="scene">{'\u573a\u666f'}</option>
-              <option value="prop">道具</option>
-            </select>
-          </label>
-          <span className={`document-state document-state-${stateKey}`}>{stateLabel}</span>
-          <button
-            className="button primary"
-            type="button"
-            disabled={!writable || !content.trim() || !title.trim()}
-            onClick={onGenerate}
-          >
-            {generateLabel}
-          </button>
-        </div>
-        <textarea
-          className="markdown-editor character-scene-prompt-editor"
-          aria-label={kind === 'prop' ? '道具资料' : '\u63d0\u793a\u8bcd'}
+      <section className="character-scene-prompt">
+        {kind === 'scene' ? (
+          <div className="scene-reference-settings" aria-label="场景参考出图设置">
+            <label className="title-field">
+              一致性参考图
+              <select
+                aria-label="场景一致性参考图"
+                value={sceneReference.referenceAssetId ?? ''}
+                disabled={!writable}
+                onChange={(event) =>
+                  onSceneReferenceChange?.({
+                    referenceAssetId: event.target.value || undefined,
+                  })
+                }
+              >
+                <option value="">暂不使用参考图</option>
+                {assets.map((asset, index) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.alias || `场景图片 ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="workspace-hint">可选一张已有场景图作为布局与风格参考。</p>
+          </div>
+        ) : null}
+        <MarkdownEditor
+          className="character-scene-prompt-editor"
+          label={kind === 'prop' ? '道具资料' : '提示词'}
           value={content}
-          onChange={(event) => onContentChange(event.target.value)}
+          onChange={onContentChange}
+          autoPreviewOnBlur
           placeholder={
             kind === 'prop'
               ? '输入道具外观、材质、用途与来历…'
@@ -165,7 +143,7 @@ export function CharacterSceneWorkspace({
       {kind === 'character' && projectId && documentId ? (
         <details className="workspace-extra">
           <summary>角色声音</summary>
-          <VoiceProfilePanel
+          <VoiceReferencePanel
             projectId={projectId}
             characterDocumentId={documentId}
             writable={writable}

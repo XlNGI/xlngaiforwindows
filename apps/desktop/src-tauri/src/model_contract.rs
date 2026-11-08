@@ -90,6 +90,17 @@ pub(crate) fn validate_parameters(adapter_key: &str, parameters: &Value) -> Resu
     crate::schema_validation::validate(&contract["parameterSchema"], parameters)
 }
 
+fn encode_channel_mapping_value(value: &Value, mapping: &Value) -> Result<Value, String> {
+    match mapping.get("valueEncoding") {
+        None => Ok(value.clone()),
+        Some(encoding) if encoding.as_str() == Some("integer-string") => value
+            .as_i64()
+            .map(|number| Value::String(number.to_string()))
+            .ok_or_else(|| "Channel integer-string encoding requires an integer".into()),
+        Some(_) => Err("Unsupported channel value encoding".into()),
+    }
+}
+
 /// Existing OpenAI video protocol projection, independent of the model family.
 pub(crate) fn video_payload(
     adapter_key: &str,
@@ -124,13 +135,25 @@ pub(crate) fn video_payload(
     {
         let mut output = serde_json::json!({"model": remote_model_id});
         for mapping in mappings {
-            if mapping["operation"] != "copy" {
-                return Err("Unsupported channel request mapping".into());
-            }
             let source = mapping["from"]
                 .as_str()
                 .ok_or("Missing channel mapping source")?;
-            if let Some(value) = object.get(source) {
+            let value = match mapping["operation"].as_str() {
+                Some("copy") => object.get(source),
+                Some("extract") => {
+                    // The bounded array projection reads the first present field;
+                    // the canonical Schema guarantees at most one text entry.
+                    let (array, field) = source
+                        .split_once("[].")
+                        .ok_or("Unsupported channel extraction path")?;
+                    object
+                        .get(array)
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.iter().find_map(|item| item.get(field)))
+                }
+                _ => return Err("Unsupported channel request mapping".into()),
+            };
+            if let Some(value) = value {
                 let destination = mapping["to"]
                     .as_str()
                     .ok_or("Missing channel mapping target")?;
@@ -150,7 +173,7 @@ pub(crate) fn video_payload(
                         .get_mut(*part)
                         .ok_or("Invalid channel mapping path")?;
                 }
-                target[parts[parts.len() - 1]] = value.clone();
+                target[parts[parts.len() - 1]] = encode_channel_mapping_value(value, mapping)?;
             }
         }
         return serde_json::to_vec(&output)
@@ -392,6 +415,93 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(vec![0; 10 * 1024 * 1024 + 1])
         );
         assert!(image_payload(key, json!({"prompt":"test","images":[image]}), model).is_err());
+    }
+
+    #[test]
+    fn channel_integer_encoding_rejects_non_integers_and_unknown_encodings() {
+        let mapping = json!({"valueEncoding":"integer-string"});
+        for value in [
+            json!("7"),
+            json!(7.5),
+            json!(true),
+            json!(null),
+            json!([7]),
+            json!({"duration":7}),
+        ] {
+            assert!(encode_channel_mapping_value(&value, &mapping).is_err());
+        }
+        assert!(
+            encode_channel_mapping_value(&json!(7), &json!({"valueEncoding":"unknown"})).is_err()
+        );
+    }
+
+    #[test]
+    fn seedance_gateway_projects_prompt_and_all_official_fields_without_losing_content_order() {
+        for (id, model, max_duration) in [
+            (
+                "cn.bytedance.seedance2-0.video",
+                "doubao-seedance-2-0-260128",
+                15,
+            ),
+            (
+                "cn.bytedance.seedance2-5.video",
+                "doubao-seedance-2-5-260628",
+                30,
+            ),
+        ] {
+            let key = format!("REFERENCE_TO_VIDEO:unicompapi:{id}:contract-2");
+            let content = json!([
+                {"type":"image_url","image_url":{"url":"https://example.com/actor.png"},"role":"reference_image"},
+                {"type":"audio_url","audio_url":{"url":"https://example.com/voice.wav"},"role":"reference_audio"},
+                {"type":"text","text":"人物用音频1的音色说你好"},
+                {"type":"video_url","video_url":{"url":"https://example.com/reference.mp4"},"role":"reference_video"}
+            ]);
+            let mut parameters = json!({
+                "content":content,"duration":max_duration,"resolution":"720p","ratio":"16:9",
+                "generate_audio":true,"watermark":false,"return_last_frame":true,
+                "callback_url":"https://example.com/callback","service_tier":"default",
+                "execution_expires_after":172800
+            });
+            let mut expected_metadata = parameters.clone();
+            expected_metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("duration");
+            if max_duration == 30 {
+                parameters["draft"] = json!(false);
+                expected_metadata["draft"] = json!(false);
+            }
+            let body: Value =
+                serde_json::from_slice(&video_payload(&key, parameters, model).unwrap()).unwrap();
+            assert_eq!(
+                body,
+                json!({"model":model,"prompt":"人物用音频1的音色说你好","seconds":max_duration.to_string(),"metadata":expected_metadata})
+            );
+            for mode in [
+                "TEXT_TO_VIDEO",
+                "IMAGE_TO_VIDEO",
+                "START_END_TO_VIDEO",
+                "REFERENCE_TO_VIDEO",
+            ] {
+                assert!(matches_model(
+                    &format!("{mode}:unicompapi:{id}:contract-2"),
+                    model
+                ));
+            }
+            let automatic: Value = serde_json::from_slice(&video_payload(
+                &format!("TEXT_TO_VIDEO:unicompapi:{id}:contract-2"),
+                json!({"content":[{"type":"text","text":"下雨了"}],"duration":-1,"generate_audio":false}), model
+            ).unwrap()).unwrap();
+            assert_eq!(automatic["seconds"], "-1");
+            assert_eq!(automatic["metadata"]["generate_audio"], false);
+            let image_only: Value = serde_json::from_slice(&video_payload(
+                &format!("IMAGE_TO_VIDEO:unicompapi:{id}:contract-2"),
+                json!({"content":[{"type":"image_url","image_url":{"url":"https://example.com/first.png"},"role":"first_frame"}]}), model
+            ).unwrap()).unwrap();
+            assert_eq!(image_only["metadata"]["content"][0]["role"], "first_frame");
+            assert!(image_only.get("prompt").is_none());
+            assert!(image_only.get("seconds").is_none());
+        }
     }
 
     #[test]

@@ -19,18 +19,27 @@ import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { loadedToolGuidance } from './agent-workflow-guidance.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
+import { taskCheckpointValidationDefinition } from './agent-task-checkpoint-schema.js';
+import { PREPARED_ARGUMENT_TOOLS, type PreparedArgumentsRef } from './agent-prepared-arguments.js';
 
-const CORE_TOOLS = [
+export const CORE_TOOLS = [
   'conversation.ask',
   'conversation.task.route',
+  'conversation.task.checkpoint',
   'project.structure.get',
   'library.search',
   'library.read',
 ];
-const MAX_LOADED_TOOLS = 16;
-const MAX_LOADED_SCHEMA_BYTES = 128 * 1024;
 
 export interface AgentProviderToolExecutor {
+  resolveToolArguments?(identity: LlmGenerationIdentity, tool: string, args: unknown): unknown;
+  preserveToolArguments?(
+    identity: LlmGenerationIdentity,
+    tool: string,
+    args: unknown,
+    callId?: string,
+  ): PreparedArgumentsRef;
+  projectToolResult?(identity: LlmGenerationIdentity, callId: string, output: string): string;
   recordProviderRequest?(
     identity: LlmGenerationIdentity,
     requestId: string,
@@ -65,7 +74,15 @@ export interface AgentProviderToolExecutor {
     generationId: string,
     reason: 'cancelled' | 'failed',
     errorMessage?: string,
+    providerErrorCode?: string,
   ): number;
+}
+
+export class AgentTaskContinuationRequired extends Error {
+  constructor(readonly instruction: string) {
+    super(instruction);
+    this.name = 'AgentTaskContinuationRequired';
+  }
 }
 
 type ProviderCallContext = {
@@ -100,7 +117,6 @@ export class AgentProviderToolGateway {
     updates: LlmToolDefinition[][];
   };
   private activeReads = 0;
-  private validationFailures = 0;
   private sceneShotBatchLimit = 4;
   private completionError?: string;
   private readonly selectedTools = new Set<string>();
@@ -108,6 +124,7 @@ export class AgentProviderToolGateway {
   private readonly catalogNames: string[];
   private readonly repeatedResults = new RepeatedReadResults();
   private readonly deliveredGuidance = new Set<string>();
+  private readonly supportsTaskCheckpoint: boolean;
   private readonly readWaiters: Array<() => void> = [];
   // A durable review boundary closes the current Worker step. Pi still calls
   // prepareNextTurnWithContext after finalizing tool results, so remember the
@@ -126,6 +143,11 @@ export class AgentProviderToolGateway {
     private readonly lazyTools = false,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
+    // The runtime decides whether to coordinate durable stages at task start.
+    // A later authorization refresh cannot enable that coordinator mid-task.
+    this.supportsTaskCheckpoint = initialDefinitions.some(
+      (tool) => tool.name === 'conversation.task.checkpoint',
+    );
     this.definitions.forEach((definition) => unifiedAgentToolRegistry.require(definition.name));
     this.catalog = this.definitions
       .filter((tool) => !CORE_TOOLS.includes(tool.name))
@@ -180,6 +202,12 @@ export class AgentProviderToolGateway {
     return tools;
   }
 
+  private refreshedDefinitions(definitions: LlmToolDefinition[]): LlmToolDefinition[] {
+    return cloneDefinitions(definitions).filter(
+      (tool) => this.supportsTaskCheckpoint || tool.name !== 'conversation.task.checkpoint',
+    );
+  }
+
   private isLoaded(name: string): boolean {
     return !this.lazyTools || this.selectedTools.has(name) || CORE_TOOLS.includes(name);
   }
@@ -187,20 +215,25 @@ export class AgentProviderToolGateway {
   private loaderDefinition(): LlmToolDefinition {
     return {
       name: 'tools.load',
-      description: `Load up to six authorized tools by exact name. Previously loaded tools remain available in stable order (at most ${MAX_LOADED_TOOLS} extra tools / 128 KiB). Use reset=true only to begin a new phase when that budget is exceeded; it rebuilds the prompt cache. Loading never grants authorization. Read the returned workflow instructions. Catalog: ${this.catalog}`,
+      description: `Load the authorized tools needed for the current step by exact name. Previously loaded tools remain available in stable order. Context management accounts for schema cost against the selected model. Use reset=true to explicitly replace the phase selection. Loading never grants authorization. Read the returned workflow instructions. Catalog: ${this.catalog}`,
       parameters: {
         type: 'object',
         additionalProperties: false,
         required: ['names'],
         properties: {
+          workflow: {
+            type: 'string',
+            enum: ['character-image', 'scene-image', 'video-prompt'],
+            description:
+              'Load the specialized authoring policy for the current deliverable. Generic document tools do not load unrelated image/video policies.',
+          },
           reset: {
             type: 'boolean',
-            description: 'Explicitly replace the loaded phase when its schema budget is exceeded.',
+            description: 'Explicitly replace the current phase selection.',
           },
           names: {
             type: 'array',
             minItems: 1,
-            maxItems: 6,
             uniqueItems: true,
             items: { type: 'string', enum: this.catalogNames },
           },
@@ -216,36 +249,28 @@ export class AgentProviderToolGateway {
       executionMode: 'sequential',
       prepareArguments: (args: unknown) => this.prepareArguments(this.loaderDefinition(), args),
       execute: (_id: string, args: unknown) => {
-        const { names, reset } = args as { names: string[]; reset?: boolean };
+        const { names, reset, workflow } = args as {
+          names: string[];
+          reset?: boolean;
+          workflow?: string;
+        };
         if (
           !Array.isArray(names) ||
-          names.length > 6 ||
+          !names.length ||
           names.some((name) => !this.hasDefinition(name))
         )
-          throw new Error('Select at most six authorized tool names from the catalog.');
+          throw new Error('Select authorized tool names from the catalog.');
         const selection = new Set(reset ? [] : this.selectedTools);
         names.filter((name) => !CORE_TOOLS.includes(name)).forEach((name) => selection.add(name));
-        const selectedDefinitions = this.definitions.filter((definition) =>
-          selection.has(definition.name),
-        );
-        const schemaBytes = Buffer.byteLength(
-          JSON.stringify(
-            selectedDefinitions.map(({ name, description, parameters }) => ({
-              name,
-              description,
-              parameters,
-            })),
-          ),
-        );
-        if (selection.size > MAX_LOADED_TOOLS || schemaBytes > MAX_LOADED_SCHEMA_BYTES)
-          throw new Error(
-            'Loaded schema budget exceeded. Choose the tools needed for the next phase with reset=true.',
-          );
+        const newlyLoaded = [...selection].filter((name) => !this.selectedTools.has(name));
         this.selectedTools.clear();
         selection.forEach((name) => this.selectedTools.add(name));
-        const guidance = loadedToolGuidance(names);
-        const instructions = this.deliveredGuidance.has(guidance) ? undefined : guidance;
-        this.deliveredGuidance.add(guidance);
+        const blocks = loadedToolGuidance(names, workflow)
+          .split(/\r?\n\s*\r?\n/)
+          .filter(Boolean);
+        const instructions =
+          blocks.filter((block) => !this.deliveredGuidance.has(block)).join('\n\n') || undefined;
+        blocks.forEach((block) => this.deliveredGuidance.add(block));
         return Promise.resolve({
           content: [
             {
@@ -254,8 +279,11 @@ export class AgentProviderToolGateway {
                 status: 'tools_loaded',
                 names,
                 loaded: [...selection],
+                newlyLoaded,
+                reused: names.filter((name) => !newlyLoaded.includes(name)),
                 cacheRebuild: reset === true,
                 instructions,
+                workflow,
               }),
             },
           ],
@@ -269,8 +297,14 @@ export class AgentProviderToolGateway {
     return this.definitions.some((definition) => definition.name === operation);
   }
 
-  clearResultReuse(): void {
-    this.repeatedResults.clear();
+  restoreSelection(names: string[]): void {
+    this.selectedTools.clear();
+    for (const name of names)
+      if (!CORE_TOOLS.includes(name) && this.hasDefinition(name)) this.selectedTools.add(name);
+  }
+
+  clearResultReuse(omittedCallIds?: ReadonlySet<string>): void {
+    this.repeatedResults.clear(omittedCallIds);
   }
 
   preferStagedSceneAuthoring(): boolean {
@@ -282,21 +316,43 @@ export class AgentProviderToolGateway {
     return true;
   }
 
-  recoverSceneAuthoring(): string | undefined {
+  recoverSceneAuthoring(reason: 'output-size' | 'arguments'): string | undefined {
     if (!this.preferStagedSceneAuthoring()) return undefined;
-    this.sceneShotBatchLimit = Math.max(1, Math.floor(this.sceneShotBatchLimit / 2));
+    if (reason === 'output-size')
+      this.sceneShotBatchLimit = Math.max(1, Math.floor(this.sceneShotBatchLimit / 2));
     return (
       `For NEW scene/shot content use scene.structure.stage with at most ${this.sceneShotBatchLimit} ordered shots per put_shots call, one write call per response. ` +
       'Resume the matching stage using get and its latest stageId, rowVersion and missingShots; do not repeat saved scenes or shots. ' +
       'Only when no matching stage exists, begin with a stable executionKey and the full sceneShotCounts manifest, then put_scene and put_shots in order. ' +
-      'Preserve the full manifest and prompt content across successive shotOffset batches; budget remaining writes using this smaller limit and missingShots. ' +
+      'Preserve the full manifest and prompt content across successive shotOffset batches; plan remaining writes using this batch size and missingShots. ' +
       'Each new shot is {"title":"...","authoringIR":{"schemaVersion":1,"kind":"shot","prompt":"..."}}; put optional creative fields in authoringIR.data and real document IDs in authoringIR.references. ' +
       'Use complete JSON with escaped quotes/newlines inside strings. Put final generation text in authoringIR.prompt. ' +
       'For EXISTING scene revisions keep sceneId and expectedRowVersion through scene.read/scene.submit_structure; never create replacements.'
     );
   }
 
+  providerResponseRejection(calls: Array<{ id: string; name: string }>): string | undefined {
+    if (calls.length > 8 || new Set(calls.map((call) => call.id)).size !== calls.length)
+      return 'A response must contain at most eight distinct tool calls. No calls were executed.';
+    if (calls.length <= 1) return undefined;
+    if (
+      calls.some(
+        (call) =>
+          call.name === 'tools.load' ||
+          !unifiedAgentToolRegistry.has(call.name) ||
+          unifiedAgentToolRegistry.executionMode(call.name) !== 'parallel',
+      )
+    )
+      return (
+        'Only independent read-only calls may share a response. No calls were executed. ' +
+        'Submit tools.load or one write alone; read its result before the next write.'
+      );
+    return undefined;
+  }
+
   freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
+    const rejection = this.providerResponseRejection(calls);
+    if (rejection) throw new Error(rejection);
     if (calls.some((call) => call.name === 'tools.load')) return;
     const key = calls.map((call) => call.id).join(':');
     if (
@@ -304,8 +360,6 @@ export class AgentProviderToolGateway {
       !calls.every((call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel')
     )
       return;
-    if (calls.length > 8 || new Set(calls.map((call) => call.id)).size !== calls.length)
-      throw new Error('A read-only response must contain at most eight distinct tool calls.');
     this.batch = {
       key,
       definitions: new Map(
@@ -324,7 +378,7 @@ export class AgentProviderToolGateway {
     const batch = this.batch;
     if (!batch) return;
     if (this.executor.advanceTextTurn && this.readBatchContext)
-      this.definitions = cloneDefinitions(
+      this.definitions = this.refreshedDefinitions(
         this.executor.advanceTextTurn({
           ...this.identity,
           ...this.readBatchContext,
@@ -332,9 +386,9 @@ export class AgentProviderToolGateway {
         }),
       );
     else if (this.executor.refreshTools)
-      this.definitions = cloneDefinitions(this.executor.refreshTools(this.identity));
+      this.definitions = this.refreshedDefinitions(this.executor.refreshTools(this.identity));
     else if (batch.updates.length)
-      this.definitions = cloneDefinitions(
+      this.definitions = this.refreshedDefinitions(
         batch.updates[0]!.filter((definition) =>
           batch.updates.every((update) =>
             update.some(
@@ -358,7 +412,7 @@ export class AgentProviderToolGateway {
       finishReason: 'supplement',
       usage,
     });
-    if (tools) this.definitions = cloneDefinitions(tools);
+    if (tools) this.definitions = this.refreshedDefinitions(tools);
   }
 
   captureProviderCall(
@@ -378,13 +432,6 @@ export class AgentProviderToolGateway {
   startProviderStep(): void {
     if (this.terminated) return;
     this.executor.startProviderStep(this.identity);
-  }
-
-  assertRepairBudget(): void {
-    if (this.validationFailures >= 3)
-      throw new Error(
-        'TOOL_REPAIR_LIMIT: 参数校验连续修复达到上限（3次），请缩小为分段提交。已保存的草稿仍可继续。',
-      );
   }
 
   completeProviderStep(
@@ -422,8 +469,9 @@ export class AgentProviderToolGateway {
   }
 
   private prepareArguments(definition: LlmToolDefinition, args: unknown): unknown {
+    args = this.executor.resolveToolArguments?.(this.identity, definition.name, args) ?? args;
+    definition = taskCheckpointValidationDefinition(definition, args);
     try {
-      this.assertRepairBudget();
       const validated: unknown = validateToolArguments(definition, {
         type: 'toolCall',
         id: 'validation',
@@ -432,9 +480,8 @@ export class AgentProviderToolGateway {
       });
       return validated;
     } catch (error) {
-      this.validationFailures += 1;
       const recovery = isNewSceneAuthoring(definition.name, args)
-        ? this.recoverSceneAuthoring()
+        ? this.recoverSceneAuthoring('arguments')
         : undefined;
       const reason = boundedValidationError(error, definition, args);
       this.executor.recordValidationFailure?.(
@@ -443,7 +490,10 @@ export class AgentProviderToolGateway {
         Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8'),
         reason,
       );
-      throw new Error([reason, recovery].filter(Boolean).join('\n'));
+      const prepared = PREPARED_ARGUMENT_TOOLS.has(definition.name)
+        ? this.executor.preserveToolArguments?.(this.identity, definition.name, args)
+        : undefined;
+      throw new Error([reason, recovery, preparedInstruction(prepared)].filter(Boolean).join('\n'));
     }
   }
 
@@ -517,12 +567,12 @@ export class AgentProviderToolGateway {
         throw new Error('Worker tool execution did not return a continuation result.');
       }
       if (execution.tools) {
-        if (this.batch) this.batch.updates.push(cloneDefinitions(execution.tools));
-        else this.definitions = cloneDefinitions(execution.tools);
+        const definitions = this.refreshedDefinitions(execution.tools);
+        if (this.batch) this.batch.updates.push(definitions);
+        else this.definitions = definitions;
       }
-      const output = execution.continuation.outputs.find(
-        (item) => item.callId === toolCallId,
-      )?.output;
+      const toolOutput = execution.continuation.outputs.find((item) => item.callId === toolCallId);
+      const output = toolOutput?.output;
       if (output === undefined)
         throw new Error('Worker tool continuation omitted the Pi tool result.');
       unifiedAgentToolRegistry.assertResultText(output);
@@ -530,21 +580,31 @@ export class AgentProviderToolGateway {
         status?: string;
         error?: { code?: string; message?: string };
       };
-      if (result?.status === 'rejected') {
-        if (result.error?.code === 'AGENT_TOOL_ARGUMENTS_INVALID') this.validationFailures += 1;
-        const recovery = isNewSceneAuthoring(name, args) ? this.recoverSceneAuthoring() : undefined;
+      if (unifiedAgentToolRegistry.isFailureResult(result)) {
+        const recovery = isNewSceneAuthoring(name, args)
+          ? this.recoverSceneAuthoring('arguments')
+          : undefined;
         throw new Error(
           [boundedValidationError(new Error(output)), recovery].filter(Boolean).join('\n'),
         );
       }
-      this.validationFailures = 0;
       if (execution.terminate) this.terminated = true;
       if (stepId && !this.planHooks!.succeed(stepId, definition.name, output)) {
         throw new Error(`Planned operation ${definition.name} did not succeed.`);
       }
       return {
         content: [
-          { type: 'text', text: readonly ? this.repeatedResults.use(toolCallId, output) : output },
+          {
+            type: 'text',
+            text:
+              this.executor.projectToolResult?.(this.identity, toolCallId, output) ??
+              (readonly ? this.repeatedResults.use(toolCallId, output) : output),
+          },
+          ...(toolOutput?.images ?? []).map((item) => ({
+            type: 'image' as const,
+            data: item.data,
+            mimeType: item.mimeType,
+          })),
         ],
         details: { status: 'completed', toolName: definition.name },
         ...(execution.terminate ? { terminate: true } : {}),
@@ -553,6 +613,18 @@ export class AgentProviderToolGateway {
       if (error instanceof Error && /AGENT_TOOL_QUOTA_EXHAUSTED/.test(error.message))
         this.completionError = error.message;
       if (stepId) this.planHooks?.fail(stepId, definition.name, error);
+      if (PREPARED_ARGUMENT_TOOLS.has(name)) {
+        const prepared = this.executor.preserveToolArguments?.(
+          this.identity,
+          name,
+          args,
+          toolCallId,
+        );
+        if (prepared)
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)}\n${preparedInstruction(prepared)}`,
+          );
+      }
       throw error;
     } finally {
       if (readonly) {
@@ -562,6 +634,12 @@ export class AgentProviderToolGateway {
       }
     }
   }
+}
+
+function preparedInstruction(ref?: PreparedArgumentsRef): string | undefined {
+  return ref
+    ? `Arguments retained, not proof of a save. Retry the same tool using preparedArguments=${JSON.stringify(ref)} plus only corrected top-level fields. Original CAS still applies. Arrays/objects are replaced as a whole.`
+    : undefined;
 }
 
 export function boundedValidationError(
@@ -574,6 +652,27 @@ export function boundedValidationError(
   return [
     ...(paths.length ? [`Unsupported fields: ${paths.join(', ')}.`] : []),
     message.split('Received arguments:')[0]!.trim(),
+    ...(definition?.name === 'document.submit_draft'
+      ? [
+          'New document: omit documentId, expectedDocumentRowVersion and baseVersionId completely, even null. Existing document: provide documentId and that target’s current expectedDocumentRowVersion/baseVersionId; omit bindingRole. Source version IDs are provenance, never output-target CAS. contentIR is only for character/scene/prop; plans/scripts keep all authored structure in contentMarkdown and omit contentIR. Preserve all content when correcting fields.',
+        ]
+      : []),
+    ...(definition?.name === 'conversation.task.checkpoint' &&
+    args &&
+    typeof args === 'object' &&
+    (args as Record<string, unknown>).operation === 'review'
+      ? [
+          'No review executed. Call conversation.task.checkpoint operation=state and follow current pendingActions using the Worker reviewId. Report content findings with targetId/category/description/evidence; resolve or withdraw open issueIds with reason and evidence. Worker manages hashes, versions and missing reads; never report system readiness as a content defect.',
+        ]
+      : []),
+    ...(definition?.name === 'conversation.task.checkpoint' &&
+    args &&
+    typeof args === 'object' &&
+    (args as Record<string, unknown>).operation === 'plan'
+      ? [
+          'Deliverables: documentKind is only for document.submit_draft (scripts use plan); requireReferences supports scene.update_shot_prompts and scene structure creation. Structure tools count saved scenes. targetIds are existing output IDs; omit them for new outputs.',
+        ]
+      : []),
   ]
     .join('\n')
     .slice(0, 1600);

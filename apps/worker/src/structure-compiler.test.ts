@@ -33,6 +33,56 @@ async function setup(name = 'Structure Project') {
 }
 
 describe('ProjectStructureCompiler', () => {
+  it('counts only visible scenes, shots and assets unless archived items are requested', async () => {
+    const { project, content, compiler } = await setup();
+    const scene = content.saveScene({ title: '待制作场次' });
+    const visibleShot = content.saveShot({ sceneId: scene.id, title: '活动镜头' });
+    const hiddenShot = content.saveShot({ sceneId: scene.id, title: '归档镜头' });
+    content.changeProductionLifecycle({
+      target: { kind: 'shot', id: hiddenShot.id },
+      expectedRowVersion: hiddenShot.rowVersion,
+      archived: true,
+    });
+    project.access(true, (database, opened) => {
+      const now = new Date().toISOString();
+      const insert = database.prepare(
+        'INSERT INTO assets (id, project_id, kind, relative_path, content_hash, size_bytes, created_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      );
+      insert.run('active-asset', opened.id, 'image', 'active.png', 'active-hash', 1, now, null);
+      insert.run('deleted-asset', opened.id, 'image', 'deleted.png', 'deleted-hash', 1, now, now);
+    });
+
+    project.access(false, (database, opened) => {
+      const active = compiler.compileFromDatabase(database, opened);
+      const all = compiler.compileFromDatabase(database, opened, { includeArchived: true });
+      const resources = compileProjectResourceMap(database, opened).resources;
+      expect(active.domains.shortDrama).toEqual({ enabled: true, sceneCount: 1, shotCount: 1 });
+      expect(active.domains.assets).toEqual({ enabled: true, count: 1 });
+      expect(all.domains.shortDrama).toEqual({ enabled: true, sceneCount: 1, shotCount: 2 });
+      expect(all.domains.assets).toEqual({ enabled: true, count: 2 });
+      expect(resources.some((item) => item.id === 'shot:' + visibleShot.id)).toBe(true);
+      expect(resources.some((item) => item.id === 'shot:' + hiddenShot.id)).toBe(false);
+      expect(resources.some((item) => item.id === 'asset:deleted-asset')).toBe(false);
+    });
+
+    content.changeProductionLifecycle({
+      target: { kind: 'scene', id: scene.id },
+      expectedRowVersion: scene.rowVersion,
+      archived: true,
+    });
+    project.access(false, (database, opened) => {
+      const active = compiler.compileFromDatabase(database, opened);
+      const all = compiler.compileFromDatabase(database, opened, { includeArchived: true });
+      expect(active.domains.shortDrama).toEqual({ enabled: false, sceneCount: 0, shotCount: 0 });
+      expect(all.domains.shortDrama).toEqual({ enabled: true, sceneCount: 1, shotCount: 2 });
+      expect(
+        compileProjectResourceMap(database, opened).resources.some(
+          (item) => item.id === 'scene:' + scene.id,
+        ),
+      ).toBe(false);
+    });
+  });
+
   it('keeps novel-reference source types consistent before a novel profile exists', async () => {
     const { project, novel, content, compiler } = await setup();
     const reference = content.saveDocument({

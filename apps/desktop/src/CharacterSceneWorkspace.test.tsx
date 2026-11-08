@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CharacterSceneWorkspace } from './CharacterSceneWorkspace';
 import { callWorker } from './worker-client';
@@ -10,8 +10,72 @@ afterEach(() => {
 });
 
 describe('CharacterSceneWorkspace', () => {
+  it('shows only a compact audio add control for a saved character', async () => {
+    vi.mocked(callWorker).mockResolvedValue([]);
+    render(
+      <CharacterSceneWorkspace
+        projectId="project"
+        documentId="character"
+        title="阿明"
+        kind="character"
+        content="角色设定"
+        writable
+        assets={[]}
+        versions={[]}
+        onContentChange={vi.fn()}
+        onRestoreVersion={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText('角色声音'));
+    const audio = screen.getByRole('region', { name: '角色音频' });
+    await waitFor(() =>
+      expect(within(audio).getByRole('button', { name: '添加音频' })).toBeEnabled(),
+    );
+    expect(within(audio).getAllByRole('button')).toHaveLength(1);
+    expect(screen.queryByLabelText('音色 ID')).not.toBeInTheDocument();
+    expect(screen.queryByText('视频声音参考')).not.toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalledWith('provider.profile.list', {});
+    expect(callWorker).not.toHaveBeenCalledWith('characterVoice.list', {});
+  });
+
+  it('does not force a scene view count and keeps an optional consistency reference per document', () => {
+    const onSceneReferenceChange = vi.fn();
+    const props = {
+      projectId: 'project',
+      documentId: 'courtyard',
+      title: '庭院',
+      kind: 'scene' as const,
+      content: '东门西窗，中央石桌。',
+      writable: true,
+      assets: [
+        {
+          id: 'scene-asset',
+          projectId: 'project',
+          kind: 'scene',
+          relativePath: 'assets/scene.png',
+          contentHash: 'hash',
+          sizeBytes: 1,
+          createdAt: '2026-10-29T00:00:00.000Z',
+        },
+      ],
+      versions: [],
+      onContentChange: vi.fn(),
+      onRestoreVersion: vi.fn(),
+      onSceneReferenceChange,
+    };
+    const { rerender } = render(<CharacterSceneWorkspace {...props} />);
+    expect(screen.queryByLabelText('场景参考模式')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('场景参考视图')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('场景一致性参考图'), {
+      target: { value: 'scene-asset' },
+    });
+    expect(onSceneReferenceChange).toHaveBeenLastCalledWith({ referenceAssetId: 'scene-asset' });
+    rerender(<CharacterSceneWorkspace {...props} documentId="harbor" writable={false} />);
+    expect(screen.getByLabelText('场景一致性参考图')).toHaveValue('');
+    expect(screen.getByLabelText('场景一致性参考图')).toBeDisabled();
+  });
+
   it('opens image generation from a prop document without character voice controls', () => {
-    const onGenerate = vi.fn();
     render(
       <CharacterSceneWorkspace
         projectId="project"
@@ -19,24 +83,20 @@ describe('CharacterSceneWorkspace', () => {
         title="铁木杖"
         kind="prop"
         content="杖尖包有铁箍。"
-        stateLabel="草稿"
-        stateKey="draft"
         writable
         assets={[]}
         versions={[]}
-        onTitleChange={vi.fn()}
-        onKindChange={vi.fn()}
         onContentChange={vi.fn()}
         onRestoreVersion={vi.fn()}
-        onGenerate={onGenerate}
       />,
     );
 
-    expect(screen.getByRole('heading', { name: '道具资料' })).toBeVisible();
-    expect(screen.getByRole('combobox', { name: '文档类型' })).toHaveValue('prop');
-    expect(screen.getByRole('textbox', { name: '道具资料' })).toHaveValue('杖尖包有铁箍。');
-    fireEvent.click(screen.getByRole('button', { name: '生成道具图' }));
-    expect(onGenerate).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('heading', { name: '道具资料' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '文档类型' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '道具资料预览' })).toHaveTextContent(
+      '杖尖包有铁箍。',
+    );
+    expect(screen.queryByRole('button', { name: '生成道具图' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '生成角色图' })).not.toBeInTheDocument();
     expect(screen.queryByText('角色声音')).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '场次绑定' })).not.toBeInTheDocument();
@@ -50,22 +110,16 @@ describe('CharacterSceneWorkspace', () => {
         title="庭院"
         kind="scene"
         content="雨后的旧庭院"
-        stateLabel="已发布"
-        stateKey="published"
         writable={false}
         assets={[]}
         versions={[{ id: 'v1', version: 1, createdAt: '2026-10-19T12:00:00Z' }]}
         boundScenes={[{ id: 'scene-1', title: '第1场 · 雨夜' }]}
-        onTitleChange={vi.fn()}
-        onKindChange={vi.fn()}
         onContentChange={vi.fn()}
         onRestoreVersion={onRestoreVersion}
-        onGenerate={vi.fn()}
         onOpenScene={onOpenScene}
       />,
     );
-    expect(screen.getByRole('heading', { name: '场景生图提示词' })).toBeVisible();
-    expect(screen.getByRole('textbox', { name: '提示词' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('region', { name: '提示词预览' })).toHaveTextContent('雨后的旧庭院');
     fireEvent.click(screen.getByRole('button', { name: '第1场 · 雨夜' }));
     expect(onOpenScene).toHaveBeenCalledWith('scene-1');
     expect(screen.getByText('1 场')).toBeInTheDocument();
@@ -91,8 +145,6 @@ describe('CharacterSceneWorkspace', () => {
           title="庭院"
           kind={kind}
           content="场景提示词"
-          stateLabel="草稿"
-          stateKey="draft"
           writable
           versions={[]}
           assets={[
@@ -107,11 +159,8 @@ describe('CharacterSceneWorkspace', () => {
               createdAt: 'now',
             },
           ]}
-          onTitleChange={vi.fn()}
-          onKindChange={vi.fn()}
           onContentChange={vi.fn()}
           onRestoreVersion={vi.fn()}
-          onGenerate={vi.fn()}
           onOpenAsset={onOpenAsset}
         />,
       );
@@ -130,4 +179,29 @@ describe('CharacterSceneWorkspace', () => {
       expect(onOpenAsset).toHaveBeenCalledWith('scene-image');
     },
   );
+
+  it('starts character and scene documents in preview and returns to preview after editing', () => {
+    const props = {
+      title: '庭院',
+      kind: 'scene' as const,
+      content: '雨后的旧庭院',
+      writable: true,
+      assets: [],
+      versions: [],
+      onContentChange: vi.fn(),
+      onRestoreVersion: vi.fn(),
+    };
+    const { rerender } = render(<CharacterSceneWorkspace {...props} />);
+    const preview = screen.getByRole('region', { name: '提示词预览' });
+    expect(preview).toHaveTextContent('雨后的旧庭院');
+
+    fireEvent.click(preview);
+    const editor = screen.getByRole('textbox', { name: '提示词' });
+    fireEvent.change(editor, { target: { value: '更新后的旧庭院' } });
+    rerender(<CharacterSceneWorkspace {...props} content="更新后的旧庭院" />);
+    fireEvent.blur(screen.getByRole('textbox', { name: '提示词' }));
+
+    expect(screen.getByRole('region', { name: '提示词预览' })).toHaveTextContent('更新后的旧庭院');
+    expect(screen.queryByRole('textbox', { name: '提示词' })).not.toBeInTheDocument();
+  });
 });

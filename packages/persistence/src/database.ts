@@ -5,6 +5,11 @@ import Database from 'better-sqlite3';
 import type { IntegrityReport } from '@ai-video/domain';
 import {
   CURRENT_SCHEMA_VERSION,
+  MIGRATION_V70,
+  MIGRATION_V69,
+  MIGRATION_V68,
+  MIGRATION_V67,
+  MIGRATION_V66,
   MIGRATION_V1,
   MIGRATION_V2,
   MIGRATION_V3,
@@ -66,6 +71,12 @@ import { applyMigrationV62 } from './migration-v62.js';
 import { MIGRATION_V63 } from './migration-v63.js';
 import { applyMigrationV64 } from './migration-v64.js';
 import { applyMigrationV65 } from './migration-v65.js';
+import { applyMigrationV71 } from './migration-v71.js';
+import { applyMigrationV72 } from './migration-v72.js';
+import { MIGRATION_V73 } from './migration-v73.js';
+import { applyMigrationV74 } from './migration-v74.js';
+import { applyMigrationV75 } from './migration-v75.js';
+import { applyMigrationV76 } from './migration-v76.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
 import { addSchemaQueryTaskType } from './migration-v35.js';
@@ -76,6 +87,44 @@ import {
   createProjectLibraryFts,
   rebuildLibraryChunksForDocument,
 } from './project-library-chunks.js';
+
+const documentMutationAuthorizations = new WeakMap<Database.Database, Map<string, number>>();
+
+function mutationAuthorizationKey(documentId: string, operation: string): string {
+  return `${documentId}\u001f${operation}`;
+}
+
+function registerDocumentMutationFunction(database: Database.Database): void {
+  if (documentMutationAuthorizations.has(database)) return;
+  documentMutationAuthorizations.set(database, new Map());
+  database.function('document_mutation_allowed', (documentId: unknown, operation: unknown) =>
+    documentMutationAuthorizations
+      .get(database)
+      ?.has(mutationAuthorizationKey(String(documentId), String(operation)))
+      ? 1
+      : 0,
+  );
+}
+
+/** Grants one document a narrowly scoped mutation for the duration of a Worker operation. */
+export function withDocumentMutationAuthorization<T>(
+  database: Database.Database,
+  documentId: string,
+  operation: 'unpublish',
+  callback: () => T,
+): T {
+  registerDocumentMutationFunction(database);
+  const authorizations = documentMutationAuthorizations.get(database)!;
+  const key = mutationAuthorizationKey(documentId, operation);
+  authorizations.set(key, (authorizations.get(key) ?? 0) + 1);
+  try {
+    return callback();
+  } finally {
+    const count = authorizations.get(key) ?? 0;
+    if (count <= 1) authorizations.delete(key);
+    else authorizations.set(key, count - 1);
+  }
+}
 
 export interface OpenDatabaseOptions {
   readonly?: boolean;
@@ -97,6 +146,7 @@ export function openProjectDatabase(
   }
   const database = new Database(databasePath, databaseOptions);
   try {
+    registerDocumentMutationFunction(database);
     database.function('sha256', { deterministic: true }, (value: unknown) =>
       createHash('sha256').update(String(value), 'utf8').digest('hex'),
     );
@@ -128,7 +178,17 @@ export function migrateDatabase(
   database: Database.Database,
   now = new Date().toISOString(),
 ): number {
+  registerDocumentMutationFunction(database);
   const currentVersion = getSchemaVersion(database);
+  if (currentVersion > 0 && currentVersion < 76) {
+    // A physical schema can be ahead of its migration ledger after interruption.
+    // Later-schema observers must not reference columns rebuilt by older migrations.
+    database.transaction(() => {
+      for (const table of ['documents', 'scenes', 'shots', 'scene_structure_stages'])
+        for (const op of ['insert', 'update'])
+          database.exec(`DROP TRIGGER IF EXISTS agent_changes_${table}_${op}`);
+    })();
+  }
   if (currentVersion > CURRENT_SCHEMA_VERSION) {
     throw new Error(
       `Project schema v${currentVersion} is newer than supported v${CURRENT_SCHEMA_VERSION}.`,
@@ -692,6 +752,105 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(65, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 66) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V66);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(66, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 67) {
+    database.transaction(() => {
+      const generationColumns = new Set(
+        (
+          database.prepare('PRAGMA table_info(llm_generations)').all() as Array<{ name: string }>
+        ).map((column) => column.name),
+      );
+      if (!generationColumns.has('request_fingerprint')) {
+        database.exec(
+          `ALTER TABLE llm_generations ADD COLUMN request_fingerprint TEXT
+           CHECK (request_fingerprint IS NULL OR length(request_fingerprint) = 64)`,
+        );
+      }
+      database.exec(MIGRATION_V67);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(67, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 68) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V68);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(68, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 69) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V69);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(69, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 70) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V70);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(70, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 71) {
+    database.transaction(() => {
+      applyMigrationV71(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(71, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 72) {
+    database.transaction(() => {
+      applyMigrationV72(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(72, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 73) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V73);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(73, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 74) {
+    database.transaction(() => {
+      applyMigrationV74(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(74, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 75) {
+    database.transaction(() => {
+      applyMigrationV75(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(75, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 76) {
+    database.transaction(() => {
+      applyMigrationV76(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(76, now);
     })();
   }
   return getSchemaVersion(database);

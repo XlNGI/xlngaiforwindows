@@ -48,12 +48,18 @@ export async function callWorker<M extends WorkerMethod>(
   if (
     [
       'scene.save',
+      'production.lifecycle.change',
       'shot.save',
       'document.save',
       'document.draft.save',
       'document.restore',
+      'document.archive',
+      'document.unarchive',
+      'document.unpublish',
       'agent.changeSet.apply',
       'characterVoiceReference.save',
+      'characterVoiceReference.generate',
+      'characterVoiceReference.confirm',
     ].includes(method)
   )
     window.dispatchEvent(new Event('production-source-updated'));

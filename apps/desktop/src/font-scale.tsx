@@ -105,7 +105,7 @@ export function FontScaleProvider({ children }: { children: ReactNode }) {
       channelRef.current = channel;
       channel.onmessage = (event: MessageEvent<unknown>) => {
         if (event.data && typeof event.data === 'object')
-          setPreferences(normalizePreferences(event.data as Partial<FontScalePreferences>));
+          setPreferences(normalizePreferences(event.data));
       };
     }
 

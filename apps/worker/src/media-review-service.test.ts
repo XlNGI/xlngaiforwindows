@@ -63,7 +63,7 @@ function fixture() {
       proposedParameters: {},
       candidates: [],
     })),
-    prepareSelected: vi.fn(() => ({ draftId: 'job-1' }) as MediaGenerationDraft),
+    prepareReviewedSelection: vi.fn(() => ({ draftId: 'job-1' }) as MediaGenerationDraft),
     getTask: vi.fn((id: string) => ({
       taskId: id,
       kind: 'image' as const,
@@ -96,11 +96,11 @@ function fixture() {
   const service = new MediaReviewService(projects, media, submission, dubbing);
   const image = (key = 'character') => ({ key, label: key, kind: 'image', prompt: '角色设定图' });
   const owner = { conversationId: conversation.id };
-  const addAsset = (id: string) => {
+  const addAsset = (id: string, sourceDocumentId?: string) => {
     const relativePath = `assets/${id}.png`;
     mkdirSync(join(projects.current()!.rootPath, 'assets'), { recursive: true });
     writeFileSync(join(projects.current()!.rootPath, relativePath), 'image');
-    projects.access(true, (db, project) =>
+    projects.access(true, (db, project) => {
       createRepositories(db).assets.save({
         id,
         projectId: project.id,
@@ -109,8 +109,16 @@ function fixture() {
         sizeBytes: 5,
         contentHash: 'hash',
         createdAt: new Date().toISOString(),
-      }),
-    );
+      });
+      if (sourceDocumentId) {
+        db.prepare(
+          "INSERT INTO generation_jobs(id,project_id,adapter_key,status,request_json,task_snapshot_json,created_at,updated_at) VALUES(?,?,'fixture','succeeded','{}',?,'now','now')",
+        ).run(`job-${id}`, project.id, JSON.stringify({ sourceDocumentId }));
+        db.prepare(
+          "INSERT INTO generation_results(id,job_id,asset_id,created_at) VALUES(?,?,?,'now')",
+        ).run(`result-${id}`, `job-${id}`, id);
+      }
+    });
   };
   return {
     projects,
@@ -128,14 +136,92 @@ function fixture() {
 }
 
 describe('production skills and persistent media reviews', () => {
+  it('isolates one scene intent per task and allows versioned updates of that intent', () => {
+    const f = fixture();
+    const doc = f.content.saveDocument({
+      kind: 'scene',
+      title: '旧码头',
+      contentMarkdown: '栈道',
+      scopeType: 'project',
+    });
+    const owners = ['task-a', 'task-b'].map((taskId) => {
+      f.projects.access(true, (db, project) =>
+        db
+          .prepare(
+            `INSERT INTO agent_tasks(id,project_id,project_session_id,conversation_id,task_type,scope_type,title,request_snapshot_json,request_hash,status,created_at,updated_at)
+         VALUES(?,?,?,?,'document-create','project','scene','{}','hash','running','now','now')`,
+          )
+          .run(taskId, project.id, f.projects.currentSessionId(), f.conversation.id),
+      );
+      return { ...f.owner, taskId };
+    });
+    const draft = { ...f.image('a'), prompt: '旧码头全景', sourceDocumentId: doc.id };
+    const first = f.service.prepare(draft, owners[0]!);
+    const update = f.service.prepare(
+      { ...draft, prompt: '全景与灯塔关键特写', expectedRowVersion: first.rowVersion },
+      owners[0]!,
+    );
+    expect(update.id).toBe(first.id);
+    expect(update.rowVersion).toBe(first.rowVersion + 1);
+    expect(f.service.prepare({ ...draft, key: 'detail' }, owners[0]!).id).toBe(first.id);
+    expect(f.service.prepare(draft, owners[1]!).id).not.toBe(first.id);
+  });
+  it('reuses a scene intent across keys, supports cancellation/recreation and isolates other scenes', () => {
+    const f = fixture();
+    const doc = f.content.saveDocument({
+      kind: 'scene',
+      title: '旧码头',
+      contentMarkdown: '木栈道与灯塔',
+      scopeType: 'project',
+    });
+    const other = f.content.saveDocument({
+      kind: 'scene',
+      title: '庭院',
+      contentMarkdown: '石桌',
+      scopeType: 'project',
+    });
+    const draft = {
+      ...f.image('panorama'),
+      prompt: '全景',
+      sourceDocumentId: doc.id,
+      parameters: { n: 6 },
+    };
+    const first = f.service.prepare(draft, f.owner);
+    expect(first.draft).toMatchObject({
+      assetKind: 'scene',
+      parameters: { n: 1 },
+    });
+    expect(first.draft.prompt).toContain('关键局部特写');
+    expect(f.service.prepare({ ...draft, key: 'detail', prompt: '灯塔特写' }, f.owner).id).toBe(
+      first.id,
+    );
+    const secondScene = f.service.prepare(
+      { ...draft, key: 'other', sourceDocumentId: other.id },
+      f.owner,
+    );
+    expect(secondScene.id).not.toBe(first.id);
+    f.service.cancel(first.id, first.rowVersion);
+    const recreated = f.service.prepare(draft, f.owner);
+    expect(recreated.status).toBe('pending');
+    expect(recreated.rowVersion).toBeGreaterThan(first.rowVersion);
+    expect(f.service.list().filter((form) => form.status === 'pending')).toHaveLength(2);
+    expect(f.submission.requestSubmission).not.toHaveBeenCalled();
+  });
   it('loads declarative skills through the shared registry, without executing business logic', () => {
     expect(readProductionSkill({ skillId: 'chapters-to-script' })).toMatchObject({
       revision: 1,
       skillId: 'chapters-to-script',
     });
-    expect(readProductionSkill({ skillId: 'script-to-media' }).instructions).toContain(
-      'media.review.prepare',
-    );
+    const script = readProductionSkill({ skillId: 'chapters-to-script' });
+    expect(script.instructions).toContain('不创建角色、场景、道具、场次、镜头');
+    const production = readProductionSkill({ skillId: 'script-to-media' });
+    expect(production.instructions).toContain('scene.submit_structure');
+    expect(production.instructions).toContain('authoringIR.data.continuityPlan');
+    expect(production.instructions).toContain('authoringIR.data.audioPlan');
+    expect(production.instructions).toContain('直接生成可编辑的角色、场景、道具、场次、镜头');
+    expect(production.instructions).toContain('不得创建媒体审核表单');
+    expect(production.instructions).toContain('不要调用任何 media.* 工具');
+    expect(production.instructions).not.toContain('media.review.prepare');
     expect(() => readProductionSkill({ skillId: 'other' })).toThrow();
     expect(unifiedAgentToolRegistry.require('production.skill.read').riskLevel).toBe('R0');
     expect(unifiedAgentToolRegistry.require('media.review.prepare').riskLevel).toBe('R1');
@@ -162,11 +248,11 @@ describe('production skills and persistent media reviews', () => {
     expect(reopened.prepare(f.image(), f.owner).id).toBe(first.id);
     expect(reopened.list(f.conversation.id)).toHaveLength(2);
     expect(JSON.stringify(reopened.list(f.conversation.id))).not.toContain('角色设定图');
-    expect(f.media.prepareSelected).not.toHaveBeenCalled();
+    expect(f.media.prepareReviewedSelection).not.toHaveBeenCalled();
     expect(f.submission.confirmSubmission).not.toHaveBeenCalled();
     expect(f.dubbing.generateTake).not.toHaveBeenCalled();
   });
-  it('carries every saved character, scene, and prop binding into the review form', () => {
+  it('carries the shot character, scene, and prop bindings into the review form', () => {
     const f = fixture();
     const character = f.content.saveDocument({
       kind: 'character',
@@ -185,33 +271,30 @@ describe('production skills and persistent media reviews', () => {
     });
     f.addAsset('bound-character');
     f.addAsset('bound-scene');
-    f.addAsset('bound-prop');
+    f.addAsset('bound-prop', propDocument.id);
     const scene = f.content.saveScene({
       title: '雨夜决战',
-      characterBindings: [{ characterDocumentId: character.id, imageAssetId: 'bound-character' }],
-      materialBindings: [
-        {
-          id: 'scene-reference',
-          role: 'scene',
-          label: '屋外雨坪',
-          assetId: 'bound-scene',
-          sourceDocumentId: sceneDocument.id,
-          source: 'manual',
-        },
-        {
-          id: 'prop-reference',
-          role: 'prop',
-          label: '斗笠',
-          assetId: 'bound-prop',
-          sourceDocumentId: propDocument.id,
-          source: 'manual',
-        },
-      ],
     });
     const shot = f.content.saveShot({
       sceneId: scene.id,
       title: '顾清影破阵',
-      prompt: '顾清影破阵',
+      authoringIR: {
+        schemaVersion: 1,
+        kind: 'shot',
+        prompt: '顾清影破阵',
+        references: {
+          characterDocumentIds: [character.id],
+          sceneDocumentIds: [sceneDocument.id],
+          propDocumentIds: [propDocument.id],
+        },
+      },
+    });
+    f.content.saveShotReferenceBindings({
+      shotId: shot.id,
+      referenceBindings: {
+        characterBindings: [{ characterDocumentId: character.id, assetId: 'bound-character' }],
+        sceneBindings: [{ sourceDocumentId: sceneDocument.id, assetId: 'bound-scene' }],
+      },
     });
 
     const form = f.service.prepare(
@@ -307,13 +390,13 @@ describe('production skills and persistent media reviews', () => {
         selection,
       }),
     ).toMatchObject({ jobId: 'job-1' });
-    expect(f.media.prepareSelected).toHaveBeenCalledTimes(1);
+    expect(f.media.prepareReviewedSelection).toHaveBeenCalledTimes(1);
     expect(f.submission.confirmSubmission).toHaveBeenCalledExactlyOnceWith({
       jobId: 'job-1',
       confirmationToken: 'review-token',
       approved: true,
     });
-    expect(f.media.prepareSelected).toHaveBeenCalledWith(
+    expect(f.media.prepareReviewedSelection).toHaveBeenCalledWith(
       expect.anything(),
       selection,
       expect.anything(),
@@ -337,7 +420,7 @@ describe('production skills and persistent media reviews', () => {
       reviewToken: f.service.get(form.id).reviewToken ?? 'blocked',
       selection,
     });
-    expect(f.media.prepareSelected).toHaveBeenCalledTimes(1);
+    expect(f.media.prepareReviewedSelection).toHaveBeenCalledTimes(1);
   });
   it('rejects a stale reviewed model context before creating or submitting a paid job', async () => {
     const f = fixture();
@@ -356,7 +439,7 @@ describe('production skills and persistent media reviews', () => {
         selection,
       }),
     ).rejects.toThrow('模型合同');
-    expect(f.media.prepareSelected).not.toHaveBeenCalled();
+    expect(f.media.prepareReviewedSelection).not.toHaveBeenCalled();
     expect(f.submission.confirmSubmission).not.toHaveBeenCalled();
     expect(f.service.get(form.id).status).toBe('pending');
   });

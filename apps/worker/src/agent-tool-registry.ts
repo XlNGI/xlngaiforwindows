@@ -13,6 +13,7 @@ import {
   type LlmToolDefinition,
 } from '@ai-video/contracts';
 import { AGENT_TOOL_POLICIES, ALL_AGENT_TOOL_DEFINITIONS } from './agent-tool-definitions.js';
+import { preparedArgumentsDefinition } from './agent-prepared-arguments.js';
 
 export interface AgentToolRegistration {
   definition: LlmToolDefinition;
@@ -115,8 +116,9 @@ export class AgentToolRegistry {
 
   authorizedDefinitions(handles: ReadonlyMap<string, string>): LlmToolDefinition[] {
     return [...handles.entries()].map(([name, authorizationHandle]) => ({
-      ...this.definition(name),
+      ...preparedArgumentsDefinition(this.definition(name)),
       authorizationHandle,
+      executionLane: this.require(name).executionLane,
     }));
   }
 
@@ -180,6 +182,10 @@ export class AgentToolRegistry {
         `Tool Result exceeds ${AGENT_TOOL_RESULT_LIMITS.maxJsonBytes} bytes.`,
       );
     }
+  }
+
+  isFailureResult(value: { status?: string }): boolean {
+    return ['rejected', 'execution_conflict', 'failed'].includes(value.status ?? '');
   }
 
   serializeResult(value: unknown): string {

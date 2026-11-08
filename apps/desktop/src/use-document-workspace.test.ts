@@ -37,6 +37,7 @@ describe('useDocumentWorkspace close', () => {
   const syncDetachedPanel = vi.fn();
 
   beforeEach(() => {
+    selectWorkerScope(undefined);
     closeDocumentPanel.mockReset();
     openDocumentWorkspace.mockReset();
     syncDetachedPanel.mockReset();
@@ -52,6 +53,39 @@ describe('useDocumentWorkspace close', () => {
         closeDocumentPanel,
       }),
     );
+
+  it('refreshes a running save without opening a panel or replacing dirty content/CAS', async () => {
+    selectWorkerScope({ projectId: 'project', projectSessionId: 'session' });
+    vi.mocked(callWorker).mockImplementation((method) =>
+      Promise.resolve(
+        (method === 'document.get'
+          ? { ...savedDocument, rowVersion: 2, title: 'Updated' }
+          : method === 'document.list'
+            ? [savedDocument]
+            : []) as never,
+      ),
+    );
+    const { result } = renderWorkspace();
+    act(() => {
+      result.current.setDocument(savedDocument);
+      result.current.setDocumentTitle(savedDocument.title);
+      result.current.setDocumentKind(savedDocument.kind);
+      result.current.setDocumentContent('# local edit');
+    });
+    await act(async () => {
+      await result.current.refreshCommittedDocuments();
+    });
+    expect(result.current.documents).toHaveLength(1);
+    expect(result.current.documentContent).toBe('# local edit');
+    expect(result.current.document?.rowVersion).toBe(1);
+    expect(openDocumentWorkspace).not.toHaveBeenCalled();
+    act(() => result.current.setDocumentContent('# draft'));
+    await act(async () => {
+      await result.current.refreshCommittedDocuments();
+    });
+    expect(result.current.document?.rowVersion).toBe(2);
+    expect(result.current.documentTitle).toBe('Updated');
+  });
 
   it('closes a clean editor without confirmation', () => {
     const { result } = renderWorkspace();
@@ -165,6 +199,190 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.documentCloseConfirmation).toBe(true);
     expect(closeDocumentPanel).not.toHaveBeenCalled();
     expect(result.current.contentMessage).toBe('保存失败');
+  });
+
+  it('discards local edits and archives the last saved document version', async () => {
+    const archivedDocument = {
+      ...savedDocument,
+      lifecycleStatus: 'archived' as const,
+      rowVersion: savedDocument.rowVersion + 1,
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'document.archive') return Promise.resolve(archivedDocument);
+      if (method === 'document.list') return Promise.resolve([]);
+      if (method === 'document.archived.list') return Promise.resolve([archivedDocument]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const { result } = renderWorkspace();
+
+    act(() => {
+      result.current.setDocument(savedDocument);
+      result.current.setDocumentTitle(savedDocument.title);
+      result.current.setDocumentKind(savedDocument.kind);
+      result.current.setDocumentContent('Unsaved edits');
+    });
+    act(() => {
+      result.current.requestArchiveDocument();
+    });
+    await act(async () => {
+      await result.current.confirmArchiveDocument(false);
+    });
+
+    expect(callWorker).toHaveBeenCalledWith('document.archive', {
+      documentId: savedDocument.id,
+      expectedDocumentRowVersion: savedDocument.rowVersion,
+    });
+    expect(callWorker).not.toHaveBeenCalledWith('document.draft.save', expect.anything());
+    expect(result.current.document).toBeUndefined();
+    expect(result.current.archivedDocuments).toEqual([archivedDocument]);
+    expect(result.current.documentArchiveConfirmation).toBe(false);
+  });
+
+  it('archives a non-selected directory item without replacing the open document', async () => {
+    const currentDocument: DocumentDetail = {
+      ...savedDocument,
+      id: 'current-document',
+      title: 'Current document',
+    };
+    const directoryTarget = {
+      ...savedDocument,
+      id: 'directory-target',
+      title: 'Directory target',
+      rowVersion: savedDocument.rowVersion + 3,
+    };
+    const archivedDocument = {
+      ...directoryTarget,
+      lifecycleStatus: 'archived' as const,
+      rowVersion: directoryTarget.rowVersion + 1,
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'document.archive') return Promise.resolve(archivedDocument);
+      if (method === 'document.list') return Promise.resolve([currentDocument]);
+      if (method === 'document.archived.list') return Promise.resolve([archivedDocument]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const { result } = renderWorkspace();
+
+    act(() => {
+      result.current.setDocument(currentDocument);
+      result.current.setDocumentTitle(currentDocument.title);
+      result.current.setDocumentKind(currentDocument.kind);
+      result.current.setDocumentContent('Unsaved edits on current document');
+      result.current.setDocuments([currentDocument, directoryTarget]);
+      result.current.requestArchiveDocument(directoryTarget);
+    });
+    await act(async () => {
+      await result.current.confirmArchiveDocument(false);
+    });
+
+    expect(callWorker).toHaveBeenCalledWith('document.archive', {
+      documentId: directoryTarget.id,
+      expectedDocumentRowVersion: directoryTarget.rowVersion,
+    });
+    expect(result.current.document).toEqual(currentDocument);
+    expect(result.current.documentContent).toBe('Unsaved edits on current document');
+    expect(result.current.documents).toEqual([currentDocument]);
+    expect(result.current.archivedDocuments).toEqual([archivedDocument]);
+    expect(result.current.documentArchiveConfirmation).toBe(false);
+  });
+
+  it('keeps a successful save in the editor when the following archive fails', async () => {
+    const editedDocument: DocumentDetail = {
+      ...savedDocument,
+      title: 'Edited title',
+      rowVersion: savedDocument.rowVersion + 1,
+      currentVersion: {
+        ...savedDocument.currentVersion!,
+        id: 'v-2',
+        version: 2,
+        contentMarkdown: '# edited',
+      },
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'document.draft.save') return Promise.resolve(editedDocument);
+      if (method === 'document.archive') return Promise.reject(new Error('文档版本已变化'));
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const { result } = renderWorkspace();
+
+    act(() => {
+      result.current.setDocument(savedDocument);
+      result.current.setDocumentTitle(editedDocument.title);
+      result.current.setDocumentKind(editedDocument.kind);
+      result.current.setDocumentContent(editedDocument.currentVersion!.contentMarkdown);
+    });
+    act(() => {
+      result.current.requestArchiveDocument();
+    });
+    await act(async () => {
+      await result.current.confirmArchiveDocument(true);
+    });
+
+    expect(callWorker).toHaveBeenCalledWith(
+      'document.draft.save',
+      expect.objectContaining({ expectedDocumentRowVersion: savedDocument.rowVersion }),
+    );
+    expect(callWorker).toHaveBeenCalledWith('document.archive', {
+      documentId: editedDocument.id,
+      expectedDocumentRowVersion: editedDocument.rowVersion,
+    });
+    expect(result.current.document).toEqual(editedDocument);
+    expect(result.current.documentDirty).toBe(false);
+    expect(result.current.versions[0]).toEqual(editedDocument.currentVersion);
+    expect(result.current.documentArchiveConfirmation).toBe(true);
+    expect(result.current.contentMessage).toBe('文档版本已变化');
+  });
+
+  it('restores an archived document into the active directory and editor', async () => {
+    const archivedSummary = {
+      ...savedDocument,
+      lifecycleStatus: 'archived' as const,
+      rowVersion: savedDocument.rowVersion + 1,
+    };
+    vi.mocked(callWorker).mockImplementation((method: string) => {
+      if (method === 'document.unarchive') return Promise.resolve(savedDocument);
+      if (method === 'document.versions')
+        return Promise.resolve(savedDocument.currentVersion ? [savedDocument.currentVersion] : []);
+      if (method === 'document.list') return Promise.resolve([savedDocument]);
+      if (method === 'document.archived.list') return Promise.resolve([]);
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const { result } = renderWorkspace();
+
+    let restored: DocumentDetail | undefined;
+    await act(async () => {
+      restored = await result.current.restoreArchivedDocument(archivedSummary);
+    });
+
+    expect(restored).toEqual(savedDocument);
+    expect(callWorker).toHaveBeenCalledWith('document.unarchive', {
+      documentId: savedDocument.id,
+      expectedDocumentRowVersion: archivedSummary.rowVersion,
+    });
+    expect(result.current.documents).toEqual([savedDocument]);
+    expect(result.current.archivedDocuments).toEqual([]);
+    expect(result.current.document).toEqual(savedDocument);
+    expect(openDocumentWorkspace).toHaveBeenCalledWith(savedDocument.kind);
+  });
+
+  it('applies batch deletion to the open editor and preserves successful deletion if refresh fails', async () => {
+    vi.mocked(callWorker).mockRejectedValue(new Error('刷新失败'));
+    const { result } = renderWorkspace();
+    act(() => {
+      result.current.setDocument(savedDocument);
+      result.current.setDocumentTitle('未保存标题');
+      result.current.setDocumentContent('未保存正文');
+      result.current.setDocuments([savedDocument]);
+    });
+    const archived = { ...savedDocument, lifecycleStatus: 'archived' as const, rowVersion: 2 };
+    await act(async () => {
+      await expect(result.current.applyArchivedDocuments([archived])).rejects.toThrow('刷新失败');
+    });
+    expect(result.current.documents).toEqual([]);
+    expect(result.current.archivedDocuments).toEqual([archived]);
+    expect(result.current.document).toBeUndefined();
+    expect(result.current.documentContent).toBe('');
+    expect(closeDocumentPanel).toHaveBeenCalledOnce();
   });
 });
 

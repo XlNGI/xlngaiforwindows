@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
+import { savedProductionReceipts } from './agent-saved-production-receipts.js';
 import type {
   AgentTaskCreateDocumentDraftParams,
   AgentTaskCreateDocumentDraftResult,
@@ -16,6 +17,7 @@ import type {
   AgentTaskPendingSchemaConfirmationInfo,
   AgentProtectedUiHandoff,
   ConversationTaskPlanInfo,
+  DocumentArchiveParams,
   AgentTaskListParams,
   DocumentDetail,
   DocumentDraftSaveParams,
@@ -30,6 +32,8 @@ import type {
   DocumentReviewRejectParams,
   DocumentReviewSubmitParams,
   DocumentSummary,
+  DocumentUnarchiveParams,
+  DocumentUnpublishParams,
   DocumentVersionInfo,
   TaskLogItem,
   TaskLogPage,
@@ -46,6 +50,7 @@ import {
   DubbingRepository,
   rebuildLibraryChunksForDocument,
   rebuildNovelRagChunks,
+  withDocumentMutationAuthorization,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { AgentInputService } from './agent-input-service.js';
@@ -54,6 +59,11 @@ const LOCAL_USER = 'local-user';
 const MAX_DOCUMENT_LENGTH = 1_000_000;
 const MAX_TITLE_LENGTH = 200;
 const AGENT_ATTEMPT_SUMMARY_SELECT = `
+  COALESCE(
+    (SELECT usage.tool_call_count FROM agent_task_usage_counters usage WHERE usage.task_id = tasks.id),
+    tasks.tool_call_count,
+    0
+  ) AS tool_calls_used,
   (SELECT attempts.provider_name_snapshot
      FROM agent_task_generations links
      INNER JOIN llm_generation_attempts attempts
@@ -87,7 +97,11 @@ const AGENT_ATTEMPT_SUMMARY_SELECT = `
 `;
 
 type WorkflowErrorCode =
-  'DOCUMENT_BASE_CONFLICT' | 'IDEMPOTENCY_KEY_REUSED' | 'CONFLICT' | 'INVALID_STATE';
+  | 'DOCUMENT_BASE_CONFLICT'
+  | 'DOCUMENT_PUBLISHED_READ_ONLY'
+  | 'IDEMPOTENCY_KEY_REUSED'
+  | 'CONFLICT'
+  | 'INVALID_STATE';
 
 export class DocumentWorkflowError extends Error {
   constructor(
@@ -157,6 +171,10 @@ interface AgentTaskRow {
   completed_at: string | null;
   phase: AgentTaskInfo['phase'];
   row_version: number;
+  tool_calls_used?: number;
+  turn_count?: number;
+  quota_state?: NonNullable<AgentTaskInfo['usage']>['state'];
+  quota_error_code?: string | null;
   provider_name?: string;
   model_name?: string;
   input_tokens?: number;
@@ -253,6 +271,8 @@ export interface TrustedAgentDraftParams {
   scopeId?: string;
   sourceMessageId?: string;
   contextSnapshotId?: string;
+  /** Defaults to a reviewable task unless a trusted workflow opts out. */
+  reviewRequired?: boolean;
 }
 
 export interface TrustedAgentUpdateParams extends TrustedAgentDraftParams {
@@ -280,7 +300,16 @@ function required(value: string, name: string, maxLength: number): string {
 }
 
 function documentKind(value: string): DocumentSummary['kind'] {
-  return ['outline', 'plan', 'character', 'scene', 'prop', 'storyboard', 'note'].includes(value)
+  return [
+    'outline',
+    'plan',
+    'constraint',
+    'character',
+    'scene',
+    'prop',
+    'storyboard',
+    'note',
+  ].includes(value)
     ? (value as DocumentSummary['kind'])
     : 'note';
 }
@@ -402,6 +431,16 @@ function toTask(row: AgentTaskRow): AgentTaskInfo {
     inputTokens: row.input_tokens ?? undefined,
     outputTokens: row.output_tokens ?? undefined,
     estimatedCost: row.estimated_cost ?? undefined,
+    ...(row.tool_calls_used !== undefined && row.turn_count !== undefined && row.quota_state
+      ? {
+          usage: {
+            providerRequestsUsed: row.turn_count,
+            toolCallsUsed: row.tool_calls_used,
+            state: row.quota_state,
+            ...(row.quota_error_code ? { errorCode: row.quota_error_code } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -467,6 +506,9 @@ export class DocumentWorkflowService {
              FROM documents LEFT JOIN document_bindings bindings
                ON bindings.document_id = documents.id AND bindings.status = 'active'
              WHERE documents.project_id = ? AND documents.lifecycle_status = 'active'
+               AND NOT EXISTS (SELECT 1 FROM shots JOIN scenes ON scenes.id=shots.scene_id
+                 WHERE shots.document_id=documents.id
+                   AND (shots.archived_at IS NOT NULL OR scenes.archived_at IS NOT NULL))
                AND NOT EXISTS (SELECT 1 FROM novel_chapters chapters
                  WHERE chapters.document_id = documents.id AND chapters.project_id = documents.project_id)
              ORDER BY documents.updated_at DESC, documents.id DESC`,
@@ -476,9 +518,224 @@ export class DocumentWorkflowService {
     );
   }
 
+  listArchivedDocuments(): DocumentSummary[] {
+    return this.projects.access(false, (database, project) =>
+      (
+        database
+          .prepare(
+            `SELECT documents.*, bindings.domain_scope, bindings.role AS binding_role
+             FROM documents LEFT JOIN document_bindings bindings
+               ON bindings.document_id = documents.id AND bindings.status = 'active'
+             WHERE documents.project_id = ? AND documents.lifecycle_status = 'archived'
+               AND NOT EXISTS (SELECT 1 FROM novel_chapters chapters
+                 WHERE chapters.document_id = documents.id AND chapters.project_id = documents.project_id)
+             ORDER BY documents.updated_at DESC, documents.id DESC`,
+          )
+          .all(project.id) as DocumentRow[]
+      ).map(toDocumentSummary),
+    );
+  }
+
+  archiveDocument(params: DocumentArchiveParams): DocumentDetail {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const document = this.requireDocument(database, project, params.documentId);
+        this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requireNonChapterLifecycleTarget(database, project, document.id);
+        if (document.lifecycle_status !== 'active') {
+          throw new DocumentWorkflowError(
+            'Only an active document can be archived.',
+            'INVALID_STATE',
+          );
+        }
+        if (document.published_version_id) {
+          throw new DocumentWorkflowError(
+            'Published documents are read-only. Unpublish the document before archiving.',
+            'DOCUMENT_PUBLISHED_READ_ONLY',
+          );
+        }
+        if (!document.current_version_id) {
+          throw new DocumentWorkflowError('Document has no version to archive.', 'INVALID_STATE');
+        }
+        const now = new Date().toISOString();
+        const result = database
+          .prepare(
+            `UPDATE documents SET lifecycle_status = 'archived', updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND project_id = ? AND lifecycle_status = 'active' AND row_version = ?`,
+          )
+          .run(now, document.id, project.id, params.expectedDocumentRowVersion);
+        if (result.changes !== 1) {
+          throw new DocumentWorkflowError(
+            'Document lifecycle changed in another window.',
+            'CONFLICT',
+          );
+        }
+        this.appendAudit(database, project.id, {
+          action: 'document_archived',
+          actorType: 'user',
+          actorId: LOCAL_USER,
+          documentId: document.id,
+          documentVersionId: document.current_version_id,
+          metadata: { previousLifecycleStatus: 'active' },
+          createdAt: now,
+        });
+        this.touchProject(database, project, now);
+        return this.getDocumentInProject(database, project, document.id);
+      })(),
+    );
+  }
+
+  unarchiveDocument(params: DocumentUnarchiveParams): DocumentDetail {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const document = this.requireDocument(database, project, params.documentId);
+        this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requireNonChapterLifecycleTarget(database, project, document.id);
+        if (document.lifecycle_status !== 'archived') {
+          throw new DocumentWorkflowError(
+            'Only an archived document can be restored.',
+            'INVALID_STATE',
+          );
+        }
+        if (document.published_version_id) {
+          throw new DocumentWorkflowError(
+            'Published documents are read-only. Unpublish the document before restoring it.',
+            'DOCUMENT_PUBLISHED_READ_ONLY',
+          );
+        }
+        if (!document.current_version_id) {
+          throw new DocumentWorkflowError('Document has no version to restore.', 'INVALID_STATE');
+        }
+        const now = new Date().toISOString();
+        const result = database
+          .prepare(
+            `UPDATE documents SET lifecycle_status = 'active', updated_at = ?, row_version = row_version + 1
+             WHERE id = ? AND project_id = ? AND lifecycle_status = 'archived' AND row_version = ?`,
+          )
+          .run(now, document.id, project.id, params.expectedDocumentRowVersion);
+        if (result.changes !== 1) {
+          throw new DocumentWorkflowError(
+            'Document lifecycle changed in another window.',
+            'CONFLICT',
+          );
+        }
+        this.appendAudit(database, project.id, {
+          action: 'document_unarchived',
+          actorType: 'user',
+          actorId: LOCAL_USER,
+          documentId: document.id,
+          documentVersionId: document.current_version_id,
+          metadata: { previousLifecycleStatus: 'archived' },
+          createdAt: now,
+        });
+        this.touchProject(database, project, now);
+        return this.getDocumentInProject(database, project, document.id);
+      })(),
+    );
+  }
+
   getDocument(documentId: string): DocumentDetail {
     return this.projects.access(false, (database, project) =>
       this.getDocumentInProject(database, project, documentId),
+    );
+  }
+
+  /**
+   * User-only transition from authority to a fresh editable draft. Publication
+   * rows and the old published version remain immutable history.
+   */
+  unpublish(params: DocumentUnpublishParams): DocumentDetail {
+    return this.projects.access(true, (database, project) =>
+      database.transaction(() => {
+        const document = this.requireDocument(database, project, params.documentId);
+        this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        if (!document.published_version_id) {
+          throw new DocumentWorkflowError(
+            'Only a published document can be unpublished.',
+            'INVALID_STATE',
+          );
+        }
+        if (document.lifecycle_status !== 'active') {
+          throw new DocumentWorkflowError(
+            'Archived documents cannot be unpublished.',
+            'INVALID_STATE',
+          );
+        }
+        const publishedVersion = this.requireVersion(
+          database,
+          document.id,
+          document.published_version_id,
+        );
+        const now = new Date().toISOString();
+        const versionId = randomUUID();
+        const versionNumber =
+          ((
+            database
+              .prepare('SELECT MAX(version) AS value FROM document_versions WHERE document_id = ?')
+              .get(document.id) as { value: number | null }
+          ).value ?? 0) + 1;
+        return withDocumentMutationAuthorization(database, document.id, 'unpublish', () => {
+          this.appendAudit(database, project.id, {
+            action: 'unpublished',
+            actorType: 'user',
+            actorId: LOCAL_USER,
+            documentId: document.id,
+            documentVersionId: publishedVersion.id,
+            metadata: { draftVersionId: versionId },
+            createdAt: now,
+          });
+          database
+            .prepare(
+              `INSERT INTO document_versions
+               (id, document_id, version, content_markdown, content_ir_json, created_at,
+                state, base_version_id, title_snapshot, scope_type_snapshot, scope_id_snapshot,
+                author_type, author_id, content_hash, state_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'draft', NULL, ?, ?, ?, 'user', ?, ?, ?)`,
+            )
+            .run(
+              versionId,
+              document.id,
+              versionNumber,
+              publishedVersion.content_markdown,
+              publishedVersion.content_ir_json,
+              now,
+              publishedVersion.title_snapshot ?? document.title,
+              publishedVersion.scope_type_snapshot ?? document.scope_type,
+              publishedVersion.scope_id_snapshot ?? document.scope_id,
+              LOCAL_USER,
+              hash(publishedVersion.content_markdown),
+              now,
+            );
+          const updated = database
+            .prepare(
+              `UPDATE documents
+               SET published_version_id = NULL, current_version_id = ?, updated_at = ?,
+                   row_version = row_version + 1
+               WHERE id = ? AND project_id = ? AND published_version_id = ? AND row_version = ?`,
+            )
+            .run(
+              versionId,
+              now,
+              document.id,
+              project.id,
+              publishedVersion.id,
+              params.expectedDocumentRowVersion,
+            );
+          if (updated.changes !== 1) {
+            throw new DocumentWorkflowError('Document was changed in another window.', 'CONFLICT');
+          }
+          this.touchProject(database, project, now);
+          rebuildNovelRagChunks(database, {
+            projectId: project.id,
+            documentId: document.id,
+            documentVersionId: versionId,
+            contentMarkdown: publishedVersion.content_markdown,
+            now,
+          });
+          rebuildLibraryChunksForDocument(database, project.id, document.id, now);
+          return this.getDocumentInProject(database, project, document.id);
+        });
+      })(),
     );
   }
 
@@ -577,6 +834,7 @@ export class DocumentWorkflowService {
       database.transaction(() => {
         const document = this.requireDocument(database, project, params.documentId);
         this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requirePublishedDocumentIsEditable(document);
         const version = this.requireVersion(
           database,
           document.id,
@@ -666,6 +924,7 @@ export class DocumentWorkflowService {
       database.transaction(() => {
         const document = this.requireDocument(database, project, params.documentId);
         this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requirePublishedDocumentIsEditable(document);
         const version = this.requireVersion(
           database,
           document.id,
@@ -735,6 +994,7 @@ export class DocumentWorkflowService {
       database.transaction(() => {
         const document = this.requireDocument(database, project, params.documentId);
         this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requirePublishedDocumentIsEditable(document);
         const version = this.requireVersion(
           database,
           document.id,
@@ -823,6 +1083,7 @@ export class DocumentWorkflowService {
       database.transaction(() => {
         const document = this.requireDocument(database, project, params.documentId);
         this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+        this.requirePublishedDocumentIsEditable(document);
         const version = this.requireVersion(
           database,
           document.id,
@@ -911,6 +1172,12 @@ export class DocumentWorkflowService {
   ): { document: DocumentDetail; publication: DocumentPublicationInfo } {
     const document = this.requireDocument(database, project, params.documentId);
     this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+    if (document.published_version_id) {
+      throw new DocumentWorkflowError(
+        'Published documents are read-only. Unpublish the document before publishing a new version.',
+        'DOCUMENT_PUBLISHED_READ_ONLY',
+      );
+    }
     const version = this.requireVersion(
       database,
       document.id,
@@ -962,6 +1229,12 @@ export class DocumentWorkflowService {
           )
           .get(document.id) as { value: number | null }
       ).value ?? 0) + 1;
+    const previousPublicationVersionId = database
+      .prepare(
+        `SELECT document_version_id FROM document_publications
+         WHERE document_id = ? ORDER BY publication_no DESC LIMIT 1`,
+      )
+      .get(document.id) as { document_version_id: string } | undefined;
     const publicationId = randomUUID();
     database
       .prepare(
@@ -984,7 +1257,7 @@ export class DocumentWorkflowService {
         project.id,
         document.id,
         version.id,
-        document.published_version_id,
+        previousPublicationVersionId?.document_version_id ?? null,
         nextPublicationNo,
         review.id,
         version.source_task_id,
@@ -1063,7 +1336,18 @@ export class DocumentWorkflowService {
       .prepare('SELECT document_id FROM agent_task_document_artifacts WHERE task_id = ?')
       .get(params.taskId) as { document_id: string } | undefined;
     if (existingArtifact) {
-      return this.getDocumentInProject(database, project, existingArtifact.document_id);
+      const existingDocument = this.getDocumentInProject(
+        database,
+        project,
+        existingArtifact.document_id,
+      );
+      if (existingDocument.publishedVersionId) {
+        throw new DocumentWorkflowError(
+          'Published documents are read-only. Unpublish the document before the Agent can continue editing.',
+          'DOCUMENT_PUBLISHED_READ_ONLY',
+        );
+      }
+      return existingDocument;
     }
     const now = new Date().toISOString();
     const document = this.writeDraft(database, project, {
@@ -1087,7 +1371,11 @@ export class DocumentWorkflowService {
       documentId: document.id,
       documentVersionId: version.id,
       taskId: params.taskId,
-      metadata: { operation: 'create', providerTool: true },
+      metadata: {
+        operation: 'create',
+        providerTool: true,
+        reviewRequired: params.reviewRequired !== false,
+      },
       createdAt: version.createdAt,
     });
     database
@@ -1105,22 +1393,45 @@ export class DocumentWorkflowService {
          VALUES (?, ?, ?, ?, ?, 'primary', 'draft', 0, ?, ?)`,
       )
       .run(randomUUID(), project.id, params.taskId, document.id, version.id, now, now);
-    database
-      .prepare(
-        `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
-         updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
-      )
-      .run(now, params.taskId);
+    if (params.reviewRequired === false) {
+      database
+        .prepare(
+          `UPDATE agent_tasks SET status = 'completed', completed_at = ?,
+           updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, now, params.taskId);
+    } else {
+      database
+        .prepare(
+          `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
+           updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, params.taskId);
+    }
     this.appendEvent(
       database,
       project.id,
       params.taskId,
       'document.draft.created',
       'info',
-      'The Provider tool created a reviewable document draft.',
+      params.reviewRequired === false
+        ? 'The production workflow saved an editable document draft.'
+        : 'The Provider tool created a reviewable document draft.',
       { documentId: document.id, documentVersionId: version.id },
       now,
     );
+    if (params.reviewRequired === false) {
+      this.appendEvent(
+        database,
+        project.id,
+        params.taskId,
+        'agent.task.completed',
+        'info',
+        'Production draft saved; this artifact task does not require review.',
+        { documentId: document.id, documentVersionId: version.id },
+        now,
+      );
+    }
     return document;
   }
 
@@ -1216,7 +1527,12 @@ export class DocumentWorkflowService {
       documentId: document.id,
       documentVersionId: version.id,
       taskId: params.taskId,
-      metadata: { operation: 'update', providerTool: true, baseVersionId: params.baseVersionId },
+      metadata: {
+        operation: 'update',
+        providerTool: true,
+        baseVersionId: params.baseVersionId,
+        reviewRequired: params.reviewRequired !== false,
+      },
       createdAt: now,
     });
     database
@@ -1234,22 +1550,45 @@ export class DocumentWorkflowService {
          VALUES (?, ?, ?, ?, ?, 'primary', 'draft', 0, ?, ?)`,
       )
       .run(randomUUID(), project.id, params.taskId, document.id, version.id, now, now);
-    database
-      .prepare(
-        `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
-         updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
-      )
-      .run(now, params.taskId);
+    if (params.reviewRequired === false) {
+      database
+        .prepare(
+          `UPDATE agent_tasks SET status = 'completed', completed_at = ?,
+           updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, now, params.taskId);
+    } else {
+      database
+        .prepare(
+          `UPDATE agent_tasks SET status = 'waiting_review', phase = 'waiting_review',
+           updated_at = ?, row_version = row_version + 1 WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, params.taskId);
+    }
     this.appendEvent(
       database,
       project.id,
       params.taskId,
       'document.draft.updated',
       'info',
-      'The Provider tool created a reviewable document revision.',
+      params.reviewRequired === false
+        ? 'The production workflow saved an editable document revision.'
+        : 'The Provider tool created a reviewable document revision.',
       { documentId: document.id, documentVersionId: version.id },
       now,
     );
+    if (params.reviewRequired === false) {
+      this.appendEvent(
+        database,
+        project.id,
+        params.taskId,
+        'agent.task.completed',
+        'info',
+        'Production draft revision saved; this artifact task does not require review.',
+        { documentId: document.id, documentVersionId: version.id },
+        now,
+      );
+    }
     return document;
   }
 
@@ -1293,6 +1632,7 @@ export class DocumentWorkflowService {
   ): DocumentDetail {
     const document = this.requireDocument(database, project, params.documentId);
     this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
+    this.requirePublishedDocumentIsEditable(document);
     const now = new Date().toISOString();
     const expected = params.outcome === 'archived' ? 'active' : 'archived';
     const next = params.outcome === 'archived' ? 'archived' : 'active';
@@ -1654,10 +1994,19 @@ export class DocumentWorkflowService {
       }
       return {
         task: toTask(task),
+        resourceChanges: database
+          .prepare(
+            `SELECT COALESCE(MAX(sequence),0) AS sequence,
+          COALESCE(MAX(CASE WHEN resource_type='document' THEN sequence END),0) AS documentSequence,
+          COALESCE(MAX(CASE WHEN resource_type IN ('scene','shot','structure-stage') THEN sequence END),0) AS productionSequence
+          FROM agent_resource_changes WHERE project_id=? AND task_id=?`,
+          )
+          .get(project.id, task.id) as NonNullable<AgentTaskDetail['resourceChanges']>,
+        savedProductionReceipts: savedProductionReceipts(database, project.id, { taskId: task.id }),
         ...(database
           .prepare(
             `SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=?
-             AND tool_name IN ('novel.episode.submit_structure','scene.submit_structure','scene.structure.stage','scene.update_shot_prompts','scene.update_shot_timings')
+             AND tool_name IN ('novel.episode.submit_structure','scene.submit_structure','scene.structure.stage','scene.update_shot_prompts','scene.update_shot_timings','shot.continuity.save')
              AND status='succeeded' LIMIT 1`,
           )
           .get(task.id, project.id)
@@ -1934,7 +2283,10 @@ export class DocumentWorkflowService {
     );
     if (params.idempotencyKey) {
       const existing = database
-        .prepare('SELECT * FROM agent_tasks WHERE project_id = ? AND idempotency_key = ?')
+        .prepare(
+          `SELECT tasks.*, ${AGENT_ATTEMPT_SUMMARY_SELECT}
+           FROM agent_tasks tasks WHERE tasks.project_id = ? AND tasks.idempotency_key = ?`,
+        )
         .get(project.id, params.idempotencyKey) as
         (AgentTaskRow & { request_hash: string }) | undefined;
       if (existing) {
@@ -2161,6 +2513,12 @@ export class DocumentWorkflowService {
     const existing = params.documentId
       ? this.requireDocument(database, project, params.documentId)
       : undefined;
+    if (existing?.published_version_id) {
+      throw new DocumentWorkflowError(
+        'Published documents are read-only. Unpublish the document before editing.',
+        'DOCUMENT_PUBLISHED_READ_ONLY',
+      );
+    }
     if (existing && params.expectedDocumentRowVersion !== undefined) {
       this.requireDocumentRowVersion(existing, params.expectedDocumentRowVersion);
     }
@@ -2357,6 +2715,15 @@ export class DocumentWorkflowService {
     return this.getDocumentInProject(database, project, documentId);
   }
 
+  private requirePublishedDocumentIsEditable(document: DocumentRow): void {
+    if (document.published_version_id) {
+      throw new DocumentWorkflowError(
+        'Published documents are read-only. Unpublish the document before changing its review or publication state.',
+        'DOCUMENT_PUBLISHED_READ_ONLY',
+      );
+    }
+  }
+
   private getDocumentInProject(
     database: Database.Database,
     project: OpenProject,
@@ -2395,6 +2762,22 @@ export class DocumentWorkflowService {
       .get(id) as DocumentRow | undefined;
     if (!document || document.project_id !== project.id) throw new Error('Document was not found.');
     return document;
+  }
+
+  private requireNonChapterLifecycleTarget(
+    database: Database.Database,
+    project: OpenProject,
+    documentId: string,
+  ): void {
+    const chapter = database
+      .prepare('SELECT id FROM novel_chapters WHERE document_id = ? AND project_id = ?')
+      .get(documentId, project.id);
+    if (chapter) {
+      throw new DocumentWorkflowError(
+        'Novel chapters must be archived from the Novel workspace.',
+        'INVALID_STATE',
+      );
+    }
   }
 
   private requireVersion(
@@ -2812,7 +3195,7 @@ function librarySourcesFromToolCalls(
     tool_name: 'library.search' | 'library.read';
     result_summary_json: string | null;
   }>;
-  const sources: AgentLibrarySourceInfo[] = [];
+  const sources = new Map<string, AgentLibrarySourceInfo>();
   for (const row of rows) {
     if (!row.result_summary_json) continue;
     try {
@@ -2847,25 +3230,33 @@ function librarySourcesFromToolCalls(
         const status = asLibrarySourceStatus(item.sourceStatus ?? item.status);
         if (!item.citationLabel || !item.title || !item.sourceType || !item.sourceId || !status)
           continue;
-        sources.push({
+        const key = JSON.stringify([
+          item.sourceType,
+          item.sourceId,
+          item.versionId ?? null,
+          status,
+          item.structureNodeId ?? null,
+        ]);
+        const previous = sources.get(key);
+        sources.set(key, {
           citationLabel: item.citationLabel,
           title: item.title,
           sourceType: item.sourceType as AgentLibrarySourceInfo['sourceType'],
           sourceId: item.sourceId,
           versionId: item.versionId,
           status,
-          kind: item.kind,
-          structureKind: item.structureKind,
-          structurePath: item.structurePath,
+          kind: item.kind ?? previous?.kind,
+          structureKind: item.structureKind ?? previous?.structureKind,
+          structurePath: item.structurePath ?? previous?.structurePath,
           structureNodeId: item.structureNodeId,
-          toolName: row.tool_name,
+          toolName: previous?.toolName === 'library.read' ? 'library.read' : row.tool_name,
         });
       }
     } catch {
       // Keep the task log available even if a tool summary is malformed.
     }
   }
-  return sources;
+  return [...sources.values()];
 }
 
 function asLibrarySourceStatus(

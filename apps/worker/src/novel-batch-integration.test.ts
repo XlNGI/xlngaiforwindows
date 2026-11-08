@@ -183,7 +183,7 @@ async function fixture() {
       .toBe(3);
     const detail = await rpc('agent.task.get', { taskId: parent.agentTaskId }, runtime);
     if (!detail.chapterBatch)
-      throw new Error(JSON.stringify(latest(parent.stream.generationId).params.continuation));
+      throw new Error(JSON.stringify(latest(parent.stream.generationId).params.contextTurns));
     return rpc('novel.batch.get', { batchId: detail.chapterBatch.batchId }, runtime);
   };
   return { root, runtime, parent, streams, emit, text, tool, latest, load, submit };
@@ -283,10 +283,10 @@ it('dispatches real novel child tools concurrently, gates draft/published depend
   await expect
     .poll(() => f.streams.filter((stream) => stream.params.generationId === a!.generationId).length)
     .toBe(3);
-  expect(JSON.stringify(f.latest(a!.generationId).params.continuation)).toContain(
+  expect(JSON.stringify(f.latest(a!.generationId).params.contextTurns)).toContain(
     'Original outline body',
   );
-  expect(JSON.stringify(f.latest(a!.generationId).params.continuation)).not.toContain(
+  expect(JSON.stringify(f.latest(a!.generationId).params.contextTurns)).not.toContain(
     'Changed outline body',
   );
   f.tool(f.latest(a!.generationId), 'novel.chapter.submit_draft', {
@@ -468,7 +468,7 @@ it('preserves a full conflict candidate and rejects another active task for the 
           .length,
     )
     .toBe(3);
-  expect(JSON.stringify(f.latest(another.stream.generationId).params.continuation)).toContain(
+  expect(JSON.stringify(f.latest(another.stream.generationId).params.contextTurns)).toContain(
     'active writing task',
   );
   expect(
@@ -499,7 +499,7 @@ it('rejects cyclic or forward chapter manifests at the real tool entry without a
           .length,
     )
     .toBe(3);
-  expect(JSON.stringify(f.latest(f.parent.stream.generationId).params.continuation)).toContain(
+  expect(JSON.stringify(f.latest(f.parent.stream.generationId).params.contextTurns)).toContain(
     'earlier chapter',
   );
   expect(await rpc('novel.chapter.list', { includeArchived: true }, f.runtime)).toEqual([]);

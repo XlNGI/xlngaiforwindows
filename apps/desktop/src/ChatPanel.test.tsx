@@ -14,6 +14,51 @@ import type { ComponentProps } from 'react';
 afterEach(cleanup);
 
 describe('ChatPanel output recovery', () => {
+  it('shows confirmed local saves separately from failure and targets receipt inspection on resume', () => {
+    const p = props('CONTEXT_BUDGET_EXCEEDED: 模型窗口不足');
+    p.agentTask = {
+      task: {
+        id: 'saved-task',
+        projectId: 'project',
+        conversationId: 'conversation',
+        taskType: 'document-create',
+        scopeType: 'project',
+        title: '修改镜头',
+        status: 'failed',
+        phase: 'recovering',
+        retryable: false,
+        completionState: 'partial',
+        rowVersion: 1,
+        createdAt: '',
+        updatedAt: '',
+      },
+      events: [],
+      documents: [],
+      providerSteps: [],
+      researchSources: [],
+      savedProductionReceipts: {
+        offset: 0,
+        instruction: 'already saved',
+        receipts: [
+          {
+            callId: 'call',
+            generationId: 'saved-generation',
+            toolName: 'scene.update_shot_prompts',
+            completedAt: '',
+            result: {
+              status: 'shot_prompts_saved',
+              shots: [{ shotId: 'saved-shot', sceneId: 'scene', rowVersion: 2, changed: true }],
+            },
+          },
+        ],
+      },
+    };
+    render(<ChatPanel {...p} />);
+    expect(screen.getByText(/已确认保存 1 次制作修改/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '填写继续指令' }));
+    expect(p.onComposerChange).toHaveBeenCalledWith(expect.stringContaining('saved-generation'));
+    expect(p.onComposerChange).toHaveBeenCalledWith(expect.stringContaining('inspect'));
+  });
   function props(error?: string, read = false): ComponentProps<typeof ChatPanel> {
     const conversation: ConversationInfo = {
       id: 'conversation',
@@ -128,6 +173,25 @@ describe('ChatPanel output recovery', () => {
     };
   }
 
+  it('prioritizes the sent request and keeps session constraints minimal and collapsed', () => {
+    const value = props();
+    value.messages[0]!.content =
+      '【本会话要求约束】\n固定风格\n逐镜标注动作\n\n【用户本次请求】\n生成场次';
+    render(<ChatPanel {...value} />);
+
+    const constraints = screen.getByText(/固定风格\s*逐镜标注动作/);
+    expect(constraints.closest('details')).not.toHaveAttribute('open');
+    const summary = screen.getByText('约束 · 11 字');
+    expect(summary).toBeInTheDocument();
+    expect(screen.queryByText('【用户本次请求】')).not.toBeInTheDocument();
+    const request = screen.getByText('生成场次', { selector: '.message-user-input' });
+    expect(request).toBeVisible();
+    expect(constraints).not.toBeVisible();
+    fireEvent.click(summary);
+    expect(constraints.closest('details')).toHaveAttribute('open');
+    expect(constraints).toBeVisible();
+  });
+
   it.each([true, false])(
     'explains unsaved output without inventing completed reads (read=%s)',
     (read) => {
@@ -149,6 +213,50 @@ describe('ChatPanel output recovery', () => {
     );
   });
 
+  it('explains when identical malformed output stalls automatic recovery', () => {
+    const error =
+      'AGENT_OUTPUT_REPAIR_STALLED: the same failed Provider output repeated; operation=scene.structure.stage; argumentBytes=7514. No tool from the repeated response was executed.';
+    render(<ChatPanel {...props(error, true)} />);
+    const message = screen.getByText(/自动修复检测到相同的无效提交重复出现/);
+    expect(message).toHaveTextContent('重复的这次提交没有执行');
+    expect(message).toHaveTextContent('已保存的草稿和分段会保留');
+    expect(screen.queryByText(error)).not.toBeInTheDocument();
+  });
+
+  it('explains an unchanged read loop while preserving saved work', () => {
+    const error = 'AGENT_REPEATED_READ_STALLED: repeated evidence';
+    render(<ChatPanel {...props(error, true)} />);
+    const message = screen.getByText(/模型反复读取同一版本、同一范围的资料/);
+    expect(message).toHaveTextContent('已停止无效循环');
+    expect(message).toHaveTextContent('已保存的内容会保留');
+    expect(screen.queryByText(error)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      'TOOL_REPAIR_LIMIT: 参数校验连续修复达到上限（3次），请缩小为分段提交。',
+      '参数校验连续失败后任务停止',
+      '请根据校验详情修正请求',
+    ],
+    [
+      'AGENT_TOOL_QUOTA_EXHAUSTED: quota exhausted',
+      '本任务的工具调用预算已用完',
+      '任务日志核对进度',
+    ],
+    [
+      'AGENT_TURN_QUOTA_EXHAUSTED: turn budget exhausted',
+      '本任务的模型请求预算已用完',
+      '任务日志核对进度',
+    ],
+  ])(
+    'explains legacy repair and task budget stops in actionable language',
+    (error, message, action) => {
+      render(<ChatPanel {...props(error)} />);
+      expect(screen.getByText(new RegExp(message))).toHaveTextContent(action);
+      expect(screen.queryByText(error)).not.toBeInTheDocument();
+    },
+  );
+
   it('shows an ongoing staged recovery while keeping cancellation available', () => {
     render(
       <ChatPanel
@@ -169,7 +277,9 @@ describe('ChatPanel output recovery', () => {
   });
 
   it('shows scene saving only when the Worker confirms it, including drafts saved before a later failure', () => {
-    const value = props('TOOL_OUTPUT_REPAIR_LIMIT: retries=2');
+    const value = props(
+      'AGENT_OUTPUT_REPAIR_STALLED: the same failed Provider output repeated; operation=scene.structure.stage; argumentBytes=7514.',
+    );
     value.agentTask!.events.push({
       id: 'saved',
       taskId: 'task',
@@ -181,7 +291,7 @@ describe('ChatPanel output recovery', () => {
     });
     render(<ChatPanel {...value} />);
     expect(screen.getByText('已保存场次与镜头草稿')).toBeInTheDocument();
-    expect(screen.getByText(/自动修正后仍未能完成提交/)).toBeInTheDocument();
+    expect(screen.getByText(/自动修复检测到相同的无效提交重复出现/)).toBeInTheDocument();
   });
 
   it('does not label a completed read request as successful source retrieval without read evidence', () => {
@@ -266,12 +376,16 @@ describe('ChatPanel attempt metadata', () => {
     fireEvent.click(screen.getByText('本会话要求约束'));
     const textarea = screen.getByLabelText('本会话要求约束');
     expect(textarea).toHaveValue('固定时间和风格');
-    fireEvent.click(screen.getByText('查看最新版分镜制作模板（可与上方当前约束对照）'));
+    expect(textarea).not.toHaveAttribute('maxlength');
+    const tools = screen.getByText('模板与清理');
+    expect(tools.closest('details')).not.toHaveAttribute('open');
+    fireEvent.click(tools);
+    fireEvent.click(screen.getByText('查看最新版分镜制作模板'));
     const latest = screen.getByLabelText('最新版分镜制作模板');
     expect(latest).toHaveAttribute('readonly');
     expect(textarea).toHaveValue('固定时间和风格');
     expect(onChange).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '载入分镜制作模板' }));
+    fireEvent.click(screen.getByRole('button', { name: '套用最新版分镜模板' }));
     expect(onChange).toHaveBeenCalledWith((latest as HTMLTextAreaElement).value);
     fireEvent.change(textarea, { target: { value: '更新后的风格约束' } });
     expect(onChange).toHaveBeenCalledWith('更新后的风格约束');
@@ -885,8 +999,12 @@ describe('ChatPanel attempt metadata', () => {
     );
     const timeline = screen.getByText('阅读资料正文').closest('.agent-tool-timeline');
     const list = screen.getByText('第一章内容如下').closest('.message-list');
+    expect(timeline).not.toBeVisible();
+    expect(screen.getByText('第一章内容如下')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '用时 8秒' }));
+    expect(timeline).toBeVisible();
     const items = [...(list?.children ?? [])];
-    const timelineIndex = items.findIndex((node) => node.classList.contains('agent-tool-timeline'));
+    const timelineIndex = items.findIndex((node) => node.contains(timeline));
     const assistantIndex = items.findIndex((node) => node.classList.contains('assistant'));
     const userIndex = items.findIndex((node) => node.classList.contains('user'));
     expect(timeline).toBeInTheDocument();
@@ -1371,6 +1489,7 @@ describe('ChatPanel attempt metadata', () => {
       updatedAt: '2026-08-03T00:00:00.000Z',
     };
     const onOpenTaskLog = vi.fn();
+    const onComposerChange = vi.fn();
     const messages: ChatMessageInfo[] = [
       {
         id: 'user-message',
@@ -1423,6 +1542,12 @@ describe('ChatPanel attempt metadata', () => {
             errorCode: 'interrupted',
             phase: 'recovering',
             retryable: true,
+            usage: {
+              providerRequestsUsed: 24,
+              toolCallsUsed: 8,
+              state: 'paused_budget',
+              errorCode: 'AGENT_TURN_QUOTA_EXHAUSTED',
+            },
             createdAt: '2026-08-03T00:00:00.000Z',
             updatedAt: '2026-08-03T00:00:01.000Z',
             rowVersion: 1,
@@ -1433,19 +1558,22 @@ describe('ChatPanel attempt metadata', () => {
           researchSources: [],
         }}
         onOpenTaskLog={onOpenTaskLog}
+        onComposerChange={onComposerChange}
         onSelectConversation={vi.fn()}
         onCreateConversation={vi.fn()}
         onRetryGeneration={vi.fn()}
         onLlmProfileChange={vi.fn()}
         onLlmModelChange={vi.fn()}
         onOpenProviderSettings={vi.fn()}
-        onComposerChange={vi.fn()}
         onCancelGeneration={vi.fn()}
         onSendMessage={vi.fn()}
       />,
     );
     expect(screen.getByText(/应用退出时任务中断；已保存的草稿会保留/)).toBeInTheDocument();
+    expect(screen.getByText('模型请求 24 次；工具调用 8 次')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '填写继续指令' }));
+    expect(onComposerChange).toHaveBeenCalledWith(expect.stringContaining('请先核对刚才任务日志'));
     fireEvent.click(screen.getByRole('button', { name: '查看任务日志' }));
     expect(onOpenTaskLog).toHaveBeenCalledOnce();
   });

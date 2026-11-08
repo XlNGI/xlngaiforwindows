@@ -1,5 +1,7 @@
 import {
   AlertCircle,
+  ArrowLeft,
+  AudioLines,
   ChevronDown,
   Clock3,
   ExternalLink,
@@ -46,6 +48,12 @@ const kindLabel: Record<TaskLogItem['kind'], string> = {
   image: '图片',
   video: '视频',
   dubbing: '配音制作',
+};
+const kindIcon = {
+  'agent-document': FileText,
+  image: ImageIcon,
+  video: Video,
+  dubbing: AudioLines,
 };
 const scheduleWaitLabel: Record<string, string> = {
   capacity: '等待执行名额',
@@ -843,11 +851,17 @@ export function TaskLogView({
   const [message, setMessage] = useState('');
   const [detailMessage, setDetailMessage] = useState('');
   const detailRequestRef = useRef(0);
+  const selectedRowRef = useRef<HTMLButtonElement | null>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const observedTaskRevisionRef = useRef(taskRevision);
   const [kindFilter, setKindFilter] = useState<TaskLogItem['kind'] | ''>('');
   const [statusFilter, setStatusFilter] = useState('');
   const [nextCursor, setNextCursor] = useState<string>();
   const [loadingMore, setLoadingMore] = useState(false);
+
+  useEffect(() => {
+    if (selectedItem) detailHeadingRef.current?.focus({ preventScroll: true });
+  }, [selectedItem?.id]);
 
   const refresh = useCallback(async () => {
     if (!projectId) {
@@ -967,6 +981,7 @@ export function TaskLogView({
     setMediaEvents([]);
     setDetailMessage('');
     setDetailBusy(false);
+    window.requestAnimationFrame(() => selectedRowRef.current?.focus({ preventScroll: true }));
   };
 
   const loadMore = async () => {
@@ -993,56 +1008,68 @@ export function TaskLogView({
   };
 
   return (
-    <section className="task-log-workspace">
+    <section
+      className="task-log-workspace"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && selectedItem) {
+          event.stopPropagation();
+          closeDetails();
+        }
+      }}
+    >
       <FileTaskList projectId={projectId} />
-      <div className="workspace-toolbar">
-        <div>
-          <span className="eyebrow">项目执行记录</span>
-          <h1>任务日志</h1>
+      <div className="task-log-toolbar">
+        <div className="task-log-toolbar-heading">
+          <div className="task-log-title">
+            <h1>任务日志</h1>
+            {projectId && <span>已加载 {items.length} 条</span>}
+          </div>
+          <button
+            className="button secondary"
+            type="button"
+            title="刷新任务日志"
+            onClick={() => void refresh()}
+            disabled={busy || !projectId}
+          >
+            <RefreshCw size={14} />
+            {busy ? '刷新中' : '刷新'}
+          </button>
         </div>
-        <select
-          aria-label="任务类型筛选"
-          value={kindFilter}
-          onChange={(event) => {
-            setKindFilter(event.target.value as TaskLogItem['kind'] | '');
-            setSelectedItem(undefined);
-            setDetail(null);
-          }}
-          disabled={!projectId}
-        >
-          <option value="">全部类型</option>
-          <option value="agent-document">Agent 文档</option>
-          <option value="image">图片</option>
-          <option value="video">视频</option>
-          <option value="dubbing">配音制作</option>
-        </select>
-        <select
-          aria-label="任务状态筛选"
-          value={statusFilter}
-          onChange={(event) => {
-            setStatusFilter(event.target.value);
-            setSelectedItem(undefined);
-            setDetail(null);
-          }}
-          disabled={!projectId}
-        >
-          <option value="">全部状态</option>
-          {Object.keys(statusLabel).map((status) => (
-            <option key={status} value={status}>
-              {statusLabel[status]}
-            </option>
-          ))}
-        </select>
-        <button
-          className="button secondary"
-          type="button"
-          title="刷新任务日志"
-          onClick={() => void refresh()}
-          disabled={busy || !projectId}
-        >
-          <RefreshCw size={15} />
-          刷新
-        </button>
+        <div className="task-log-filters">
+          <select
+            aria-label="任务类型筛选"
+            value={kindFilter}
+            onChange={(event) => {
+              setKindFilter(event.target.value as TaskLogItem['kind'] | '');
+              setSelectedItem(undefined);
+              setDetail(null);
+            }}
+            disabled={!projectId}
+          >
+            <option value="">全部类型</option>
+            <option value="agent-document">Agent 文档</option>
+            <option value="image">图片</option>
+            <option value="video">视频</option>
+            <option value="dubbing">配音制作</option>
+          </select>
+          <select
+            aria-label="任务状态筛选"
+            value={statusFilter}
+            onChange={(event) => {
+              setStatusFilter(event.target.value);
+              setSelectedItem(undefined);
+              setDetail(null);
+            }}
+            disabled={!projectId}
+          >
+            <option value="">全部状态</option>
+            {Object.keys(statusLabel).map((status) => (
+              <option key={status} value={status}>
+                {statusLabel[status]}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
       {!projectId ? (
         <div className="empty-stage">
@@ -1056,54 +1083,87 @@ export function TaskLogView({
           <div className="empty-icon">
             <ListChecks size={28} />
           </div>
-          <h2>暂无任务</h2>
-          <p>Agent 文档、图片和视频任务完成后会在这里保留记录。</p>
+          <h2>
+            {busy
+              ? '正在读取任务…'
+              : message
+                ? '任务读取失败'
+                : kindFilter || statusFilter
+                  ? '没有匹配的任务'
+                  : '暂无任务'}
+          </h2>
+          {!busy && !message && (
+            <p>
+              {kindFilter || statusFilter
+                ? '试试切换任务类型或状态。'
+                : 'Agent 文档、图片、视频和配音任务会在这里保留记录。'}
+            </p>
+          )}
         </div>
       ) : (
         <div className={`task-log-content${selectedItem ? ' has-detail' : ''}`}>
           <div className="task-log-list" aria-label="任务日志列表">
-            {items.map((item) => (
+            {items.map((item) => {
+              const KindIcon = kindIcon[item.kind];
+              return (
+                <button
+                  className={`task-log-row${selectedItem?.id === item.id ? ' is-selected' : ''}`}
+                  key={item.id}
+                  type="button"
+                  title="查看任务详情"
+                  aria-pressed={selectedItem?.id === item.id}
+                  onClick={(event) => {
+                    selectedRowRef.current = event.currentTarget;
+                    void openDetails(item);
+                  }}
+                >
+                  <div className="task-log-kind">
+                    <KindIcon size={14} aria-hidden="true" />
+                    {kindLabel[item.kind]}
+                  </div>
+                  <div className="task-log-main">
+                    <strong title={item.title}>{item.title}</strong>
+                    <time dateTime={item.createdAt}>{formatDate(item.createdAt)}</time>
+                  </div>
+                  <span className={`task-status task-status-${item.status}`}>
+                    {!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status) &&
+                    item.scheduling?.waitReason &&
+                    scheduleWaitLabel[item.scheduling.waitReason]
+                      ? scheduleWaitLabel[item.scheduling.waitReason]
+                      : (statusLabel[item.status] ?? generationStatusLabel(item.status))}
+                  </span>
+                </button>
+              );
+            })}
+            {nextCursor && (
               <button
-                className={`task-log-row${selectedItem?.id === item.id ? ' is-selected' : ''}`}
-                key={item.id}
+                className="button secondary task-log-load-more"
                 type="button"
-                title="查看任务详情"
-                aria-pressed={selectedItem?.id === item.id}
-                onClick={() => void openDetails(item)}
+                title="加载更多任务"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
               >
-                <div className="task-log-kind">{kindLabel[item.kind]}</div>
-                <div className="task-log-main">
-                  <strong>{item.title}</strong>
-                  <small>{formatDate(item.createdAt)}</small>
-                </div>
-                <span className={`task-status task-status-${item.status}`}>
-                  {!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status) &&
-                  item.scheduling?.waitReason &&
-                  scheduleWaitLabel[item.scheduling.waitReason]
-                    ? scheduleWaitLabel[item.scheduling.waitReason]
-                    : statusText(item.status)}
-                </span>
+                <ChevronDown size={14} />
+                {loadingMore ? '正在加载…' : '加载更多'}
               </button>
-            ))}
+            )}
           </div>
-          {nextCursor && (
-            <button
-              className="button secondary task-log-load-more"
-              type="button"
-              title="加载更多任务"
-              onClick={() => void loadMore()}
-              disabled={loadingMore}
-            >
-              <ChevronDown size={14} />
-              加载更多
-            </button>
-          )}
           {selectedItem && (
             <aside className="task-log-detail" aria-label="任务详情">
               <div className="task-log-detail-header">
+                <button
+                  className="button secondary task-log-back"
+                  type="button"
+                  onClick={closeDetails}
+                >
+                  <ArrowLeft size={14} />
+                  返回列表
+                </button>
                 <div>
                   <span>{kindLabel[selectedItem.kind]}</span>
-                  <h2>{selectedItem.title}</h2>
+                  <h2 ref={detailHeadingRef} tabIndex={-1}>
+                    {selectedItem.title}
+                  </h2>
                 </div>
                 <button
                   className="icon-button"

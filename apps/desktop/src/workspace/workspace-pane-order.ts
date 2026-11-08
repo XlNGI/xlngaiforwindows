@@ -19,24 +19,25 @@ function isPaneId(value: unknown): value is WorkspacePaneId {
   );
 }
 
-export function readWorkspacePaneOrder(projectId: string | undefined): WorkspacePaneId[] {
+export function readWorkspacePaneOrder(
+  projectId: string | undefined,
+  defaultOrder = DEFAULT_WORKSPACE_PANE_ORDER,
+): WorkspacePaneId[] {
   try {
     const raw = window.localStorage?.getItem(storageKey(projectId));
-    if (!raw) return [...DEFAULT_WORKSPACE_PANE_ORDER];
+    if (!raw) return [...defaultOrder];
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [...DEFAULT_WORKSPACE_PANE_ORDER];
+    if (!Array.isArray(parsed)) return [...defaultOrder];
     const order = [...new Set(parsed.filter(isPaneId))];
-    for (const [index, paneId] of DEFAULT_WORKSPACE_PANE_ORDER.entries()) {
+    for (const [index, paneId] of defaultOrder.entries()) {
       if (order.includes(paneId)) continue;
-      const successor = DEFAULT_WORKSPACE_PANE_ORDER.slice(index + 1).find((id) =>
-        order.includes(id),
-      );
+      const successor = defaultOrder.slice(index + 1).find((id) => order.includes(id));
       const targetIndex = successor === undefined ? order.length : order.indexOf(successor);
       order.splice(targetIndex, 0, paneId);
     }
     return order;
   } catch {
-    return [...DEFAULT_WORKSPACE_PANE_ORDER];
+    return [...defaultOrder];
   }
 }
 

@@ -1,8 +1,9 @@
+import { conservativeModelCapabilities } from './model-context-policy.js';
 import {
   withAgentResponseLanguageInstruction,
   withAgentToolInstructions,
 } from './agent-policy-instructions.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { splitConversationRequest } from './conversation-request.js';
 import type {
   AgentGenerationPrepareParams,
@@ -34,6 +35,7 @@ import type {
 } from '@ai-video/domain';
 import { LlmProviderError, type LlmProvider } from '@ai-video/llm';
 import {
+  AgentContextStore,
   captureTaskHistory,
   createRepositories,
   syncLibraryChunksForChatMessage,
@@ -56,11 +58,13 @@ interface GenerationState extends LlmGenerationInfo {
   agentBaseInstruction?: string;
   providerUsage?: Map<string, NormalizedLlmUsage>;
   accounting?: LlmUsageAccounting;
+  pendingSelection?: ResolvedLlmSelection;
   attemptId: string;
   projectId: string;
   projectSessionId: string;
   controller?: AbortController;
   completion?: Promise<void>;
+  suspended?: boolean;
   flushTimer?: ReturnType<typeof setTimeout>;
   persistedCharacters: number;
   runtimeRequest?: LlmGenerationRuntimeRequest;
@@ -69,8 +73,10 @@ interface GenerationState extends LlmGenerationInfo {
 }
 
 interface GenerationCreationOptions {
+  contextOwner?: 'agent';
   taskExecution?: 'ordered' | 'parallel' | 'auto';
   idempotencyKey?: string;
+  requestFingerprint?: string;
   retryOfGenerationId?: string;
   selectedChapterIds?: string[];
 }
@@ -97,6 +103,15 @@ export class ConversationBusyError extends Error {
   constructor() {
     super('当前会话的上一轮仍在执行，请等待完成或停止生成后再发送。');
     this.name = 'ConversationBusyError';
+  }
+}
+
+export class GenerationIdempotencyConflictError extends Error {
+  readonly code = 'IDEMPOTENCY_KEY_CONFLICT';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'GenerationIdempotencyConflictError';
   }
 }
 
@@ -159,18 +174,32 @@ export class GenerationService {
     budgetTokens?: number,
     idempotencyKey?: string,
   ): LlmGenerationInfo {
-    const existing = this.findIdempotent(idempotencyKey);
+    const normalizedPrompt = prompt.trim();
+    const requestFingerprint = idempotencyKey
+      ? fingerprintGenerationRequest('legacy-generate', {
+          conversationId,
+          prompt: normalizedPrompt,
+          budgetTokens: budgetTokens ?? null,
+        })
+      : undefined;
+    const existing = this.findIdempotent(idempotencyKey, requestFingerprint);
     if (existing) return generationInfoOf(existing);
     this.assertLegacyConfigured();
-    return this.startLegacy(conversationId, prompt.trim(), budgetTokens, undefined, {
+    return this.startLegacy(conversationId, normalizedPrompt, budgetTokens, undefined, {
       idempotencyKey,
+      requestFingerprint,
     });
   }
 
   prepare(
     params: LlmGenerationPrepareParams | AgentGenerationPrepareParams,
+    contextOwner?: 'agent',
   ): LlmGenerationPrepareResult {
-    const existing = this.findIdempotent(params.idempotencyKey);
+    const { idempotencyKey, ...request } = params;
+    const requestFingerprint = idempotencyKey
+      ? fingerprintGenerationRequest('native-prepare', request)
+      : undefined;
+    const existing = this.findIdempotent(idempotencyKey, requestFingerprint);
     if (existing) return prepareResultOf(existing);
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
     const prepared = this.startNative(
@@ -179,7 +208,12 @@ export class GenerationService {
       selection,
       params.budgetTokens,
       undefined,
-      { idempotencyKey: params.idempotencyKey, taskExecution: params.taskExecution },
+      {
+        idempotencyKey,
+        requestFingerprint,
+        taskExecution: params.taskExecution,
+        contextOwner,
+      },
       // Chapter selections are hints for the System Agent, never an implicit
       // full-text context. The resolver must locate and read the requested
       // resources through library tools.
@@ -201,10 +235,78 @@ export class GenerationService {
     return prepared;
   }
 
+  switchConversationModel(conversationId: string, profileId: string, modelId: string): void {
+    const selection = this.resolveSelection(profileId, modelId);
+    for (const state of this.generations.values()) {
+      if (
+        state.conversationId !== conversationId ||
+        !isActive(state.status) ||
+        !state.runtimeRequest
+      )
+        continue;
+      state.pendingSelection = selection;
+    }
+  }
+
   runtime(identity: LlmGenerationIdentity): LlmGenerationRuntimeRequest {
     const state = this.requireNativeState(identity);
     if (!isActive(state.status) || !state.runtimeRequest) {
       throw new Error('LLM generation is no longer available for native streaming.');
+    }
+    if (state.pendingSelection) {
+      const selection = state.pendingSelection,
+        profileId = selection.providerProfileId,
+        modelId = selection.modelId;
+      const capabilities =
+        selection.modelCapabilities ??
+        (selection.contextWindowTokens
+          ? {
+              modelId,
+              contextWindow: selection.contextWindowTokens,
+              capabilitySource: 'model_registry' as const,
+            }
+          : conservativeModelCapabilities(modelId));
+      state.runtimeRequest = {
+        ...state.runtimeRequest,
+        providerProfileId: profileId,
+        modelId,
+        remoteModelId: selection.remoteModelId,
+        protocol: selection.protocol,
+        baseUrl: selection.baseUrl,
+        modelCapabilities: capabilities,
+        contextWindowTokens: capabilities.contextWindow,
+        contextWindowSource: capabilities.capabilitySource === 'fallback' ? 'fallback' : 'contract',
+        inferenceSettings: selection.inferenceSettings,
+        continuation: undefined,
+      };
+      state.providerProfileId = profileId;
+      state.modelId = modelId;
+      this.projects.access(true, (db) => {
+        const repos = createRepositories(db),
+          record = {
+            ...state.record,
+            providerProfileId: profileId,
+            modelId,
+            version: state.record.version + 1,
+            updatedAt: nowIso(),
+          };
+        if (!repos.llmGenerations.update(record, state.record.version))
+          throw new Error('Model switch CAS conflict.');
+        state.record = record;
+        state.attempt = {
+          ...state.attempt,
+          providerProfileId: profileId,
+          modelId,
+          protocol: selection.protocol,
+          modelNameSnapshot: selection.modelName,
+          providerNameSnapshot: selection.providerName,
+          pricingSnapshotJson: selection.pricingSnapshot
+            ? JSON.stringify(selection.pricingSnapshot)
+            : undefined,
+        };
+        repos.llmGenerationAttempts.save(state.attempt);
+      });
+      state.pendingSelection = undefined;
     }
     return { ...state.runtimeRequest };
   }
@@ -430,17 +532,6 @@ export class GenerationService {
             throw new Error('Supplement operation key has different input.');
           return repositories.chatMessages.get(existing.id)!;
         }
-        const count = database
-          .prepare('SELECT COUNT(*) AS n FROM generation_supplements WHERE generation_id=?')
-          .get(generationId) as { n: number };
-        if (count.n >= 32) throw new Error('Task supplement queue is full (32).');
-        const total = database
-          .prepare(
-            'SELECT COALESCE(SUM(length(content)),0) AS n FROM generation_supplements WHERE generation_id=?',
-          )
-          .get(generationId) as { n: number };
-        if (state.userMessage.content.length + total.n + content.length + 1000 > 100000)
-          throw new Error('Task supplements exceed the input budget.');
         const message: ChatMessageInfo = {
           id: randomUUID(),
           conversationId: state.conversationId,
@@ -522,6 +613,15 @@ export class GenerationService {
   ): void {
     const state = this.requireNativeState(identity);
     if (!isActive(state.status) && !['cancelled', 'failed'].includes(state.status)) return;
+    if (stage === 'dispatching')
+      metadata = {
+        ...metadata,
+        modelSelection: {
+          providerProfileId: state.providerProfileId,
+          modelId: state.modelId,
+          pricingSnapshot: pricingSnapshotOf(state.attempt) ?? null,
+        },
+      };
     this.updateRequestAccounting(state, identity, requestId, stage, metadata);
   }
 
@@ -562,12 +662,12 @@ export class GenerationService {
         // A total Provider cost is authoritative only when every dispatched request reported it.
         if (total && accounting.reportedRequests !== accounting.requestCount)
           delete total.providerReportedCost;
-        const estimatedCost = calculateEstimatedCost(total, pricing);
+        const { estimatedCost, currency } = aggregateRequestCost(accounting, total, pricing);
         const attempt = {
           ...state.attempt,
           ...usageFields(total, accounting),
           estimatedCost,
-          currency: estimatedCost ? pricing?.currency : undefined,
+          currency,
         };
         createRepositories(database).llmGenerationAttempts.save(attempt);
         return { accounting, requests, attempt };
@@ -621,7 +721,7 @@ export class GenerationService {
       sumProviderUsage(state.providerUsage, state.accounting?.requestCount) ??
       normalizeUsage(params.usage);
     const pricing = pricingSnapshotOf(state.attempt);
-    const estimatedCost = calculateEstimatedCost(usage, pricing);
+    const { estimatedCost, currency } = aggregateRequestCost(state.accounting, usage, pricing);
     const providerResponseId = normalizeOptionalText(params.providerResponseId, 256);
     const finishReason = normalizeOptionalText(params.finishReason, 80);
     const completedAt = nowIso();
@@ -635,7 +735,7 @@ export class GenerationService {
       finishReason,
       ...usageFields(usage, state.accounting),
       estimatedCost,
-      currency: estimatedCost ? pricing?.currency : undefined,
+      currency,
       errorCode: undefined,
       errorMessage: undefined,
     };
@@ -685,10 +785,20 @@ export class GenerationService {
   }
 
   retry(params: LlmGenerationRetryParams): LlmGenerationInfo {
-    const existing = this.findIdempotent(params.idempotencyKey);
+    const source = this.retrySource(params.assistantMessageId);
+    const requestFingerprint = params.idempotencyKey
+      ? fingerprintGenerationRequest('legacy-retry', {
+          assistantMessageId: params.assistantMessageId,
+          conversationId: source.conversationId,
+          userMessageId: source.user.id,
+          sourceGenerationId: source.generationId ?? null,
+          prompt: source.prompt,
+          budgetTokens: params.budgetTokens ?? null,
+        })
+      : undefined;
+    const existing = this.findIdempotent(params.idempotencyKey, requestFingerprint);
     if (existing) return generationInfoOf(existing);
     this.assertLegacyConfigured();
-    const source = this.retrySource(params.assistantMessageId);
     return this.startLegacy(
       source.conversationId,
       source.prompt,
@@ -696,16 +806,29 @@ export class GenerationService {
       source.user,
       {
         idempotencyKey: params.idempotencyKey,
+        requestFingerprint,
         retryOfGenerationId: source.generationId,
       },
     );
   }
 
   retryPrepare(params: LlmGenerationRetryPrepareParams): LlmGenerationPrepareResult {
-    const existing = this.findIdempotent(params.idempotencyKey);
+    const source = this.retrySource(params.assistantMessageId);
+    const requestFingerprint = params.idempotencyKey
+      ? fingerprintGenerationRequest('native-retry', {
+          assistantMessageId: params.assistantMessageId,
+          conversationId: source.conversationId,
+          userMessageId: source.user.id,
+          sourceGenerationId: source.generationId ?? null,
+          prompt: source.prompt,
+          budgetTokens: params.budgetTokens ?? null,
+          providerProfileId: params.providerProfileId,
+          modelId: params.modelId,
+        })
+      : undefined;
+    const existing = this.findIdempotent(params.idempotencyKey, requestFingerprint);
     if (existing) return prepareResultOf(existing);
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
-    const source = this.retrySource(params.assistantMessageId);
     return this.startNative(
       source.conversationId,
       source.prompt,
@@ -714,6 +837,7 @@ export class GenerationService {
       source.user,
       {
         idempotencyKey: params.idempotencyKey,
+        requestFingerprint,
         retryOfGenerationId: source.generationId,
       },
     );
@@ -739,9 +863,155 @@ export class GenerationService {
     await Promise.allSettled(legacy.map((state) => this.waitForCancellation(state)));
   }
 
+  /** Flush before the project closes, without turning restart into user cancellation. */
+  suspend(): void {
+    for (const state of this.generations.values()) {
+      this.clearFlushTimer(state);
+      if (state.suspended) continue;
+      if (
+        state.status === 'streaming' &&
+        state.assistantMessage.content.length > state.persistedCharacters
+      )
+        this.flushStreaming(state);
+      state.suspended = true;
+      // Late legacy responses must not schedule writes against a closed project.
+      state.controller?.abort();
+    }
+  }
+
+  recoverableContextTasks(): Array<{
+    taskId: string;
+    generationId: string;
+    conversationId: string;
+  }> {
+    if (this.projects.current()?.mode !== 'read-write') return [];
+    return this.projects.access(false, (db, project) =>
+      new AgentContextStore(db)
+        .recoverable(project.id)
+        .filter(
+          (task) =>
+            !!db
+              .prepare(
+                "SELECT 1 FROM llm_generations g JOIN agent_task_generations l ON l.generation_id=g.id JOIN agent_tasks t ON t.id=l.task_id WHERE g.id=? AND g.status IN ('prepared','streaming') AND t.status='running'",
+              )
+              .get(task.generationId),
+        ),
+    );
+  }
+
+  resumeContextTask(taskId: string): {
+    identity: LlmGenerationIdentity;
+    prompt: string;
+    mode: import('@ai-video/contracts').ConversationTaskMode;
+  } {
+    return this.projects.access(true, (db, project) =>
+      db.transaction(() => {
+        const store = new AgentContextStore(db);
+        const candidate = this.recoverableContextTasks().find((task) => task.taskId === taskId);
+        const saved = store.loadRuntime<
+          import('./agent-context-manager.js').ContextRecoverySnapshot
+        >(project.id, taskId);
+        if (!candidate || !saved) throw new Error('No recoverable context checkpoint.');
+        const repos = createRepositories(db),
+          record = repos.llmGenerations.get(candidate.generationId)!;
+        const existing = this.generations.get(record.id);
+        if (existing)
+          return {
+            identity: identityOf(existing),
+            prompt: saved.runtime.prompt,
+            mode: saved.mode as import('@ai-video/contracts').ConversationTaskMode,
+          };
+        const info = this.loadPersisted(record.id),
+          attempt = repos.llmGenerationAttempts.getByAssistantMessage(record.assistantMessageId)!;
+        const sessionId = this.projects.currentSessionId()!;
+        const nextRecord = {
+          ...record,
+          projectSessionId: sessionId,
+          version: record.version + 1,
+          updatedAt: nowIso(),
+        };
+        if (!repos.llmGenerations.update(nextRecord, record.version))
+          throw new Error('Recovery CAS conflict.');
+        db.prepare(
+          "UPDATE agent_tasks SET project_session_id=?,row_version=row_version+1 WHERE id=? AND project_id=? AND status='running'",
+        ).run(sessionId, taskId, project.id);
+        let runtime = {
+          ...saved.runtime,
+          generationId: record.id,
+          attemptId: attempt.id,
+          projectId: project.id,
+          projectSessionId: sessionId,
+          conversationId: record.conversationId,
+          continuation: undefined,
+        };
+        if (this.selectionResolver && record.providerProfileId && record.modelId) {
+          const selected = this.resolveSelection(record.providerProfileId, record.modelId);
+          runtime = {
+            ...runtime,
+            providerProfileId: selected.providerProfileId,
+            modelId: selected.modelId,
+            remoteModelId: selected.remoteModelId,
+            baseUrl: selected.baseUrl,
+            protocol: selected.protocol,
+            inferenceSettings: selected.inferenceSettings,
+            modelCapabilities:
+              selected.modelCapabilities ?? conservativeModelCapabilities(selected.modelId),
+          };
+        }
+        const state: GenerationState = {
+          ...info,
+          projectSessionId: sessionId,
+          attemptId: attempt.id,
+          projectId: project.id,
+          record: nextRecord,
+          attempt,
+          persistedCharacters: info.assistantMessage.content.length,
+          runtimeRequest: runtime,
+        };
+        const accounting = readRequestAccounting(db, identityOf(state), pricingSnapshotOf(attempt));
+        state.accounting = accounting;
+        state.providerUsage = new Map(
+          accounting.requests.filter((r) => r.usage).map((r) => [r.requestId, r.usage!]),
+        );
+        this.generations.set(record.id, state);
+        // A model choice may have been persisted just before the Worker stopped.
+        const capability =
+          saved.mode === 'novel'
+            ? 'novel'
+            : saved.mode === 'short-drama'
+              ? 'short-drama'
+              : saved.mode === 'document'
+                ? 'document'
+                : 'text';
+        const preference = repos.conversationModelPreferences.get(
+          record.conversationId,
+          capability,
+        );
+        if (
+          this.selectionResolver &&
+          preference &&
+          (preference.providerProfileId !== state.providerProfileId ||
+            preference.modelId !== state.modelId)
+        ) {
+          state.pendingSelection = this.resolveSelection(
+            preference.providerProfileId,
+            preference.modelId,
+          );
+          this.runtime(identityOf(state));
+        }
+        return {
+          identity: identityOf(state),
+          prompt: runtime.prompt,
+          mode: saved.mode as import('@ai-video/contracts').ConversationTaskMode,
+        };
+      })(),
+    );
+  }
+
   recoverInterrupted(): number {
     const project = this.projects.current();
     if (!project || project.mode !== 'read-write') return 0;
+    const excluded = this.recoverableContextTasks().map((task) => task.generationId);
     return this.projects.access(true, (database) => {
       const repositories = createRepositories(database);
       return database.transaction(() => {
@@ -755,13 +1025,20 @@ export class GenerationService {
         const messages = repositories.chatMessages.failStreamingByProject(
           project.id,
           failureMessage,
+          excluded,
         );
         repositories.llmGenerationAttempts.failActiveByProject(
           project.id,
           recoveredAt,
           failureMessage,
+          excluded,
         );
-        repositories.llmGenerations.failActiveByProject(project.id, recoveredAt, failureMessage);
+        repositories.llmGenerations.failActiveByProject(
+          project.id,
+          recoveredAt,
+          failureMessage,
+          excluded,
+        );
         for (const attempt of repositories.llmGenerationAttempts.listByProject(project.id)) {
           const persisted = parsePersistedUsage(attempt.rawUsageJson);
           if (!persisted?.accounting?.requests.some((request) => !request.completedAt)) continue;
@@ -792,16 +1069,21 @@ export class GenerationService {
 
   private findIdempotent(
     idempotencyKey: string | undefined,
+    requestFingerprint: string | undefined,
   ): GenerationState | LlmGenerationInfo | undefined {
     if (!idempotencyKey) return undefined;
-    const generationId = this.projects.access(
-      false,
-      (database, project) =>
-        createRepositories(database).llmGenerations.getByIdempotencyKey(project.id, idempotencyKey)
-          ?.id,
+    const existing = this.projects.access(false, (database, project) =>
+      createRepositories(database).llmGenerations.getByIdempotencyKey(project.id, idempotencyKey),
     );
-    if (!generationId) return undefined;
-    return this.generations.get(generationId) ?? this.loadPersisted(generationId);
+    if (!existing) return undefined;
+    if (!requestFingerprint || existing.requestFingerprint !== requestFingerprint) {
+      throw new GenerationIdempotencyConflictError(
+        existing.requestFingerprint
+          ? 'IDEMPOTENCY_KEY_REUSED: request content changed.'
+          : 'IDEMPOTENCY_KEY_UNVERIFIABLE: this key belongs to a generation created before request fingerprints were stored; submit the retry with a new key.',
+      );
+    }
+    return this.generations.get(existing.id) ?? this.loadPersisted(existing.id);
   }
 
   private loadPersisted(generationId: string): LlmGenerationInfo {
@@ -943,7 +1225,7 @@ export class GenerationService {
     selectedChapterIds?: string[],
     attachments?: LlmInputAttachment[],
   ): LlmGenerationPrepareResult {
-    const existing = this.findIdempotent(options.idempotencyKey);
+    const existing = this.findIdempotent(options.idempotencyKey, options.requestFingerprint);
     if (existing) return prepareResultOf(existing);
     const prepared = this.createState(
       conversationId,
@@ -966,8 +1248,25 @@ export class GenerationService {
       modelId: selection.modelId,
       remoteModelId: selection.remoteModelId,
       inferenceSettings: selection.inferenceSettings,
-      contextWindowTokens: selection.contextWindowTokens ?? 64_000,
-      contextWindowSource: selection.contextWindowTokens ? 'contract' : 'fallback',
+      modelCapabilities:
+        selection.modelCapabilities ??
+        (selection.contextWindowTokens
+          ? {
+              modelId: selection.modelId,
+              contextWindow: selection.contextWindowTokens,
+              capabilitySource: 'model_registry',
+            }
+          : conservativeModelCapabilities(selection.modelId)),
+      contextWindowTokens:
+        selection.modelCapabilities?.contextWindow ??
+        selection.contextWindowTokens ??
+        conservativeModelCapabilities(selection.modelId).contextWindow,
+      contextWindowSource:
+        selection.modelCapabilities?.capabilitySource === 'fallback'
+          ? 'fallback'
+          : selection.contextWindowTokens
+            ? 'contract'
+            : 'fallback',
       protocol: selection.protocol,
       baseUrl: selection.baseUrl,
       systemInstruction,
@@ -988,7 +1287,7 @@ export class GenerationService {
     existingUser?: ChatMessageInfo,
     options: GenerationCreationOptions = {},
   ): LlmGenerationInfo {
-    const existing = this.findIdempotent(options.idempotencyKey);
+    const existing = this.findIdempotent(options.idempotencyKey, options.requestFingerprint);
     if (existing) return generationInfoOf(existing);
     const prepared = this.createState(
       conversationId,
@@ -1022,9 +1321,14 @@ export class GenerationService {
     if (!projectId || !projectSessionId) throw new Error('No project is open.');
     const boundary = this.projects.access(false, (database) => captureTaskHistory(database));
     const compiled =
-      selectedChapterIds && this.novelContexts
+      selectedChapterIds && this.novelContexts && options.contextOwner !== 'agent'
         ? this.novelContexts.compileShortDrama(conversationId, budgetTokens, selectedChapterIds)
-        : this.contexts.compile(conversationId, budgetTokens, boundary);
+        : this.contexts.compile(
+            conversationId,
+            budgetTokens,
+            boundary,
+            options.contextOwner !== 'agent',
+          );
     const snapshotId = randomUUID();
     const generationId = randomUUID();
     const attemptId = randomUUID();
@@ -1077,6 +1381,7 @@ export class GenerationService {
       executionMode,
       retryOfGenerationId: options.retryOfGenerationId,
       idempotencyKey: options.idempotencyKey,
+      requestFingerprint: options.requestFingerprint,
       providerProfileId: selection?.providerProfileId,
       modelId: selection?.modelId,
       createdAt: startedAt,
@@ -1192,32 +1497,14 @@ export class GenerationService {
       project.updatedAt = startedAt;
     });
     this.generations.set(state.generationId, state);
-    const activeTaskContext = this.projects.access(false, (database, project) => {
-      const rows = database
-        .prepare(
-          `SELECT generations.id,generations.status,COALESCE(generations.user_request,messages.content) AS prompt,
-            generations.created_at,
-            (SELECT COUNT(*) FROM agent_change_sets sets JOIN agent_task_generations links ON links.task_id=sets.task_id WHERE links.generation_id=generations.id) AS proposals
-           FROM llm_generations generations
-           JOIN chat_messages messages ON messages.id=generations.user_message_id
-          WHERE generations.project_id=? AND generations.conversation_id=?
-            AND generations.id<>?
-          ORDER BY generations.created_at DESC LIMIT 8`,
-        )
-        .all(project.id, conversationId, generationId) as Array<{
-        id: string;
-        status: string;
-        prompt: string;
-        created_at: string;
-        proposals: number;
-      }>;
-      if (!rows.length) return '';
-      return `\n\n当前会话最近任务。由你判断语义关系，需要关联时调用 conversation.task.route：\n${rows.map((row) => `- generationId=${row.id}；状态=${row.status}；创建=${row.created_at}；提案数=${row.proposals}；用户请求=${JSON.stringify(splitConversationRequest(row.prompt).request.slice(0, 800))}`).join('\n')}\n可选关系：independent（独立执行）、follow_up（继续成功任务）、inspect（查询失败/取消/其他任务的真实结果，不建立成功依赖）、supplement（向活动任务补充指令）。无明确关系选择 independent。`;
-    });
+    const activeTaskContext =
+      options.contextOwner === 'agent'
+        ? ''
+        : this.contexts.recentTaskContext(conversationId, generationId);
     return {
       state,
       systemInstruction: withAgentResponseLanguageInstruction(compiled.systemInstruction),
-      context: `${compiled.rendered}${activeTaskContext}`,
+      context: options.contextOwner === 'agent' ? '' : `${compiled.rendered}${activeTaskContext}`,
     };
   }
 
@@ -1254,6 +1541,7 @@ export class GenerationService {
           }
         },
       });
+      if (state.suspended) return;
       if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
       this.clearFlushTimer(state);
       const attempt: LlmGenerationAttemptRecord = {
@@ -1276,7 +1564,7 @@ export class GenerationService {
       this.reportGeneration(state, 'complete');
     } catch (error) {
       this.clearFlushTimer(state);
-      if (state.status !== 'streaming') return;
+      if (state.suspended || state.status !== 'streaming') return;
       this.failLegacy(state, controller.signal.aborted, error);
     }
   }
@@ -1330,14 +1618,14 @@ export class GenerationService {
         sumProviderUsage(state.providerUsage, state.accounting?.requestCount) ??
         normalizeUsage(usageInput);
       const pricing = pricingSnapshotOf(state.attempt);
-      const estimatedCost = calculateEstimatedCost(usage, pricing);
+      const { estimatedCost, currency } = aggregateRequestCost(state.accounting, usage, pricing);
       const attempt: LlmGenerationAttemptRecord = {
         ...state.attempt,
         status: state.status === 'cancelled' ? 'cancelled' : 'failed',
         completedAt: nowIso(),
         ...usageFields(usage, state.accounting),
         estimatedCost,
-        currency: estimatedCost ? pricing?.currency : undefined,
+        currency,
         errorCode: state.status === 'cancelled' ? 'cancelled' : 'generation-failed',
         errorMessage: state.error,
       };
@@ -1362,6 +1650,7 @@ export class GenerationService {
       throw new Error('Native LLM generation was not found.');
     }
     if (
+      state.suspended ||
       state.attemptId !== identity.attemptId ||
       state.projectId !== identity.projectId ||
       state.projectSessionId !== identity.projectSessionId ||
@@ -1798,4 +2087,41 @@ function normalizeOptionalText(value: string | undefined, limit: number): string
     .replace(/[\r\n\0]+/g, ' ')
     .slice(0, limit);
   return normalized || undefined;
+}
+
+function fingerprintGenerationRequest(kind: string, request: unknown): string {
+  return createHash('sha256').update(canonicalJson({ kind, request }), 'utf8').digest('hex');
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function aggregateRequestCost(
+  accounting: LlmUsageAccounting | undefined,
+  usage: NormalizedLlmUsage | undefined,
+  pricing: LlmPricingSnapshotInfo | undefined,
+): { estimatedCost?: string; currency?: string } {
+  if (!accounting?.requests.length) {
+    const estimatedCost = calculateEstimatedCost(usage, pricing);
+    return { estimatedCost, currency: estimatedCost !== undefined ? pricing?.currency : undefined };
+  }
+  const requests = accounting.requests.filter((r) => r.dispatched);
+  const priced = requests.filter((r) => r.estimatedCost !== undefined);
+  const currencies = new Set(priced.map((r) => r.currency));
+  if (!priced.length || currencies.size !== 1 || currencies.has(undefined)) return {};
+  // This is the known subtotal; accounting.estimatedCostCoverage records missing usage/prices.
+  return {
+    estimatedCost: addDecimalStrings(priced.map((r) => r.estimatedCost!)),
+    currency: priced[0]!.currency,
+  };
 }

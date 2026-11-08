@@ -18,7 +18,6 @@ const MAX_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 1_000_000;
 const MAX_DOCUMENT_LENGTH = 1_000_000;
-const MAX_PROMPT_LENGTH = 100_000;
 const MAX_ERROR_LENGTH = 500;
 const MAX_KIND_LENGTH = 80;
 const MAX_PROVIDER_RESPONSE_ID_LENGTH = 256;
@@ -35,6 +34,9 @@ const sessionMethods = new Set<WorkerMethod>([
   'production.defaults.get',
   'production.defaults.save',
   'scene.save',
+  'production.lifecycle.change',
+  'scene.list',
+  'shot.list',
   'shot.save',
   'shot.references.get',
   'shot.references.save',
@@ -54,6 +56,7 @@ const sessionMethods = new Set<WorkerMethod>([
   'chat.message.toMemory',
   'chat.message.toConstraint',
   'document.list',
+  'document.archived.list',
   'project.structure.get',
   'novel.structure.get',
   'document.get',
@@ -61,6 +64,8 @@ const sessionMethods = new Set<WorkerMethod>([
   'document.draft.save',
   'document.versions',
   'document.restore',
+  'document.archive',
+  'document.unarchive',
   'document.review.submit',
   'document.review.requestChanges',
   'document.review.reject',
@@ -167,6 +172,7 @@ const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'fa
 const documentKinds = new Set([
   'outline',
   'plan',
+  'constraint',
   'character',
   'scene',
   'prop',
@@ -557,11 +563,28 @@ export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
 ): Record<string, unknown> {
+  if (method === 'project.rename') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['name']);
+    requireString(params, 'name', MAX_TITLE_LENGTH);
+    return params;
+  }
   if (method.startsWith('shot.continuity.')) {
     const params = requireObject(input, 'params');
     const common = ['shotId', 'expectedRowVersion'];
     const fields: Record<string, string[]> = {
       'shot.continuity.get': ['shotId'],
+      'shot.continuity.assets': ['shotId', 'assetIds'],
+      'shot.continuity.import': ['shotId', 'sourcePaths'],
+      'shot.continuity.probe': ['shotId', 'videoAssetId'],
+      'shot.continuity.selection.confirm': [
+        ...common,
+        'frames',
+        'imageAssetIds',
+        'anchor',
+        'notes',
+      ],
+      'shot.continuity.references': [...common, 'assetIds', 'firstFrameAssetId'],
       'shot.continuity.preview': ['shotId', 'videoAssetId', 'timeMs'],
       'shot.continuity.confirm': [
         ...common,
@@ -572,8 +595,11 @@ export function validateSessionRequestParams(
         'mode',
         'notes',
       ],
+      'shot.continuity.reconfirm': [...common, 'expectedTargetRowVersion'],
       'shot.continuity.clear': common,
       'shot.continuity.firstFrame': [...common, 'assetId'],
+      'shot.continuity.reference': [...common, 'assetId', 'role'],
+      'shot.continuity.intent.save': [...common, 'notes'],
       'shot.continuity.prompt.prepare': [...common, 'kind', 'providerProfileId', 'modelId'],
       'shot.continuity.prompt.save': [...common, 'kind', 'prompt'],
     };
@@ -582,15 +608,82 @@ export function validateSessionRequestParams(
     requireId(params, 'shotId');
     if (fields[method].includes('expectedRowVersion'))
       requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+    if (method === 'shot.continuity.reconfirm')
+      requireInteger(params, 'expectedTargetRowVersion', 0, Number.MAX_SAFE_INTEGER);
+    const ids = (key: string) => {
+      const values = params[key];
+      if (!Array.isArray(values) || values.length > 12 || new Set(values).size !== values.length)
+        throw new RequestValidationError('Select at most 12 unique images.');
+      for (const value of values) requireId({ id: value }, 'id');
+      return values as string[];
+    };
+    if (method === 'shot.continuity.import') {
+      if (
+        !Array.isArray(params.sourcePaths) ||
+        !params.sourcePaths.length ||
+        params.sourcePaths.length > 12
+      )
+        throw new RequestValidationError('Select 1–12 local files.');
+      for (const path of params.sourcePaths) requireString({ path }, 'path', 4096);
+    }
+    if (method === 'shot.continuity.references') {
+      const selected = ids('assetIds');
+      if (params.firstFrameAssetId !== undefined) {
+        requireId(params, 'firstFrameAssetId');
+        if (!selected.includes(params.firstFrameAssetId as string))
+          throw new RequestValidationError('The first frame must be a selected image.');
+      }
+    }
+    if (method === 'shot.continuity.assets') ids('assetIds');
+    if (method === 'shot.continuity.selection.confirm') {
+      const images = ids('imageAssetIds');
+      if (
+        !Array.isArray(params.frames) ||
+        (!params.frames.length && !images.length) ||
+        params.frames.length + images.length > 12
+      )
+        throw new RequestValidationError('Select 1–12 reference images.');
+      const keys = new Set<string>();
+      for (const input of params.frames) {
+        const frame = requireObject(input, 'frame');
+        rejectUnknown(frame, ['videoAssetId', 'timeMs', 'sourceToken']);
+        requireId(frame, 'videoAssetId');
+        requireInteger(frame, 'timeMs', 0, 7200000);
+        requireString(frame, 'sourceToken', 64);
+        if (!/^[a-f0-9]{64}$/u.test(frame.sourceToken as string))
+          throw new RequestValidationError('Invalid frame source token.');
+        const key = `${String(frame.videoAssetId)}:${String(frame.timeMs)}`;
+        if (keys.has(key)) throw new RequestValidationError('Duplicate frame selection.');
+        keys.add(key);
+      }
+      const anchor = requireObject(params.anchor, 'anchor');
+      if ('assetId' in anchor) {
+        rejectUnknown(anchor, ['assetId']);
+        requireId(anchor, 'assetId');
+        if (!images.includes(anchor.assetId as string))
+          throw new RequestValidationError('Select an explicit anchor.');
+      } else {
+        rejectUnknown(anchor, ['videoAssetId', 'timeMs']);
+        requireId(anchor, 'videoAssetId');
+        requireInteger(anchor, 'timeMs', 0, 7200000);
+        if (!keys.has(`${String(anchor.videoAssetId)}:${String(anchor.timeMs)}`))
+          throw new RequestValidationError('Select an explicit anchor.');
+      }
+      requireString(params, 'notes', 4000, true);
+    }
     for (const key of ['videoAssetId', 'assetId', 'providerProfileId', 'modelId'])
-      if (fields[method].includes(key)) requireId(params, key);
+      if (
+        fields[method].includes(key) &&
+        !(method === 'shot.continuity.reference' && params[key] === undefined)
+      )
+        requireId(params, key);
     if (method === 'shot.continuity.preview') requireInteger(params, 'timeMs', 0, 7200000);
     if (method === 'shot.continuity.confirm') {
       requireString(params, 'sourceToken', 64);
       if (!/^[a-f0-9]{64}$/u.test(params.sourceToken as string))
         throw new RequestValidationError('Invalid frame source token.');
       requireString(params, 'notes', 4000, true);
-      requireEnum(params, 'mode', new Set(['continue', 'reframe']));
+      requireEnum(params, 'mode', new Set(['reference', 'continue', 'reframe']));
       requireInteger(params, 'anchorTimeMs', 0, 7200000);
       if (
         !Array.isArray(params.timesMs) ||
@@ -606,6 +699,9 @@ export function validateSessionRequestParams(
     }
     if (fields[method].includes('kind')) requireEnum(params, 'kind', new Set(['image', 'video']));
     if (method === 'shot.continuity.prompt.save') requireString(params, 'prompt', 20000);
+    if (method === 'shot.continuity.reference')
+      requireEnum(params, 'role', new Set(['reference', 'first-frame']));
+    if (method === 'shot.continuity.intent.save') requireString(params, 'notes', 4000, true);
     return params;
   }
   if (method.startsWith('project.runtime.')) {
@@ -734,13 +830,42 @@ export function validateSessionRequestParams(
     return params;
   }
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
-  if (method === 'characterVoiceReference.list' || method === 'characterVoiceReference.save') {
+  if (
+    method === 'characterVoiceReference.list' ||
+    method === 'characterVoiceReference.save' ||
+    method === 'characterVoiceReference.generate' ||
+    method === 'characterVoiceReference.prepare' ||
+    method === 'characterVoiceReference.confirm'
+  ) {
     const params = requireObject(input, 'params');
     rejectUnknown(
       params,
       method === 'characterVoiceReference.list'
         ? []
-        : ['characterDocumentId', 'audioId', 'expectedRowVersion'],
+        : method === 'characterVoiceReference.save'
+          ? ['characterDocumentId', 'audioId', 'expectedRowVersion']
+          : method === 'characterVoiceReference.generate'
+            ? [
+                'characterDocumentId',
+                'expectedVoiceVersionId',
+                'expectedRowVersion',
+                'text',
+                'costAcknowledged',
+                'voiceId',
+                'speed',
+                'pitch',
+                'emotion',
+              ]
+            : method === 'characterVoiceReference.prepare'
+              ? [
+                  'characterDocumentId',
+                  'expectedVoiceVersionId',
+                  'adapterKey',
+                  'providerProfileId',
+                  'modelId',
+                  'parameters',
+                ]
+              : ['confirmationToken', 'approved'],
     );
     if (method === 'characterVoiceReference.save') {
       requireId(params, 'characterDocumentId');
@@ -751,6 +876,42 @@ export function validateSessionRequestParams(
       )
         throw new RequestValidationError('声音样本版本无效。');
     }
+    if (method === 'characterVoiceReference.generate') {
+      requireId(params, 'characterDocumentId');
+      requireId(params, 'expectedVoiceVersionId');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      const text = requireString(params, 'text', 4000);
+      if (!text.trim()) throw new RequestValidationError('声音参考文本不能为空。');
+      requireBoolean(params, 'costAcknowledged');
+      if (params.voiceId !== undefined) requireString(params, 'voiceId', 256);
+      if (
+        params.speed !== undefined &&
+        (typeof params.speed !== 'number' ||
+          !Number.isFinite(params.speed) ||
+          params.speed < 0.5 ||
+          params.speed > 2)
+      )
+        throw new RequestValidationError('语速须在 0.5～2 之间。');
+      if (params.pitch !== undefined) requireInteger(params, 'pitch', -12, 12);
+      if (params.emotion !== undefined)
+        requireEnum(
+          params,
+          'emotion',
+          new Set(['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm']),
+        );
+    }
+    if (method === 'characterVoiceReference.prepare') {
+      requireId(params, 'characterDocumentId');
+      requireId(params, 'expectedVoiceVersionId');
+      requireString(params, 'adapterKey', 512);
+      requireId(params, 'providerProfileId');
+      requireString(params, 'modelId', 200);
+      requireObject(params.parameters, 'parameters');
+    }
+    if (method === 'characterVoiceReference.confirm') {
+      requireId(params, 'confirmationToken');
+      requireBoolean(params, 'approved');
+    }
     return params;
   }
   if (!sessionMethods.has(method)) return requireObject(input, 'params');
@@ -758,6 +919,7 @@ export function validateSessionRequestParams(
 
   switch (method) {
     case 'document.list':
+    case 'document.archived.list':
       rejectUnknown(params, []);
       break;
     case 'project.structure.get':
@@ -965,6 +1127,12 @@ export function validateSessionRequestParams(
       requireId(params, 'documentId');
       requireId(params, 'versionId');
       break;
+    case 'document.archive':
+    case 'document.unarchive':
+      rejectUnknown(params, ['documentId', 'expectedDocumentRowVersion']);
+      requireId(params, 'documentId');
+      requireInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      break;
     case 'document.save':
     case 'document.draft.save':
       validateDocumentDraft(params);
@@ -1000,6 +1168,11 @@ export function validateSessionRequestParams(
       optionalId(params, 'documentVersionId');
       requireInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
       optionalId(params, 'expectedPublishedVersionId');
+      break;
+    case 'document.unpublish':
+      rejectUnknown(params, ['documentId', 'expectedDocumentRowVersion']);
+      requireId(params, 'documentId');
+      requireInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
       break;
     case 'agent.task.createDocumentDraft':
       rejectUnknown(params, [
@@ -1153,7 +1326,7 @@ export function validateSessionRequestParams(
     case 'conversation.promptTemplate.save':
       rejectUnknown(params, ['conversationId', 'content', 'expectedRowVersion']);
       requireId(params, 'conversationId');
-      requireString(params, 'content', 20_000, true);
+      requireString(params, 'content', undefined, true);
       requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
       break;
     case 'maintenance.contextSnapshots.cleanup':
@@ -1182,7 +1355,7 @@ export function validateSessionRequestParams(
       requireId(params, 'conversationId');
       optionalId(params, 'replyToMessageId');
       const role = requireEnum(params, 'role', roles);
-      requireString(params, 'content', MAX_MESSAGE_LENGTH, true);
+      requireString(params, 'content', role === 'user' ? undefined : MAX_MESSAGE_LENGTH, true);
       const status = optionalEnum(params, 'status', messageStatuses) ?? 'complete';
       if (role !== 'assistant' && status !== 'complete') {
         throw new RequestValidationError('Only assistant messages may use a non-complete status.');
@@ -1236,6 +1409,25 @@ export function validateSessionRequestParams(
         )
           throw new RequestValidationError('场次制作分段镜头列表无效。');
       }
+      break;
+    }
+    case 'scene.list':
+      rejectUnknown(params, ['includeArchived']);
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'shot.list':
+      rejectUnknown(params, ['sceneId', 'includeArchived']);
+      requireId(params, 'sceneId');
+      optionalBoolean(params, 'includeArchived');
+      break;
+    case 'production.lifecycle.change': {
+      rejectUnknown(params, ['target', 'expectedRowVersion', 'archived']);
+      const target = requireObject(params.target, 'target');
+      rejectUnknown(target, ['kind', 'id']);
+      requireEnum(target, 'kind', new Set(['scene', 'shot']));
+      requireId(target, 'id');
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      requireBoolean(params, 'archived');
       break;
     }
     case 'scene.save':
@@ -1339,12 +1531,14 @@ export function validateSessionRequestParams(
           const seen = new Set<string>();
           bindings[field].forEach((raw: unknown, index: number) => {
             const entry = requireObject(raw, `${field}[${index}]`);
-            const documentField = field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
+            const documentField =
+              field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
             rejectUnknown(entry, [documentField, 'assetId']);
             requireId(entry, documentField);
             requireId(entry, 'assetId');
             const key = String(entry[documentField]);
-            if (seen.has(key)) throw new RequestValidationError(`${field} must contain unique documents.`);
+            if (seen.has(key))
+              throw new RequestValidationError(`${field} must contain unique documents.`);
             seen.add(key);
           });
         }
@@ -1402,20 +1596,18 @@ export function validateSessionRequestParams(
           const seen = new Set<string>();
           bindings[field].forEach((raw: unknown, index: number) => {
             const entry = requireObject(raw, `${field}[${index}]`);
-            const documentField = field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
+            const documentField =
+              field === 'characterBindings' ? 'characterDocumentId' : 'sourceDocumentId';
             rejectUnknown(entry, [documentField, 'assetId']);
             requireId(entry, documentField);
             requireId(entry, 'assetId');
             const key = String(entry[documentField]);
-            if (seen.has(key)) throw new RequestValidationError(`${field} must contain unique documents.`);
+            if (seen.has(key))
+              throw new RequestValidationError(`${field} must contain unique documents.`);
             seen.add(key);
           });
         }
-        for (const field of [
-          'characterAssetId',
-          'sceneAssetId',
-          'firstFrameAssetId',
-        ])
+        for (const field of ['characterAssetId', 'sceneAssetId', 'firstFrameAssetId'])
           optionalId(bindings, field);
         for (const field of ['characterAssetIds', 'sceneAssetIds']) {
           if (bindings[field] === undefined) continue;
@@ -1480,7 +1672,7 @@ export function validateSessionRequestParams(
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'conversationId');
-      optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
+      optionalString(params, 'originalPrompt');
       optionalBoolean(params, 'costNoticeAcknowledged');
       break;
     case 'media.generation.requestSubmission':
@@ -1553,7 +1745,7 @@ export function validateSessionRequestParams(
       requireId(params, 'modelId');
       optionalEnum(params, 'assetKind', new Set(['generated-video', 'shot-video', 'scene-video']));
       optionalId(params, 'conversationId');
-      optionalString(params, 'originalPrompt', MAX_PROMPT_LENGTH);
+      optionalString(params, 'originalPrompt');
       optionalBoolean(params, 'costNoticeAcknowledged');
       break;
     case 'video.generate.attachTask':
@@ -1597,7 +1789,7 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['conversationId', 'budgetTokens', 'prompt', 'idempotencyKey']);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
-      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireString(params, 'prompt');
       optionalId(params, 'idempotencyKey');
       break;
     case 'llm.generation.prepare':
@@ -1612,7 +1804,7 @@ export function validateSessionRequestParams(
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
-      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireString(params, 'prompt');
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
@@ -1632,14 +1824,27 @@ export function validateSessionRequestParams(
       optionalString(params, 'finishReason', MAX_FINISH_REASON_LENGTH);
       validateUsage(params.usage);
       break;
-    case 'llm.generation.fail':
-      validateIdentity(params, ['content', 'error', 'retryable', 'failureKind', 'usage']);
+    case 'llm.generation.fail': {
+      validateIdentity(params, [
+        'content',
+        'error',
+        'retryable',
+        'failureKind',
+        'providerErrorCode',
+        'providerStatus',
+        'usage',
+      ]);
       requireString(params, 'content', MAX_MESSAGE_LENGTH, true);
       requireString(params, 'error', MAX_ERROR_LENGTH);
       requireBoolean(params, 'retryable');
       optionalEnum(params, 'failureKind', new Set(['failed', 'interrupted']));
+      optionalInteger(params, 'providerStatus', 100, 599);
+      const providerErrorCode = optionalString(params, 'providerErrorCode', 128);
+      if (providerErrorCode && !/^[A-Za-z0-9_-]+$/.test(providerErrorCode))
+        throw new RequestValidationError('providerErrorCode is invalid.');
       validateUsage(params.usage);
       break;
+    }
     case 'llm.generation.get':
     case 'llm.generation.cancel':
       rejectUnknown(params, ['generationId']);
@@ -1680,11 +1885,12 @@ export function validateSessionRequestParams(
         'novelIntent',
         'selectedChapterIds',
         'targetPlatform',
+        'productionSkillId',
         'attachments',
       ]);
       requireId(params, 'conversationId');
       optionalInteger(params, 'budgetTokens', 1_000, 200_000);
-      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireString(params, 'prompt');
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
@@ -1699,6 +1905,7 @@ export function validateSessionRequestParams(
       validateAgentDocumentIntent(params.documentIntent);
       validateNovelWritingIntent(params.novelIntent);
       optionalEnum(params, 'targetPlatform', conversationTargetPlatforms);
+      optionalEnum(params, 'productionSkillId', new Set(['chapters-to-script', 'script-to-media']));
       break;
     case 'agent.run':
       rejectUnknown(params, [
@@ -1720,10 +1927,11 @@ export function validateSessionRequestParams(
         'targetPlatform',
         'researchMode',
         'novelIntent',
+        'productionSkillId',
       ]);
       requireId(params, 'conversationId');
       optionalEnum(params, 'taskExecution', new Set(['ordered', 'parallel']));
-      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireString(params, 'prompt');
       optionalEnum(
         params,
         'capability',
@@ -1750,6 +1958,7 @@ export function validateSessionRequestParams(
       optionalEnum(params, 'targetPlatform', conversationTargetPlatforms);
       optionalEnum(params, 'researchMode', agentResearchModes);
       validateNovelWritingIntent(params.novelIntent);
+      optionalEnum(params, 'productionSkillId', new Set(['chapters-to-script', 'script-to-media']));
       optionalEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
       optionalEnum(
         params,
@@ -1843,7 +2052,7 @@ export function validateSessionRequestParams(
       validateIdentity(params, ['taskId', 'mode', 'prompt']);
       requireId(params, 'taskId');
       requireEnum(params, 'mode', new Set(['document', 'novel-writing', 'short-drama']));
-      requireString(params, 'prompt', MAX_PROMPT_LENGTH);
+      requireString(params, 'prompt');
       break;
     case 'conversation.runtime.get':
       rejectUnknown(params, ['generationId']);
@@ -1861,7 +2070,7 @@ export function validateSessionRequestParams(
       rejectUnknown(params, ['generationId', 'content', 'idempotencyKey']);
       requireId(params, 'generationId');
       requireId(params, 'idempotencyKey');
-      requireString(params, 'content', 20000);
+      requireString(params, 'content');
       break;
     case 'conversation.runtime.confirm':
       rejectUnknown(params, ['generationId', 'confirmationToken', 'approved']);
@@ -1930,6 +2139,8 @@ const dubbingMethods = new Set<WorkerMethod>([
   'characterVoice.list',
   'characterVoice.save',
   'audio.import',
+  'audio.sample.prepare',
+  'audio.sample.confirm',
   'audio.list',
   'audio.get',
   'audio.mediaSource',
@@ -2027,6 +2238,18 @@ function validateDubbingRequest(method: WorkerMethod, input: unknown): Record<st
       optionalInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
       if (params.cueId !== undefined)
         requireInteger(params, 'expectedRowVersion', 1, Number.MAX_SAFE_INTEGER);
+      break;
+    case 'audio.sample.prepare':
+      rejectUnknown(params, ['adapterKey', 'providerProfileId', 'modelId', 'parameters']);
+      requireString(params, 'adapterKey', 512);
+      requireId(params, 'providerProfileId');
+      requireString(params, 'modelId', 200);
+      requireObject(params.parameters, 'parameters');
+      break;
+    case 'audio.sample.confirm':
+      rejectUnknown(params, ['confirmationToken', 'approved']);
+      requireId(params, 'confirmationToken');
+      requireBoolean(params, 'approved');
       break;
     case 'audio.list':
       rejectUnknown(params, ['deleted', 'kind']);
@@ -2442,14 +2665,14 @@ function rejectUnknown(value: Record<string, unknown>, allowed: string[]): void 
 function requireString(
   value: Record<string, unknown>,
   key: string,
-  maxLength: number,
+  maxLength?: number,
   allowEmpty = false,
 ): string {
   const input = value[key];
   if (typeof input !== 'string' || (!allowEmpty && !input.trim())) {
     throw new RequestValidationError(`${key} must be a non-empty string.`);
   }
-  if (input.length > maxLength) {
+  if (maxLength !== undefined && input.length > maxLength) {
     throw new RequestValidationError(`${key} exceeds the maximum length of ${maxLength}.`);
   }
   return input;
@@ -2458,7 +2681,7 @@ function requireString(
 function optionalString(
   value: Record<string, unknown>,
   key: string,
-  maxLength: number,
+  maxLength?: number,
 ): string | undefined {
   if (value[key] === undefined) return undefined;
   return requireString(value, key, maxLength);

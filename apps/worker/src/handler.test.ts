@@ -12,7 +12,6 @@ import {
 } from '@ai-video/contracts';
 import {
   handleRequest,
-  inferAgentDocumentIntent,
   inferUnifiedAgentCapability,
   resolveAgentRunWorkflow,
   modelMatchesUnifiedAgentRequest,
@@ -41,29 +40,6 @@ describe('inferUnifiedAgentCapability', () => {
     expect(inferUnifiedAgentCapability('帮我生成龙在天空翱翔的视频')).toBe('video');
     expect(inferUnifiedAgentCapability('能直接帮我生成角色三视图吗？')).toBe('image');
     expect(inferUnifiedAgentCapability('生成角色三视图提示词')).toBe('document');
-  });
-});
-
-describe('inferAgentDocumentIntent', () => {
-  it('routes explicit adapter parameter questions to the read-only schema tool', () => {
-    expect(inferAgentDocumentIntent('查看当前视频模型支持哪些参数')).toEqual({
-      operation: 'adapter.schema.get',
-    });
-    expect(inferAgentDocumentIntent('What fields does this adapter schema expose?')).toEqual({
-      operation: 'adapter.schema.get',
-    });
-    expect(inferAgentDocumentIntent('修改这个模型的参数 Schema')).toEqual({
-      operation: 'adapter.schema.propose',
-    });
-    expect(inferAgentDocumentIntent('查看这个适配器的 Schema 修改历史')).toEqual({
-      operation: 'adapter.schema.audit.list',
-    });
-  });
-
-  it('keeps ordinary drafting prompts on the document tool', () => {
-    expect(inferAgentDocumentIntent('根据这些参数写一份视频分镜文档')).toEqual({
-      operation: 'document.create_draft',
-    });
   });
 });
 
@@ -764,9 +740,9 @@ describe('worker handler', () => {
     expect(malformed).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
   });
 
-  it('rejects oversized prompts and invalid message role/status combinations', async () => {
-    const oversized = await handleRequest({
-      id: 'oversized-prompt',
+  it('accepts long prompts and rejects invalid message role/status combinations', async () => {
+    const longPrompt = await handleRequest({
+      id: 'long-prompt',
       protocolVersion: IPC_PROTOCOL_VERSION,
       method: 'llm.generate',
       params: { conversationId: 'conversation', prompt: 'x'.repeat(100_001) },
@@ -783,7 +759,7 @@ describe('worker handler', () => {
       },
     });
 
-    expect(oversized).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+    expect(longPrompt).toMatchObject({ ok: false, error: { code: 'LLM_NOT_CONFIGURED' } });
     expect(invalidMessage).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
   });
 
@@ -831,6 +807,84 @@ describe('worker handler', () => {
     expect(response).toMatchObject({
       ok: false,
       error: { code: 'INTERNAL_ERROR', message: 'assetKind must be a valid image asset kind.' },
+    });
+  });
+
+  it('accepts recoverable scene lifecycle operations through the IPC boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ai-video-scene-lifecycle-worker-'));
+    temporaryDirectories.push(root);
+    await handleRequest({
+      id: 'lifecycle-project',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'project.create',
+      params: { name: 'Lifecycle', rootPath: root },
+    });
+    const scene = await handleRequest({
+      id: 'lifecycle-scene',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'scene.save',
+      params: { title: '可恢复' },
+    });
+    expect(scene.ok).toBe(true);
+    if (!scene.ok) return;
+    const item = scene.result as SceneInfo;
+    const request = parseRequest({
+      id: 'archive-scene',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'production.lifecycle.change',
+      params: {
+        target: { kind: 'scene', id: item.id },
+        expectedRowVersion: item.rowVersion,
+        archived: true,
+      },
+    });
+    expect(request).toMatchObject({ method: 'production.lifecycle.change' });
+    if (!('method' in request)) throw new Error('IPC parser rejected the lifecycle method');
+    const archived = await handleRequest(request);
+    expect(archived).toMatchObject({
+      ok: true,
+      result: { id: item.id, rowVersion: item.rowVersion + 1 },
+    });
+    if (archived.ok) expect((archived.result as SceneInfo).archivedAt).toEqual(expect.any(String));
+    expect(
+      await handleRequest({
+        id: 'active-scenes',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'scene.list',
+        params: {},
+      }),
+    ).toMatchObject({ ok: true, result: [] });
+    expect(
+      await handleRequest({
+        id: 'archived-scenes',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'scene.list',
+        params: { includeArchived: true },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: [{ id: item.id, rowVersion: item.rowVersion + 1 }],
+    });
+    expect(
+      await handleRequest({
+        id: 'restore-scene',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'production.lifecycle.change',
+        params: {
+          target: { kind: 'scene', id: item.id },
+          expectedRowVersion: item.rowVersion + 1,
+          archived: false,
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { id: item.id, archivedAt: undefined, rowVersion: item.rowVersion + 2 },
+    });
+    await handleRequest({
+      id: 'close-lifecycle',
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      method: 'project.close',
+      params: {},
     });
   });
 

@@ -5,7 +5,13 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/dist-sidecar/**', '**/target/**', '**/coverage/**', '.m2-ui-*/**'],
+    ignores: [
+      '**/dist/**',
+      '**/dist-sidecar/**',
+      '**/target/**',
+      '**/coverage/**',
+      '**/.m2-ui-*/**',
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked.map((config) => ({

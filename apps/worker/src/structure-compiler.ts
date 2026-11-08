@@ -148,7 +148,8 @@ export class ProjectStructureCompiler {
     sources.sort((left, right) => left.id.localeCompare(right.id));
     const sceneCount = scalarCount(
       database,
-      'SELECT COUNT(*) AS count FROM scenes WHERE project_id = ?',
+      `SELECT COUNT(*) AS count FROM scenes WHERE project_id = ?
+       ${includeArchived ? '' : 'AND archived_at IS NULL'}`,
       project.id,
     );
     const shotCount = scalarCount(
@@ -156,12 +157,14 @@ export class ProjectStructureCompiler {
       `SELECT COUNT(*) AS count
        FROM shots
        INNER JOIN scenes ON scenes.id = shots.scene_id
-       WHERE scenes.project_id = ?`,
+       WHERE scenes.project_id = ?
+       ${includeArchived ? '' : 'AND scenes.archived_at IS NULL AND shots.archived_at IS NULL'}`,
       project.id,
     );
     const assetCount = scalarCount(
       database,
-      'SELECT COUNT(*) AS count FROM assets WHERE project_id = ?',
+      `SELECT COUNT(*) AS count FROM assets WHERE project_id = ?
+       ${includeArchived ? '' : 'AND deleted_at IS NULL'}`,
       project.id,
     );
 

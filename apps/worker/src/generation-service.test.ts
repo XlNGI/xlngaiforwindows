@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerGenerationMetric } from '@ai-video/contracts';
-import type { LlmProvider, LlmStreamRequest } from '@ai-video/llm';
+import type { LlmProvider, LlmStreamRequest, LlmStreamResult } from '@ai-video/llm';
 import { ContentService } from './content-service.js';
 import { ContextService } from './context-service.js';
 import {
@@ -51,6 +51,130 @@ async function setup(
 }
 
 describe('GenerationService', () => {
+  it('flushes and fences native streaming on suspend without persisting user cancellation', async () => {
+    const f = await setup(
+      {
+        status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+        stream: () => Promise.reject(new Error('No Provider request')),
+      },
+      {
+        resolveLlmSelection: () => ({
+          providerProfileId: 'profile',
+          modelId: 'model',
+          providerName: 'Mock',
+          modelName: 'Mock',
+          remoteModelId: 'mock',
+          protocol: 'openai-responses',
+          baseUrl: 'https://mock.invalid',
+        }),
+      },
+    );
+    const run = f.generations.prepare({
+      conversationId: f.conversation.id,
+      prompt: 'Continue work',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    f.generations.observe({ ...run.stream, content: 'First' });
+    f.generations.observe({ ...run.stream, content: 'First last unflushed content' });
+    f.generations.suspend();
+    f.generations.suspend();
+    expect(
+      f.content
+        .listMessages({ conversationId: f.conversation.id })
+        .items.find((m) => m.role === 'assistant'),
+    ).toMatchObject({ status: 'streaming', content: 'First last unflushed content' });
+    expect(f.generations.get(run.stream.generationId).status).toBe('streaming');
+    expect(() =>
+      f.generations.observe({ ...run.stream, content: 'First last unflushed content stale' }),
+    ).toThrow('Stale');
+    f.projects.close();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    f.projects.open(f.projectRoot);
+    expect(
+      f.content
+        .listMessages({ conversationId: f.conversation.id })
+        .items.find((m) => m.role === 'assistant'),
+    ).toMatchObject({ status: 'streaming', content: 'First last unflushed content' });
+  });
+
+  it('preserves partial legacy output and ignores completion after suspend and database close', async () => {
+    let finish!: (value: LlmStreamResult) => void;
+    const f = await setup({
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: true }),
+      stream: async (request) => {
+        request.onDelta('Saved partial output');
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    const run = f.generations.generate(f.conversation.id, 'Continue');
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    f.generations.suspend();
+    f.projects.close();
+    finish({
+      content: 'Late stale replacement',
+      providerResponseId: 'late',
+      model: 'legacy',
+      toolCalls: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    f.projects.open(f.projectRoot);
+    expect(f.generations.get(run.generationId).status).toBe('streaming');
+    expect(
+      f.content
+        .listMessages({ conversationId: f.conversation.id })
+        .items.find((m) => m.role === 'assistant'),
+    ).toMatchObject({ status: 'streaming', content: 'Saved partial output' });
+  });
+
+  it('stores long requests and repeated supplements without cumulative character or message caps', async () => {
+    const { content, conversation, generations } = await setup(
+      {
+        status: () => ({ key: 'test', name: 'Test', model: 'test', configured: false }),
+        stream: () => Promise.reject(new Error('No Provider')),
+      },
+      {
+        resolveLlmSelection: () => ({
+          providerProfileId: 'profile',
+          modelId: 'model',
+          providerName: 'Test',
+          modelName: 'Test',
+          remoteModelId: 'test',
+          protocol: 'openai-chat-completions',
+          baseUrl: 'https://mock.invalid',
+        }),
+      },
+    );
+    const prompt = '原始要求'.repeat(26000);
+    const run = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const frozen = generations.runtime(run.stream);
+    const supplement = '完整补充要求'.repeat(4000);
+    const saved = generations.supplement(run.stream.generationId, supplement, 'long-input');
+    expect(saved.content).toBe(supplement);
+    expect(generations.supplement(run.stream.generationId, supplement, 'long-input').id).toBe(
+      saved.id,
+    );
+    for (let index = 0; index < 33; index++)
+      generations.supplement(run.stream.generationId, `新增补充${index}`, `supplement-${index}`);
+    const consumed = generations.consumeSupplements(run.stream.generationId);
+    expect(consumed).toHaveLength(34);
+    expect(consumed[0]!.content).toBe(supplement);
+    expect(generations.consumeSupplements(run.stream.generationId)).toEqual([]);
+    expect(generations.runtime(run.stream)).toEqual(frozen);
+    expect(
+      content
+        .listMessages({ conversationId: conversation.id })
+        .items.find((message) => message.id === run.generation.userMessage.id)?.content,
+    ).toBe(prompt);
+  });
+
   it.each(['failed', 'cancelled'] as const)(
     'retains late usage after %s without reopening the request or duplicating charges',
     async (status) => {
@@ -744,7 +868,7 @@ describe('GenerationService', () => {
       '章节勾选只是可选快捷入口，不是 Agent 检索的前置条件',
     );
     expect(runtime.systemInstruction).toContain('未列出不代表不存在');
-    expect(runtime.systemInstruction).toContain('遵守工具返回的剩余预算与硬限制');
+    expect(runtime.systemInstruction).toContain('遵循工具 schema 的单批大小和参数约束');
     expect(runtime.systemInstruction).toContain('不得凭常识编造项目剧情');
     expect(runtime.systemInstruction).not.toContain('代表资料库暂无该具体记录');
     expect(runtime.systemInstruction).not.toContain('至多读取 1~2 个');
@@ -857,7 +981,10 @@ describe('GenerationService', () => {
       baseUrl: 'https://mock.invalid/v1',
     }));
     const selectionResolver: LlmSelectionResolver = { resolveLlmSelection };
-    const { content, conversation, generations } = await setup(provider, selectionResolver);
+    const { content, conversation, generations, projects } = await setup(
+      provider,
+      selectionResolver,
+    );
     const params = {
       conversationId: conversation.id,
       prompt: 'Only once',
@@ -866,10 +993,20 @@ describe('GenerationService', () => {
       idempotencyKey: '123e4567-e89b-42d3-a456-426614174099',
     };
     const first = generations.prepare(params);
-    const duplicate = generations.prepare(params);
+    const anotherWorker = new GenerationService(
+      projects,
+      content,
+      new ContextService(projects),
+      provider,
+      { selectionResolver },
+    );
+    const duplicate = anotherWorker.prepare(params);
 
     expect(duplicate.generation.generationId).toBe(first.generation.generationId);
     expect(content.listMessages({ conversationId: conversation.id }).items).toHaveLength(2);
+    expect(() => generations.prepare({ ...params, prompt: 'Changed request' })).toThrow(
+      'IDEMPOTENCY_KEY_REUSED',
+    );
     generations.complete({ ...first.stream, content: 'Done' });
     expect(generations.prepare(params).generation).toMatchObject({
       generationId: first.generation.generationId,
@@ -877,6 +1014,40 @@ describe('GenerationService', () => {
       assistantMessage: { content: 'Done' },
     });
     expect(resolveLlmSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to replay a legacy idempotency key without a saved request fingerprint', async () => {
+    const provider: LlmProvider = {
+      status: () => ({ key: 'legacy', name: 'Legacy', model: 'legacy', configured: false }),
+      stream: () => Promise.reject(new Error('legacy provider must not run')),
+    };
+    const selectionResolver: LlmSelectionResolver = {
+      resolveLlmSelection: () => ({
+        providerProfileId: '123e4567-e89b-42d3-a456-426614174000',
+        providerName: 'Local Mock',
+        modelId: '123e4567-e89b-42d3-a456-426614174001',
+        modelName: 'Mock Model',
+        remoteModelId: 'mock-model',
+        protocol: 'openai-responses',
+        baseUrl: 'https://mock.invalid/v1',
+      }),
+    };
+    const { conversation, generations, projects } = await setup(provider, selectionResolver);
+    const params = {
+      conversationId: conversation.id,
+      prompt: 'Legacy request',
+      providerProfileId: 'profile-selection',
+      modelId: 'model-selection',
+      idempotencyKey: '123e4567-e89b-42d3-a456-426614174098',
+    };
+    const first = generations.prepare(params);
+    projects.access(true, (database) =>
+      database
+        .prepare('UPDATE llm_generations SET request_fingerprint=NULL WHERE id=?')
+        .run(first.generation.generationId),
+    );
+
+    expect(() => generations.prepare(params)).toThrow('IDEMPOTENCY_KEY_UNVERIFIABLE');
   });
 
   it('rejects callbacks from an earlier open session of the same project', async () => {
@@ -1351,4 +1522,64 @@ it('waits for an ordered task and freezes its completed result without occupying
   await expect(generations.waitUntilReady(d.stream, new AbortController().signal)).rejects.toThrow(
     'explicit retry',
   );
+});
+
+it('recalculates capabilities on model switch and charges each request at its own model price', async () => {
+  const selectionResolver: LlmSelectionResolver = {
+    resolveLlmSelection: (profile, model) => ({
+      providerProfileId: profile,
+      modelId: model,
+      providerName: profile,
+      modelName: model,
+      remoteModelId: model,
+      protocol: 'openai-responses',
+      baseUrl: 'https://mock.invalid',
+      modelCapabilities: {
+        modelId: model,
+        contextWindow: model === 'large' ? 1000000 : 64000,
+        maxOutputTokens: 4096,
+        capabilitySource: 'manual_config',
+      },
+      pricingSnapshot: {
+        currency: 'USD',
+        unitTokens: 1000,
+        inputPrice: model === 'large' ? '3' : '1',
+        outputPrice: model === 'large' ? '4' : '2',
+        configuredAt: '2026-11-05',
+      },
+    }),
+  };
+  const { generations, conversation } = await setup(
+    {
+      status: () => ({ key: 'x', name: 'x', model: 'x', configured: false }),
+      stream: () => Promise.reject(new Error('native')),
+    },
+    selectionResolver,
+  );
+  const prepared = generations.prepare({
+    conversationId: conversation.id,
+    prompt: 'task',
+    providerProfileId: 'p',
+    modelId: 'small',
+  });
+  for (const [id, model] of [
+    ['one', 'small'],
+    ['two', 'large'],
+  ]) {
+    if (model === 'large') generations.switchConversationModel(conversation.id, 'p', 'large');
+    expect(generations.runtime(prepared.stream).modelCapabilities?.contextWindow).toBe(
+      model === 'large' ? 1000000 : 64000,
+    );
+    generations.recordProviderRequest(prepared.stream, id!, 'dispatching', {});
+    generations.recordProviderUsage(prepared.stream, id!, { inputTokens: 100, outputTokens: 10 });
+    generations.recordProviderRequest(prepared.stream, id!, 'complete', {});
+  }
+  generations.complete({ ...prepared.stream, content: 'done' });
+  const attempt = generations.get(prepared.stream.generationId).assistantMessage.attempt!;
+  expect(attempt.estimatedCost).toBe('0.46');
+  expect(attempt.usage?.inputTokens).toBe(200);
+  expect(attempt.accounting?.requests.map((r) => r.modelSelection?.modelId)).toEqual([
+    'small',
+    'large',
+  ]);
 });

@@ -108,6 +108,11 @@ function VoiceProfileEditor({
       if (!active.current) return;
       setProfile(saved);
       setMessage('声音已保存。可在场次配音中录入台词、试听并采用。');
+      window.dispatchEvent(
+        new CustomEvent('character-voice-profile-updated', {
+          detail: { projectId, characterDocumentId },
+        }),
+      );
       onSaved?.();
     } catch (error) {
       if (active.current) setMessage(error instanceof Error ? error.message : '保存声音失败。');

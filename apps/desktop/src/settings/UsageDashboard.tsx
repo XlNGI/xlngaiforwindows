@@ -350,9 +350,22 @@ export function UsageDashboard() {
                       <span>
                         输入 {formatOptionalInteger(request.usage?.inputTokens)} · 其中缓存{' '}
                         {formatOptionalInteger(request.usage?.cachedInputTokens)} · 输出{' '}
-                        {formatOptionalInteger(request.usage?.outputTokens)} ·{' '}
+                        {formatOptionalInteger(request.usage?.outputTokens)} · 其中推理{' '}
+                        {formatOptionalInteger(request.usage?.reasoningTokens)} ·{' '}
                         {coverageLabel(request.coverage)}
                       </span>
+                      {request.errorCode && (
+                        <span>
+                          {request.failureOrigin === 'local_context'
+                            ? '本地上下文检查未通过'
+                            : request.failureOrigin === 'provider'
+                              ? '供应商请求失败'
+                              : '请求失败'}
+                          {' · '}
+                          {request.errorCode}
+                          {!request.dispatched ? ' · 未发送供应商' : ''}
+                        </span>
+                      )}
                       <span>
                         本地估算{' '}
                         {request.estimatedCost !== undefined
@@ -363,15 +376,47 @@ export function UsageDashboard() {
                           : ''}
                       </span>
                       {request.context && (
-                        <span>
-                          上下文约 {formatInteger(request.context.estimatedInputTokens)} /{' '}
-                          {formatInteger(request.context.contextWindowTokens)} · 输出预留{' '}
-                          {formatInteger(request.context.reservedOutputTokens)} ·{' '}
-                          {request.context.windowSource === 'contract'
-                            ? '模型合同窗口'
-                            : '保守回退窗口'}{' '}
-                          · 已整理 {request.context.compactionCount} 次
-                        </span>
+                        <div>
+                          <span>
+                            请求组装估算 {formatInteger(request.context.estimatedInputTokens)} ·{' '}
+                            {request.context.limitEnforcement === 'advisory_fallback'
+                              ? `模型能力未知 · 规划参考 ${formatInteger(request.context.contextWindowTokens)}（不作为请求硬限制）`
+                              : `窗口 ${formatInteger(request.context.contextWindowTokens)} · ${request.context.windowSource === 'contract' ? '模型配置' : '历史回退限制'}`}{' '}
+                            · 输出预留 {formatInteger(request.context.reservedOutputTokens)} ·
+                            已整理 {request.context.compactionCount} 次
+                          </span>
+                          {request.context.limitEnforcement !== 'advisory_fallback' &&
+                            request.context.maximumInputBudgetTokens !== undefined && (
+                              <span>
+                                初始输入预算{' '}
+                                {formatInteger(request.context.initialInputBudgetTokens ?? 0)} ·
+                                自适应输入上限{' '}
+                                {formatInteger(request.context.maximumInputBudgetTokens)} · 安全余量{' '}
+                                {formatInteger(request.context.safetyTokens ?? 0)}
+                                {!!request.context.deficitTokens &&
+                                  ` · 缺口 ${formatInteger(request.context.deficitTokens)}`}
+                              </span>
+                            )}
+                          {request.context.nativeWire && (
+                            <span>
+                              最终协议估算{' '}
+                              {formatInteger(request.context.nativeWire.estimatedInputTokens)} ·
+                              系统 {formatInteger(request.context.nativeWire.systemTokens)} ·
+                              工具定义 {formatInteger(request.context.nativeWire.toolSchemaTokens)}{' '}
+                              · 消息 {formatInteger(request.context.nativeWire.messageTokens)} ·
+                              图片 {formatInteger(request.context.nativeWire.imageTokens)}
+                            </span>
+                          )}
+                          <details>
+                            <summary>上下文分段估计</summary>
+                            {Object.entries(request.context.sections).map(([name, section]) => (
+                              <div key={name}>
+                                {contextSectionLabel(name)}：约{' '}
+                                {formatInteger(section.estimatedTokens)} Token
+                              </div>
+                            ))}
+                          </details>
+                        </div>
                       )}
                       <time>
                         {new Date(request.startedAt).toLocaleString()}
@@ -388,6 +433,25 @@ export function UsageDashboard() {
         )}
       </div>
     </section>
+  );
+}
+
+function contextSectionLabel(name: string): string {
+  return (
+    (
+      {
+        system: '系统与冻结目录',
+        tools: '工具定义',
+        context: '资料目录',
+        user: '用户请求与会话要求',
+        history: '任务历史',
+        taskState: '持久任务状态与当前工作资料',
+        toolResults: '工具结果',
+        supplements: '用户补充',
+        attachments: '附件文本',
+        protocolAndImages: '协议与图片估计',
+      } as Record<string, string>
+    )[name] ?? name
   );
 }
 

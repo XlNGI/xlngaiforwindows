@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProductionAuthoringIR } from '@ai-video/contracts';
 import { getAdapterCatalog } from './index.js';
-import { compileProductionParameters, parseProductionDefaults } from './production.js';
+import {
+  compileProductionParameters,
+  parseProductionDefaults,
+  resolveProductionDuration,
+} from './production.js';
 
 const adapter = (contractId = 'cn.qwen.wan3-0-video') =>
   getAdapterCatalog().adapters.find(
@@ -12,6 +16,48 @@ const adapter = (contractId = 'cn.qwen.wan3-0-video') =>
   )!;
 
 describe('IR to Provider parameter mapping', () => {
+  it('chooses the shortest valid request and reports padding without stretching authored content', () => {
+    const descriptor = structuredClone(adapter());
+    descriptor.parameterSchema.properties.duration = {
+      type: 'integer',
+      title: '时长',
+      enum: [5, 10, 15],
+    };
+    const ir: ProductionAuthoringIR = {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: '0–2.2秒，自然伸手拿笔，动作稳定。',
+      timing: {
+        estimatedDurationSeconds: 2.2,
+        rationale: '自然完成拿笔',
+        beats: [{ kind: 'action', startSeconds: 0, endSeconds: 2.2, description: '拿笔并稳定' }],
+      },
+    };
+    const before = structuredClone(ir);
+    const compiled = compileProductionParameters(ir, descriptor);
+    expect(compiled.parameters).toMatchObject({ prompt: ir.prompt, duration: 5 });
+    expect(compiled.issues).toEqual([]);
+    expect(compiled.notices).toMatchObject([{ code: 'MODEL_DURATION_PADDING' }]);
+    expect(ir).toEqual(before);
+    expect(resolveProductionDuration(descriptor, 10)).toBe(10);
+    expect(resolveProductionDuration(descriptor, 16)).toBeUndefined();
+    descriptor.parameterSchema.properties.duration = {
+      type: 'number',
+      title: '时长',
+      minimum: 1,
+      maximum: 15,
+    };
+    expect(resolveProductionDuration(descriptor, 2.2)).toBe(2.2);
+    descriptor.parameterSchema.properties.duration.minimum = 2.5;
+    expect(resolveProductionDuration(descriptor, 2.2)).toBe(2.5);
+    descriptor.parameterSchema.properties.duration = {
+      type: 'string',
+      title: '时长',
+      enum: ['5', '10', '15'],
+    };
+    expect(compileProductionParameters(ir, descriptor).parameters.duration).toBe('5');
+    expect(resolveProductionDuration(descriptor, 0)).toBeUndefined();
+  });
   it.each(['cn.qwen.wan3-0-video', 'cn.bytedance.seedance2-0.video', 'cn.minimax.h3.video'])(
     'preserves authored text and ignores open data for %s',
     (contractId) => {

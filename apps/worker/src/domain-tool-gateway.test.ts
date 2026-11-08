@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -91,6 +91,52 @@ const plan = {
 };
 
 describe('DomainToolGateway', () => {
+  it('rolls back a saved document if deliverable completion fails, then retries without a duplicate', async () => {
+    const { project, projectId, projectSessionId, conversationId } = await setup();
+    const plans = new TaskPlanService(project);
+    plans.submitPlanOnly({ taskId: 'task-1', candidate: plan, idempotencyKey: 'pi-plan-task-1' });
+    const gateway = new DomainToolGateway(
+      project,
+      plans,
+      new DocumentWorkflowService(project),
+      new ChangeSetService(project),
+      {
+        taskId: 'task-1',
+        projectId,
+        projectSessionId,
+        conversationId,
+      },
+    );
+    const tool = gateway
+      .tools(plans.availableToolGrants('task-1'))
+      .find((t) => t.name === 'novel.episode.submit_draft')!;
+    const original = plans.recordDeliverableSuccess.bind(plans);
+    const failure = vi.spyOn(plans, 'recordDeliverableSuccess').mockImplementationOnce((params) => {
+      original(params);
+      throw new Error('injected completion failure');
+    });
+    const args = { title: '原子交付', contentMarkdown: '完整大纲' };
+    await expect(tool.execute('call-failed', args)).rejects.toThrow('injected completion failure');
+    expect(
+      project.access(false, (db) =>
+        db.prepare("SELECT COUNT(*) AS n FROM documents WHERE title='原子交付'").get(),
+      ),
+    ).toEqual({ n: 0 });
+    failure.mockRestore();
+    const saved = await tool.execute('call-retry', args);
+    const workflow = new DocumentWorkflowService(project);
+    const changes = workflow.getTask({ taskId: 'task-1' }).resourceChanges;
+    expect(changes?.documentSequence).toBeGreaterThan(0);
+    const replay = await tool.execute('call-other', args);
+    expect(workflow.getTask({ taskId: 'task-1' }).resourceChanges).toEqual(changes);
+    expect(saved.details).toMatchObject({ execution: { effect: 'created' } });
+    expect(replay.details).toMatchObject({ execution: { replayed: true } });
+    expect(
+      project.access(false, (db) =>
+        db.prepare("SELECT COUNT(*) AS n FROM documents WHERE title='原子交付'").get(),
+      ),
+    ).toEqual({ n: 1 });
+  });
   it('saves multiple editable documents and scene drafts under one task without approval', async () => {
     const { project, projectId, projectSessionId, conversationId } = await setup();
     const plans = new TaskPlanService(project);
@@ -174,7 +220,7 @@ describe('DomainToolGateway', () => {
     ]);
     await expect(
       outline.execute('call-outline', { title: '第 1 集大纲', contentMarkdown: '# 大纲' }),
-    ).rejects.toThrow(/already completed/);
+    ).resolves.toMatchObject({ details: { status: 'succeeded' } });
     expect(
       project.access(
         false,
@@ -188,6 +234,50 @@ describe('DomainToolGateway', () => {
           ).status,
       ),
     ).toBe('succeeded');
+  });
+
+  it('creates plot constraint documents as project documents with the constraint kind', async () => {
+    const { project, projectId, projectSessionId, conversationId } = await setup();
+    project.access(true, (database) => {
+      database.prepare('UPDATE agent_tasks SET request_snapshot_json = ? WHERE id = ?').run(
+        JSON.stringify({
+          agentMode: 'short-drama',
+          selectedChapterIds: ['chapter-1'],
+          targetPlatform: 'generic-image',
+        }),
+        'task-1',
+      );
+    });
+    const plans = new TaskPlanService(project);
+    const workflow = new DocumentWorkflowService(project);
+    plans.submitPlanOnly({
+      taskId: 'task-1',
+      candidate: {
+        ...plan,
+        targetPlatform: 'generic-image' as const,
+        deliverables: [{ kind: 'production-notes' as const, required: true, dependsOn: [] }],
+      },
+    });
+    const gateway = new DomainToolGateway(project, plans, workflow, new ChangeSetService(project), {
+      taskId: 'task-1',
+      projectId,
+      projectSessionId,
+      conversationId,
+    });
+    const createDraft = gateway
+      .tools(plans.availableToolGrants('task-1'))
+      .find((tool) => tool.name === 'document.create_draft')!;
+
+    await createDraft.execute('call-plot-constraint', {
+      title: '剧情约束',
+      contentMarkdown: '林澈不得在第一幕得知灯塔秘密。',
+      documentKind: 'constraint',
+    });
+
+    expect(workflow.listDocuments()).toEqual([
+      expect.objectContaining({ kind: 'constraint', title: '剧情约束' }),
+    ]);
+    expect(new ContentService(project).listConstraints()).toEqual([]);
   });
 
   it('rejects malformed structure before creating a change set', async () => {
@@ -223,5 +313,35 @@ describe('DomainToolGateway', () => {
           ).count,
       ),
     ).toBe(0);
+  });
+
+  it('continues after more than three schema rejections and audits them without executing tools', async () => {
+    const { project, projectId, projectSessionId, conversationId } = await setup();
+    const plans = new TaskPlanService(project);
+    plans.submitPlanOnly({ taskId: 'task-1', candidate: plan });
+    const gateway = new DomainToolGateway(
+      project,
+      plans,
+      new DocumentWorkflowService(project),
+      new ChangeSetService(project),
+      { taskId: 'task-1', projectId, projectSessionId, conversationId },
+    );
+    const draft = gateway
+      .tools(plans.availableToolGrants('task-1'))
+      .find((tool) => tool.name === 'novel.episode.submit_draft')!;
+
+    for (let index = 0; index < 4; index += 1) expect(() => draft.prepareArguments!({})).toThrow();
+
+    const rows = project.access(false, (database) => ({
+      failures: database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM agent_task_events WHERE task_id=? AND event_type='tool_validation_failed'",
+        )
+        .get('task-1') as { count: number },
+      calls: database
+        .prepare('SELECT COUNT(*) AS count FROM agent_tool_calls WHERE task_id=?')
+        .get('task-1') as { count: number },
+    }));
+    expect(rows).toEqual({ failures: { count: 4 }, calls: { count: 0 } });
   });
 });

@@ -8,6 +8,7 @@ import { DocumentWorkflowError, DocumentWorkflowService } from './document-workf
 import { ProjectService } from './project-service.js';
 import { createRepositories } from '@ai-video/persistence';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
+import { NovelService } from './novel-service.js';
 
 const directories: string[] = [];
 const services: ProjectService[] = [];
@@ -41,7 +42,89 @@ async function setup() {
   return { projects, content, workflow, contexts, conversation, user, assistant };
 }
 
+function expectWorkflowError(operation: () => unknown, code: DocumentWorkflowError['code']): void {
+  let error: unknown;
+  try {
+    operation();
+  } catch (reason) {
+    error = reason;
+  }
+  expect(error).toBeInstanceOf(DocumentWorkflowError);
+  expect(error).toMatchObject({ code });
+}
+
 describe('DocumentWorkflowService', () => {
+  it('merges repeated library evidence while preserving versions, status, structure and read provenance', async () => {
+    const { projects, workflow, assistant } = await setup();
+    const { task } = workflow.createDocumentDraftFromMessage({ messageId: assistant.id });
+    const base = {
+      citationLabel: 'L1',
+      title: '设定',
+      sourceType: 'document',
+      sourceId: 'source',
+      versionId: 'v1',
+      sourceStatus: 'draft',
+      structureNodeId: 'node-1',
+      structurePath: ['设定', '人物'],
+    };
+    const entries = [
+      ['library.search', { sources: [base] }],
+      ...Array.from({ length: 14 }, (_, i) => [
+        'library.read',
+        { ...base, citationLabel: `L${i + 2}`, status: 'read' },
+      ]),
+      [
+        'library.search',
+        { sources: [{ ...base, citationLabel: 'L99', structurePath: undefined }] },
+      ],
+      ['library.read', { ...base, versionId: 'v2' }],
+      ['library.read', { ...base, sourceStatus: 'published' }],
+      ['library.read', { ...base, structureNodeId: 'node-2' }],
+    ] as const;
+    projects.access(true, (database, project) => {
+      const insert = database.prepare(`INSERT INTO agent_tool_calls
+        (id, project_id, task_id, tool_name, arguments_summary_json, normalized_arguments_hash,
+          status, result_summary_json, created_at, redaction_state, idempotency_key)
+        VALUES (?, ?, ?, ?, '{}', 'hash', 'succeeded', ?, ?, 'native', ?)`);
+      entries.forEach(([tool, result], i) =>
+        insert.run(
+          `source-call-${i}`,
+          project.id,
+          task.id,
+          tool,
+          JSON.stringify(result),
+          new Date(i * 1000).toISOString(),
+          `source-call-${i}`,
+        ),
+      );
+    });
+    const sources = workflow.getTask({ taskId: task.id }).librarySources!;
+    expect(sources).toHaveLength(4);
+    expect(sources[0]).toMatchObject({
+      citationLabel: 'L99',
+      toolName: 'library.read',
+      versionId: 'v1',
+      status: 'draft',
+      structurePath: base.structurePath,
+    });
+    expect(
+      sources.slice(1).map((source) => [source.versionId, source.status, source.structureNodeId]),
+    ).toEqual([
+      ['v2', 'draft', 'node-1'],
+      ['v1', 'published', 'node-1'],
+      ['v1', 'draft', 'node-2'],
+    ]);
+    expect(
+      projects.access(false, (database) =>
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM agent_tool_calls WHERE task_id = ? AND tool_name IN ('library.search', 'library.read')",
+          )
+          .get(task.id),
+      ),
+    ).toEqual({ count: entries.length });
+  });
+
   it('stores open prop IR with immutable versions, restores it, and clears it when prose is edited alone', async () => {
     const { workflow } = await setup();
     const originalIR = {
@@ -117,6 +200,128 @@ describe('DocumentWorkflowService', () => {
       '小说章节正文',
     );
   });
+
+  it('archives and restores project documents with row-version checks and lifecycle audits', async () => {
+    const { projects, workflow } = await setup();
+    const created = workflow.saveDraft({ title: '临时大纲', contentMarkdown: '# 临时大纲' });
+
+    const archived = workflow.archiveDocument({
+      documentId: created.id,
+      expectedDocumentRowVersion: created.rowVersion,
+    });
+
+    expect(archived.lifecycleStatus).toBe('archived');
+    expect(archived.rowVersion).toBe(created.rowVersion + 1);
+    expect(workflow.listDocuments().some((item) => item.id === created.id)).toBe(false);
+    expect(workflow.listArchivedDocuments()).toEqual([
+      expect.objectContaining({ id: created.id, lifecycleStatus: 'archived' }),
+    ]);
+    expectWorkflowError(
+      () =>
+        workflow.unarchiveDocument({
+          documentId: created.id,
+          expectedDocumentRowVersion: created.rowVersion,
+        }),
+      'CONFLICT',
+    );
+    expect(workflow.listArchivedDocuments()).toHaveLength(1);
+
+    const restored = workflow.unarchiveDocument({
+      documentId: archived.id,
+      expectedDocumentRowVersion: archived.rowVersion,
+    });
+    expect(restored.lifecycleStatus).toBe('active');
+    expect(workflow.listArchivedDocuments()).toEqual([]);
+    expect(workflow.listDocuments()).toEqual([
+      expect.objectContaining({ id: created.id, lifecycleStatus: 'active' }),
+    ]);
+    expect(
+      projects.access(false, (_database) =>
+        createRepositories(_database)
+          .documentWorkflowAudits.listByDocument(restored.id)
+          .map((event) => event.action),
+      ),
+    ).toEqual(['document_unarchived', 'document_archived', 'draft_saved']);
+  });
+
+  it('rejects general document archiving for novel chapters', async () => {
+    const { projects, workflow, conversation } = await setup();
+    const orchestration = new AgentOrchestrationService(projects);
+    const target = orchestration.prepareNovelTask({
+      conversationId: conversation.id,
+      projectSessionId: projects.currentSessionId()!,
+      prompt: '生成第三章',
+      intent: { action: 'create_chapter', displayLabel: '第三章' },
+    });
+    if ('pendingIntent' in target) throw new Error('Expected target');
+    const document = workflow.saveDraft({
+      documentId: target.documentId,
+      title: '第三章',
+      contentMarkdown: '章节正文',
+      expectedDocumentRowVersion: 0,
+    });
+
+    expectWorkflowError(
+      () =>
+        workflow.archiveDocument({
+          documentId: document.id,
+          expectedDocumentRowVersion: document.rowVersion,
+        }),
+      'INVALID_STATE',
+    );
+    expect(workflow.getDocument(document.id).lifecycleStatus).toBe('active');
+  });
+
+  it('archives and restores novel reference drafts while preserving their binding and body', async () => {
+    const { projects, workflow } = await setup();
+    const novel = new NovelService(projects);
+    const created = workflow.saveDraft({
+      kind: 'outline',
+      title: '小说大纲',
+      contentMarkdown: '小说资料正文',
+    });
+    const binding = novel.saveBinding({
+      documentId: created.id,
+      role: 'work-outline',
+      domainScope: 'novel',
+    });
+    const target = workflow.getDocument(created.id);
+    const archived = workflow.archiveDocument({
+      documentId: target.id,
+      expectedDocumentRowVersion: target.rowVersion,
+    });
+    expect(archived).toMatchObject({ lifecycleStatus: 'archived', domainScope: 'novel' });
+    expect(workflow.listDocuments()).toEqual([]);
+    expect(workflow.listArchivedDocuments()).toEqual([
+      expect.objectContaining({ id: target.id, domainScope: 'novel' }),
+    ]);
+    expectWorkflowError(
+      () =>
+        workflow.unarchiveDocument({
+          documentId: target.id,
+          expectedDocumentRowVersion: target.rowVersion,
+        }),
+      'CONFLICT',
+    );
+    const restored = workflow.unarchiveDocument({
+      documentId: target.id,
+      expectedDocumentRowVersion: archived.rowVersion,
+    });
+    expect(restored).toMatchObject({
+      lifecycleStatus: 'active',
+      domainScope: 'novel',
+      bindingRole: 'work-outline',
+    });
+    expect(restored.currentVersion?.contentMarkdown).toBe('小说资料正文');
+    expect(novel.listBindings()).toContainEqual(
+      expect.objectContaining({ id: binding.id, documentId: target.id }),
+    );
+    expect(workflow.listArchivedDocuments()).toEqual([]);
+    expect(workflow.listDocuments()).toEqual([
+      expect.objectContaining({ id: target.id, domainScope: 'novel' }),
+    ]);
+  });
+
   it('reports and filters media submission states and classifies Vidu images by capability', async () => {
     const { projects, workflow } = await setup();
     projects.access(true, (database, project) => {
@@ -260,10 +465,28 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toMatchObject({ status: 'approved' });
 
+    expectWorkflowError(
+      () =>
+        workflow.createDocumentDraftFromMessage({
+          messageId: assistant.id,
+          targetDocumentId: created.document.id,
+          expectedDocumentRowVersion: published.document.rowVersion,
+          idempotencyKey: 'published-write-rejected',
+        }),
+      'DOCUMENT_PUBLISHED_READ_ONLY',
+    );
+
+    const unpublished = workflow.unpublish({
+      documentId: published.document.id,
+      expectedDocumentRowVersion: published.document.rowVersion,
+    });
+    expect(unpublished.publishedVersionId).toBeUndefined();
+    expect(unpublished.currentVersion?.state).toBe('draft');
+
     const second = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
       targetDocumentId: created.document.id,
-      expectedDocumentRowVersion: published.document.rowVersion,
+      expectedDocumentRowVersion: unpublished.rowVersion,
       idempotencyKey: 'self-publish-conflict',
     });
     expect(() =>
@@ -287,6 +510,121 @@ describe('DocumentWorkflowService', () => {
           ).count,
       ),
     ).toBe(0);
+    expect(
+      projects.access(false, (database) =>
+        database
+          .prepare('SELECT COUNT(*) AS count FROM document_publications WHERE document_id = ?')
+          .get(created.document.id),
+      ),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it('keeps published documents immutable even for direct SQL writes', async () => {
+    const { projects, workflow, assistant } = await setup();
+    const created = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      idempotencyKey: 'direct-sql-lock',
+    });
+    const published = workflow.selfPublish({
+      documentId: created.document.id,
+      expectedDocumentRowVersion: created.document.rowVersion,
+      expectedPublishedVersionId: undefined,
+    });
+
+    expect(() =>
+      projects.access(true, (database) =>
+        database
+          .prepare('UPDATE documents SET title = ? WHERE id = ?')
+          .run('绕过工作流的修改', published.document.id),
+      ),
+    ).toThrow('published document is read-only');
+    expect(workflow.getDocument(published.document.id).title).toBe(published.document.title);
+  });
+
+  it('keeps publication history immutable and rejects review writes after publication', async () => {
+    const { projects, workflow, assistant } = await setup();
+    const created = workflow.createDocumentDraftFromMessage({
+      messageId: assistant.id,
+      idempotencyKey: 'publication-history-lock',
+    });
+    const published = workflow.selfPublish({
+      documentId: created.document.id,
+      expectedDocumentRowVersion: created.document.rowVersion,
+      expectedPublishedVersionId: undefined,
+    });
+
+    expectWorkflowError(
+      () =>
+        workflow.submitReview({
+          documentId: published.document.id,
+          documentVersionId: published.document.currentVersionId,
+          expectedDocumentRowVersion: published.document.rowVersion,
+        }),
+      'DOCUMENT_PUBLISHED_READ_ONLY',
+    );
+
+    expect(() =>
+      projects.access(true, (database) =>
+        database
+          .prepare('UPDATE document_publications SET publication_no = ? WHERE id = ?')
+          .run(99, published.publication.id),
+      ),
+    ).toThrow('document publications are immutable');
+    expect(() =>
+      projects.access(true, (database) =>
+        database
+          .prepare('DELETE FROM document_publications WHERE id = ?')
+          .run(published.publication.id),
+      ),
+    ).toThrow();
+    expect(() =>
+      projects.access(true, (database) => {
+        const sequence = (
+          database
+            .prepare(
+              'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM document_audit_events WHERE project_id = ?',
+            )
+            .get(created.document.projectId) as { value: number }
+        ).value;
+        database
+          .prepare(
+            `INSERT INTO document_audit_events
+             (id, project_id, sequence, action, actor_type, actor_id, document_id,
+              document_version_id, metadata_json, created_at)
+             VALUES (?, ?, ?, 'draft_saved', 'user', 'local-user', ?, ?, '{}', ?)`,
+          )
+          .run(
+            'unauthorized-published-audit',
+            created.document.projectId,
+            sequence,
+            created.document.id,
+            published.document.currentVersionId,
+            'now',
+          );
+      }),
+    ).toThrow('published document is read-only');
+    expect(
+      projects.access(false, (database) =>
+        database
+          .prepare('SELECT publication_no FROM document_publications WHERE id = ?')
+          .get(published.publication.id),
+      ),
+    ).toEqual({ publication_no: 1 });
+
+    const draft = workflow.unpublish({
+      documentId: published.document.id,
+      expectedDocumentRowVersion: published.document.rowVersion,
+    });
+    expect(draft.currentVersion?.contentMarkdown).toBe(
+      published.document.currentVersion?.contentMarkdown,
+    );
+    expect(() =>
+      projects.access(true, (database) =>
+        database
+          .prepare('DELETE FROM document_publications WHERE id = ?')
+          .run(published.publication.id),
+      ),
+    ).toThrow();
   });
 
   it('replays task events with a sequence cursor and bounded pages', async () => {

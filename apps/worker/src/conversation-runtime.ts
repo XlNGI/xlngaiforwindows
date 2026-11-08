@@ -1,6 +1,6 @@
 import type { ConversationTaskMode } from '@ai-video/contracts';
 
-export type ConversationRuntimeKind = 'legacy' | 'pi';
+export type ConversationRuntimeKind = 'pi';
 
 export interface ConversationRuntimeStartRequest {
   taskId: string;
@@ -18,51 +18,8 @@ export interface ConversationRuntimeStartResult {
   taskId: string;
 }
 
-/** Shared runtime boundary for the Pi owner and the development fallback. */
+/** Worker-owned conversation execution boundary. */
 export interface ConversationRuntime {
   readonly kind: ConversationRuntimeKind;
   start(request: ConversationRuntimeStartRequest): Promise<ConversationRuntimeStartResult>;
-}
-
-export interface ConversationRuntimeRouterOptions {
-  piEnabled?: boolean;
-  piRuntime?: ConversationRuntime;
-}
-
-/** Routes every conversation workflow to Pi unless the development fallback is enabled. */
-export class ConversationRuntimeRouter {
-  private readonly piEnabled: boolean;
-  private readonly piRuntime?: ConversationRuntime;
-
-  constructor(
-    private readonly legacyRuntime: ConversationRuntime,
-    options: ConversationRuntimeRouterOptions = {},
-  ) {
-    if (legacyRuntime.kind !== 'legacy') {
-      throw new Error('ConversationRuntimeRouter requires a Legacy runtime.');
-    }
-    if (options.piRuntime && options.piRuntime.kind !== 'pi') {
-      throw new Error('The configured Pi runtime must use the pi runtime kind.');
-    }
-    this.piEnabled = options.piEnabled ?? true;
-    this.piRuntime = options.piRuntime;
-  }
-
-  select(mode: ConversationTaskMode): ConversationRuntime {
-    void mode;
-    if (this.piEnabled && this.piRuntime) return this.piRuntime;
-    return this.legacyRuntime;
-  }
-
-  start(request: ConversationRuntimeStartRequest): Promise<ConversationRuntimeStartResult> {
-    return this.select(request.mode).start(request);
-  }
-}
-
-/** New tasks always use Pi. Legacy remains available only to explicit migration callers. */
-export function resolvePiConversationRuntimeEnabled(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  void environment;
-  return true;
 }

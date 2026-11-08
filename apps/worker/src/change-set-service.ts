@@ -80,8 +80,7 @@ function validateMediaBindings(
   for (const binding of bindings) {
     if (binding.role !== 'character' && binding.role !== 'scene' && binding.role !== 'prop')
       continue;
-    if (!binding.sourceDocumentId)
-      throw new Error('角色、场景和道具参考图必须声明来源文档。');
+    if (!binding.sourceDocumentId) throw new Error('角色、场景和道具参考图必须声明来源文档。');
     validateProductionImageBinding(
       database,
       projectId,
@@ -678,18 +677,20 @@ export class ChangeSetService {
         .get(sceneId, projectId) as { material_bindings_json: string };
       const previous = JSON.parse(scene.material_bindings_json) as SceneMaterialBindingInfo[];
       const sceneRow = database
-        .prepare('SELECT scene_document_id,authoring_ir_json FROM scenes WHERE id=? AND project_id=?')
+        .prepare(
+          'SELECT scene_document_id,authoring_ir_json FROM scenes WHERE id=? AND project_id=?',
+        )
         .get(sceneId, projectId) as {
-          scene_document_id: string | null;
-          authoring_ir_json: string | null;
-        };
+        scene_document_id: string | null;
+        authoring_ir_json: string | null;
+      };
       let authoringIR: ProductionAuthoringIR | undefined;
       try {
         if (sceneRow.authoring_ir_json)
           authoringIR = validateProductionAuthoringIR(
             JSON.parse(sceneRow.authoring_ir_json),
             'scene',
-          ) as ProductionAuthoringIR;
+          );
       } catch {
         authoringIR = undefined;
       }
@@ -708,7 +709,11 @@ export class ChangeSetService {
           Boolean(item.sourceDocumentId && sceneDocumentSet.has(item.sourceDocumentId)),
       );
       for (const sceneDocumentId of sceneDocumentIds) {
-        if (materials.some((item) => item.role === 'scene' && item.sourceDocumentId === sceneDocumentId))
+        if (
+          materials.some(
+            (item) => item.role === 'scene' && item.sourceDocumentId === sceneDocumentId,
+          )
+        )
           continue;
         const image = productionReferenceImage(database, projectId, sceneDocumentId);
         const doc = database
@@ -826,6 +831,11 @@ export class ChangeSetService {
     if (item.action === 'update') {
       if (!existing || existing.row_version !== item.expected_row_version) {
         throw new ChangeSetConflict('DOCUMENT_ROW_VERSION_CONFLICT');
+      }
+      if (existing.published_version_id) {
+        throw new ChangeSetConflict(
+          'DOCUMENT_PUBLISHED_READ_ONLY: Published documents are read-only. Unpublish the document before applying a document change set.',
+        );
       }
       if (existing.current_version_id !== item.expected_current_version_id) {
         throw new ChangeSetConflict('DOCUMENT_CURRENT_VERSION_CONFLICT');

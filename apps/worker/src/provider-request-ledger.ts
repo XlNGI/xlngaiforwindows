@@ -19,10 +19,17 @@ const metadataKeys = [
   'receivedBytes',
   'finishReason',
   'errorCode',
+  'failureOrigin',
+  'providerStatus',
+  'providerErrorCode',
+  'providerErrorMessage',
+  'retryAttempt',
+  'delayMs',
   'requestBodyHash',
   'requestBodyBytes',
   'purpose',
   'context',
+  'modelSelection',
 ] as const;
 
 type RequestRow = {
@@ -126,19 +133,16 @@ export function readRequestAccounting(
   const rows = database
     .prepare(
       `SELECT * FROM llm_provider_requests
-    WHERE generation_id=? AND attempt_id=? AND project_id=? AND project_session_id=? ORDER BY created_at,id`,
+    WHERE generation_id=? AND attempt_id=? AND project_id=? ORDER BY created_at,id`,
     )
-    .all(
-      identity.generationId,
-      identity.attemptId,
-      identity.projectId,
-      identity.projectSessionId,
-    ) as RequestRow[];
+    .all(identity.generationId, identity.attemptId, identity.projectId) as RequestRow[];
   const requests: LlmRequestUsageInfo[] = [];
   for (const row of rows) {
     const metadata = JSON.parse(row.metadata_json) as RequestMetadata;
     if (metadata.requestKind !== 'model') continue;
     const usage = metadata.usage;
+    const modelSelection = metadata.modelSelection as LlmRequestUsageInfo['modelSelection'];
+    const requestPricing = modelSelection ? (modelSelection.pricingSnapshot ?? undefined) : pricing;
     requests.push({
       requestId: row.id,
       stage: row.stage,
@@ -155,9 +159,16 @@ export function readRequestAccounting(
           : usage
             ? 'partial'
             : 'unknown',
-      estimatedCost: calculateEstimatedCost(usage, pricing),
-      currency: pricing?.currency,
+      modelSelection,
+      estimatedCost: calculateEstimatedCost(usage, requestPricing),
+      currency: requestPricing?.currency,
       context: metadata.context,
+      errorCode: typeof metadata.errorCode === 'string' ? metadata.errorCode : undefined,
+      failureOrigin: ['local_context', 'bridge', 'provider'].includes(
+        String(metadata.failureOrigin),
+      )
+        ? (metadata.failureOrigin as LlmRequestUsageInfo['failureOrigin'])
+        : undefined,
     });
   }
   const dispatched = requests.filter((request) => request.dispatched);
@@ -194,7 +205,15 @@ export function readRequestAccounting(
       ? 'unknown'
       : complete.length === dispatched.length &&
           priced.length === dispatched.length &&
-          (pricing?.cachedInputPrice === undefined || cacheReported.length === dispatched.length)
+          dispatched.every((request) => {
+            const price = request.modelSelection ? request.modelSelection.pricingSnapshot : pricing;
+            return (
+              price?.cachedInputPrice === undefined ||
+              (request.usage?.cachedInputTokens !== undefined &&
+                request.usage.inputTokens !== undefined &&
+                request.usage.cachedInputTokens <= request.usage.inputTokens)
+            );
+          })
         ? 'complete'
         : 'partial',
   };

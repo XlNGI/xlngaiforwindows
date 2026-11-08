@@ -19,6 +19,7 @@ import type {
   WorkerMethodMap,
 } from '@ai-video/contracts';
 import { IPC_PROTOCOL_VERSION } from '@ai-video/contracts';
+import { nativeRequestUserText } from './test-fixtures/native-request-text.js';
 import {
   bindWorkerRequest,
   configurePiConversationRuntime,
@@ -541,7 +542,12 @@ it('runs two same-conversation branches concurrently while an ordered follow-up 
     db.close();
     settings.close();
   }
-  const streams: Array<{ id: string; epoch: string; sequence: number }> = [];
+  const streams: Array<{
+    id: string;
+    epoch: string;
+    sequence: number;
+    params: import('@ai-video/contracts').NativeProviderStreamStartParams;
+  }> = [];
   const emit = (stream: (typeof streams)[number], event: Record<string, unknown>) =>
     bridge.handleEnvelope({
       kind: 'host.event',
@@ -553,6 +559,7 @@ it('runs two same-conversation branches concurrently while an ordered follow-up 
     send(envelope) {
       if (envelope.method === 'provider.stream.start') {
         const stream = {
+          params: envelope.params as import('@ai-video/contracts').NativeProviderStreamStartParams,
           id: envelope.requestId,
           epoch: (envelope.params as { projectSessionId: string }).projectSessionId,
           sequence: 0,
@@ -669,12 +676,11 @@ it('runs two same-conversation branches concurrently while an ordered follow-up 
   expect(supplemented.prompt).toBe(request.prompt);
   expect(supplemented.context).toBe(request.context);
   expect(supplemented.systemInstruction).toBe(request.systemInstruction);
-  expect(supplemented.continuation).toMatchObject({
-    protocol: 'openai-responses',
-    previousResponseId: 'ordered-complete',
-    outputs: [],
-    userMessages: ['Add a concise ending'],
-  });
+  expect(supplemented.continuation).toBeUndefined();
+  expect(nativeRequestUserText(streams[3]!.params)).toContain('Add a concise ending');
+  expect(streams[3]!.params.contextTurns).toEqual(
+    expect.arrayContaining([expect.objectContaining({ content: 'Ordered first response' })]),
+  );
   emit(streams[3]!, { type: 'text_delta', delta: 'Concise ending' });
   emit(streams[3]!, {
     type: 'complete',

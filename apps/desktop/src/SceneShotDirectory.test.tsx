@@ -1,13 +1,15 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SceneInfo, ShotInfo } from '@ai-video/contracts';
 import { SceneShotDirectory } from './SceneShotDirectory';
 import { callWorker } from './worker-client';
 import { useState } from 'react';
+import { selectWorkerScope } from './worker-scope';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  selectWorkerScope(undefined);
 });
 const scene: SceneInfo = {
   id: 'a',
@@ -55,6 +57,154 @@ function InteractiveDirectory({ initialShotId }: { initialShotId?: string }) {
 }
 
 describe('scene and shot directory', () => {
+  it('archives a selected parent once, warns about unsaved child edits, and hides its children', async () => {
+    const changed = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(callWorker).mockResolvedValue({ ...scene, archivedAt: 'now', rowVersion: 1 });
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene, next]}
+        sceneId={scene.id}
+        shots={[shot]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        dirtyShotId={shot.id}
+        onLifecycleChanged={changed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: `选择镜头 ${shot.title}` }));
+    fireEvent.click(screen.getByRole('checkbox', { name: `选择场次 ${scene.title}` }));
+    fireEvent.click(screen.getByRole('button', { name: '归档所选' }));
+    const dialog = screen.getByRole('dialog', { name: '归档所选草稿？' });
+    expect(within(dialog).getByText(/未保存的更改将被放弃/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/同时隐藏其下镜头/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认归档' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith([{ kind: 'scene', id: scene.id }]));
+    expect(callWorker).toHaveBeenCalledTimes(1);
+    expect(callWorker).toHaveBeenCalledWith('production.lifecycle.change', {
+      target: { kind: 'scene', id: scene.id },
+      expectedRowVersion: scene.rowVersion,
+      archived: true,
+    });
+    expect(screen.queryByRole('button', { name: scene.title })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: `选择镜头 ${shot.title}` }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: next.title })).toBeInTheDocument();
+  });
+
+  it('deletes an individual shot recoverably and leaves a failed scene selected', async () => {
+    const changed = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'shot.list') return Promise.resolve([]);
+      if (
+        method === 'production.lifecycle.change' &&
+        (params as { target: { kind: string } }).target.kind === 'scene'
+      )
+        return Promise.reject(new Error('内容已变化'));
+      return Promise.resolve({ ...shot, archivedAt: 'now' });
+    });
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene, next]}
+        sceneId={scene.id}
+        shots={[shot]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        onLifecycleChanged={changed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: `选择场次 ${next.title}` }));
+    fireEvent.click(screen.getByRole('checkbox', { name: `选择镜头 ${shot.title}` }));
+    fireEvent.click(screen.getByRole('button', { name: '删除所选' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '确认删除' }));
+    await screen.findByText(/已删除 1 个草稿/);
+    expect(changed).toHaveBeenCalledWith([{ kind: 'shot', id: shot.id }]);
+    expect(screen.getByRole('checkbox', { name: `选择场次 ${next.title}` })).toBeChecked();
+    expect(screen.queryByRole('button', { name: shot.title })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: scene.title })).toBeInTheDocument();
+  });
+
+  it('restores archived scenes and individually archived shots using current versions', async () => {
+    const changed = vi.fn().mockResolvedValue(undefined);
+    const archivedScene = { ...next, rowVersion: 5, archivedAt: 'now' };
+    const archivedShot = { ...shot, rowVersion: 3, archivedAt: 'now' };
+    let restored = false;
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'scene.list') return Promise.resolve([scene, archivedScene]);
+      if (method === 'shot.list')
+        return Promise.resolve(
+          (params as { sceneId: string }).sceneId === scene.id
+            ? restored
+              ? []
+              : [archivedShot]
+            : [nextShot],
+        );
+      restored = true;
+      return Promise.resolve({ ...archivedShot, archivedAt: undefined, rowVersion: 4 });
+    });
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene]}
+        shots={[]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        onLifecycleChanged={changed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '已归档 / 已删除' }));
+    fireEvent.click(await screen.findByRole('button', { name: `恢复镜头 ${shot.title}` }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith([]));
+    expect(callWorker).toHaveBeenCalledWith('production.lifecycle.change', {
+      target: { kind: 'shot', id: shot.id },
+      expectedRowVersion: 3,
+      archived: false,
+    });
+    expect(await screen.findByRole('button', { name: `恢复场次 ${next.title}` })).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: `恢复镜头 ${nextShot.title}` }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('stops a pending batch after the project scope changes', async () => {
+    selectWorkerScope({ projectId: 'project', projectSessionId: 'one' });
+    let resolve!: (value: SceneInfo) => void;
+    vi.mocked(callWorker).mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const changed = vi.fn();
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene, next]}
+        shots={[]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        onLifecycleChanged={changed}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除所选' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '确认删除' }));
+    selectWorkerScope({ projectId: 'other', projectSessionId: 'two' });
+    await act(() => Promise.resolve(resolve({ ...scene, archivedAt: 'now' })));
+    await waitFor(() => expect(callWorker).toHaveBeenCalledTimes(1));
+    expect(changed).not.toHaveBeenCalled();
+  });
+
   it('toggles scene titles repeatedly without reopening after selection', () => {
     render(<InteractiveDirectory />);
     const first = screen.getByRole('button', { name: scene.title });
@@ -136,5 +286,56 @@ describe('scene and shot directory', () => {
     expect(screen.queryByText(shot.title)).not.toBeInTheDocument();
     expect(screen.getByText(nextShot.title)).toBeInTheDocument();
     expect(screen.queryByLabelText('场次绑定场景')).not.toBeInTheDocument();
+  });
+
+  it('edits the selected scene title directly in the directory', async () => {
+    const onRenameScene = vi.fn().mockResolvedValue(undefined);
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene]}
+        sceneId={scene.id}
+        shots={[shot]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        onRenameScene={onRenameScene}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: scene.title }));
+    const input = screen.getByRole('textbox', { name: '场次标题' });
+    fireEvent.change(input, { target: { value: '第一场（修改）' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => expect(onRenameScene).toHaveBeenCalledWith(scene, '第一场（修改）'));
+  });
+
+  it('edits the selected shot title directly in the directory', async () => {
+    const onRenameShot = vi.fn().mockResolvedValue(undefined);
+    render(
+      <SceneShotDirectory
+        projectId="project"
+        scenes={[scene]}
+        sceneId={scene.id}
+        shotId={shot.id}
+        shots={[shot]}
+        writable
+        onAddScene={vi.fn()}
+        onSelectScene={vi.fn()}
+        onSelectShot={vi.fn()}
+        onRenameShot={onRenameShot}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: shot.title }));
+    const input = screen.getByRole('textbox', { name: '镜头标题' });
+    fireEvent.change(input, { target: { value: '第一场近景（修改）' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(onRenameShot).toHaveBeenCalledWith(scene, shot, '第一场近景（修改）'),
+    );
   });
 });

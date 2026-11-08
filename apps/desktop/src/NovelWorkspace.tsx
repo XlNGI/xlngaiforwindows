@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Archive,
   BookOpen,
   CheckCircle2,
   Clapperboard,
@@ -11,7 +12,7 @@ import {
   Save,
   Search,
   ShieldCheck,
-  Trash2,
+  RotateCcw,
   FileUp,
 } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -19,7 +20,6 @@ import { useEffect, useState } from 'react';
 import type {
   DocumentDetail,
   DocumentSummary,
-  DocumentVersionState,
   NovelChapterInfo,
   NovelConsistencyReport,
   NovelMarkdownExportFormat,
@@ -28,6 +28,9 @@ import type {
 } from '@ai-video/contracts';
 import { projectWorker } from './worker-scope';
 import { observeFileTask, observeMarkdownExport } from './file-task-client';
+import { MarkdownEditor } from './MarkdownEditor';
+import { DocumentDirectoryTitleText } from './DocumentDirectoryTitle';
+import { useDraftDocumentBatch, type DraftDeletionTarget } from './DraftDocumentBatch';
 import { readNovelDocument } from './novel-import-client';
 import { parseNovelSource, type NovelImportChapterDraft } from './novel-import';
 
@@ -45,23 +48,6 @@ interface NovelWorkspaceProps {
   onChapterSelected?: (chapter: NovelChapterInfo) => void;
   onGenerateScript?: (chapters: NovelChapterInfo[]) => Promise<void>;
   productionBusy?: boolean;
-}
-
-function documentStateLabel(state: DocumentVersionState): string {
-  switch (state) {
-    case 'draft':
-      return '草稿';
-    case 'in_review':
-      return '审核中';
-    case 'changes_requested':
-      return '需修改';
-    case 'published':
-      return '已发布';
-    case 'rejected':
-      return '已退回';
-    default:
-      return '未保存';
-  }
 }
 
 function exportStatusLabel(status: string): string {
@@ -116,12 +102,14 @@ function NovelProjectWorkspace({
   const [volumes, setVolumes] = useState<NovelVolumeInfo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selected, setSelected] = useState<NovelChapterInfo>();
-  const [chapterSelection, setChapterSelection] = useState<string[]>([]);
+  const [archivedReferences, setArchivedReferences] = useState<DocumentSummary[]>([]);
+  const [deletedReferenceIds, setDeletedReferenceIds] = useState<string[]>([]);
   const [selectedReferenceId, setSelectedReferenceId] = useState<string>();
   const [document, setDocument] = useState<DocumentDetail>();
   const [title, setTitle] = useState('');
+  const [editingTitleId, setEditingTitleId] = useState<string>();
   const [content, setContent] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [working, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [conflictDocument, setConflictDocument] = useState<DocumentDetail>();
   const [exportBusy, setExportBusy] = useState(false);
@@ -150,68 +138,166 @@ function NovelProjectWorkspace({
       )
     : chapters;
   const activeChapters = chapters.filter((chapter) => chapter.lifecycleStatus === 'active');
+  const directoryReferences = [
+    ...referenceDocuments.filter((item) => !deletedReferenceIds.includes(item.id)),
+    ...(includeArchived ? archivedReferences : []),
+  ];
+  const chapterTarget = (chapter: NovelChapterInfo): DraftDeletionTarget => ({
+    id: chapter.documentId,
+    title: `${chapter.displayLabel} ${chapter.title}`,
+    lifecycleStatus: chapter.lifecycleStatus,
+    rowVersion: chapter.documentRowVersion,
+    chapterId: chapter.id,
+    chapterRowVersion: chapter.rowVersion,
+  });
+  const visibleReferences = directoryReferences.filter(
+    (item) => !normalizedSearch || item.title.toLocaleLowerCase('zh-CN').includes(normalizedSearch),
+  );
+  const batch = useDraftDocumentBatch({
+    items: [...chapters.map(chapterTarget), ...directoryReferences],
+    visibleItems: [...filteredChapters.map(chapterTarget), ...visibleReferences],
+    writable,
+    busy: working || exportBusy || productionBusy || importBusy,
+    resetKey: projectId ?? '',
+    dirtyDocumentId:
+      document &&
+      (title !== document.title || content !== (document.currentVersion?.contentMarkdown ?? ''))
+        ? document.id
+        : undefined,
+    onSelectionChange: () => setExportScope('selection'),
+    onDeleted: async (deleted, archived) => {
+      const ids = new Set(deleted.map((item) => item.id));
+      setChapters((rows) =>
+        rows.flatMap((row) =>
+          ids.has(row.documentId)
+            ? includeArchived
+              ? [{ ...row, lifecycleStatus: 'archived' as const }]
+              : []
+            : [row],
+        ),
+      );
+      setDeletedReferenceIds((current) => [
+        ...new Set([...current, ...archived.map((item) => item.id)]),
+      ]);
+      setArchivedReferences((rows) => [...archived, ...rows.filter((item) => !ids.has(item.id))]);
+      if (document && ids.has(document.id)) {
+        setSelected(undefined);
+        setSelectedReferenceId(undefined);
+        setDocument(undefined);
+        setTitle('');
+        setContent('');
+        setEditingTitleId(undefined);
+        setConflictDocument(undefined);
+      }
+      const rows = await callWorker('novel.chapter.list', { includeArchived });
+      setChapters(rows);
+      await onReferencesChanged?.();
+    },
+  });
+  const busy = working || batch.deleting;
   const selectedChapters = activeChapters.filter((chapter) =>
-    chapterSelection.includes(chapter.id),
+    batch.selectedIds.has(chapter.documentId),
   );
   const selectedChapterIds = selectedChapters.map((chapter) => chapter.id);
   const productionChapters = selectedChapters.length
     ? selectedChapters
     : activeChapters.filter((chapter) => chapter.id === selected?.id);
-  const visibleActiveChapters = filteredChapters.filter(
-    (chapter) => chapter.lifecycleStatus === 'active',
-  );
-  const checkedChapterIds = new Set(selectedChapterIds);
   const exportCount = exportScope === 'work' ? activeChapters.length : selectedChapters.length;
 
-  const selectVisibleChapters = () => {
-    setExportScope('selection');
-    setChapterSelection((ids) => [
-      ...new Set([...ids, ...visibleActiveChapters.map((chapter) => chapter.id)]),
-    ]);
-  };
+  const renderChapterItem = (chapter: NovelChapterInfo) => {
+    const isSelected = selected?.id === chapter.id;
+    const chapterTitle = isSelected ? title : chapter.title;
+    const titleKey = `chapter:${chapter.id}`;
+    const editing = isSelected && editingTitleId === titleKey;
 
-  const renderChapterItem = (chapter: NovelChapterInfo) => (
-    <div className="novel-chapter-row" key={chapter.id}>
-      <input
-        type="checkbox"
-        aria-label={`选择 ${chapter.displayLabel} ${chapter.title}`}
-        checked={checkedChapterIds.has(chapter.id)}
-        disabled={exportBusy || productionBusy || chapter.lifecycleStatus !== 'active'}
-        onChange={(event) => {
-          const checked = event.target.checked;
-          setExportScope('selection');
-          setChapterSelection((ids) =>
-            checked ? [...new Set([...ids, chapter.id])] : ids.filter((id) => id !== chapter.id),
-          );
-        }}
-      />
-      <button
-        className={`tree-item ${selected?.id === chapter.id ? 'selected' : ''}`}
-        type="button"
-        onClick={() => void openChapter(chapter)}
-      >
-        <FileText size={13} />
-        <span>
-          {chapter.displayLabel} {chapter.title}
-        </span>
-        <small className={chapter.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}>
-          {chapter.ragChunkCount > 0 ? `${chapter.ragChunkCount} 切片` : '未切片'}
-        </small>
-      </button>
-    </div>
-  );
+    return (
+      <div className="novel-chapter-row document-directory-item" key={chapter.id}>
+        {batch.checkbox(chapterTarget(chapter), `选择 ${chapter.displayLabel} ${chapterTitle}`)}
+        {editing ? (
+          <div className="tree-item novel-chapter-title-edit selected">
+            <FileText size={13} />
+            <input
+              className="document-directory-title-input"
+              type="text"
+              aria-label="章节标题"
+              autoFocus
+              value={title}
+              readOnly={!writable || busy}
+              onChange={(event) => setTitle(event.target.value)}
+              onBlur={() => {
+                if (!title.trim()) setTitle(document?.title ?? chapter.title);
+                setEditingTitleId(undefined);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.currentTarget.blur();
+                }
+                if (event.key === 'Escape') {
+                  setTitle(document?.title ?? chapter.title);
+                  setEditingTitleId(undefined);
+                }
+              }}
+            />
+            <small className={chapter.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}>
+              {chapter.ragChunkCount > 0 ? `${chapter.ragChunkCount} 切片` : '未切片'}
+            </small>
+          </div>
+        ) : (
+          <button
+            className={`tree-item ${isSelected ? 'selected' : ''}`}
+            type="button"
+            aria-label={
+              isSelected
+                ? `编辑章节标题 ${chapter.displayLabel} ${chapterTitle}`
+                : `打开章节 ${chapter.displayLabel} ${chapter.title}`
+            }
+            onClick={() => {
+              if (isSelected) setEditingTitleId(titleKey);
+              else {
+                setEditingTitleId(undefined);
+                void openChapter(chapter);
+              }
+            }}
+          >
+            <FileText size={13} />
+            <DocumentDirectoryTitleText text={`${chapter.displayLabel} ${chapterTitle}`} />
+            <small className={chapter.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}>
+              {chapter.ragChunkCount > 0 ? `${chapter.ragChunkCount} 切片` : '未切片'}
+            </small>
+          </button>
+        )}
+        <button
+          className="icon-button subtle document-directory-archive"
+          type="button"
+          title={chapter.lifecycleStatus === 'archived' ? '恢复章节' : '归档后可在已删除章节中恢复'}
+          aria-label={
+            chapter.lifecycleStatus === 'archived'
+              ? `恢复章节 ${chapter.displayLabel} ${chapter.title}`
+              : `归档章节 ${chapter.displayLabel} ${chapter.title}`
+          }
+          disabled={!writable || busy}
+          onClick={() => void toggleArchive(chapter)}
+        >
+          {chapter.lifecycleStatus === 'archived' ? (
+            <RotateCcw size={14} aria-hidden="true" />
+          ) : (
+            <Archive size={14} aria-hidden="true" />
+          )}
+        </button>
+      </div>
+    );
+  };
 
   const loadChapters = async (preferredId?: string, forceOpen = false) => {
     if (!projectId) return;
-    const [rows, volumeRows] = await Promise.all([
+    const [rows, volumeRows, archivedRows] = await Promise.all([
       callWorker('novel.chapter.list', { includeArchived }),
       callWorker('novel.volume.list', { includeArchived }),
+      includeArchived ? callWorker('document.archived.list', {}) : Promise.resolve([]),
     ]);
     setChapters(rows);
-    const activeIds = new Set(
-      rows.filter((row) => row.lifecycleStatus === 'active').map((row) => row.id),
-    );
-    setChapterSelection((ids) => ids.filter((id) => activeIds.has(id)));
+    setArchivedReferences(archivedRows.filter((item) => item.domainScope === 'novel'));
     setVolumes(volumeRows);
     if (focusReferenceId && !preferredId) {
       await openReference(focusReferenceId);
@@ -225,6 +311,7 @@ function NovelProjectWorkspace({
       setDocument(undefined);
       setTitle('');
       setContent('');
+      setEditingTitleId(undefined);
     }
   };
 
@@ -275,6 +362,7 @@ function NovelProjectWorkspace({
       if (detail.domainScope !== 'novel') throw new Error('该文档不属于小说资料。');
       setSelected(undefined);
       setSelectedReferenceId(documentId);
+      setEditingTitleId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
@@ -294,6 +382,7 @@ function NovelProjectWorkspace({
       setSelected(chapter);
       onChapterSelected?.(chapter);
       setSelectedReferenceId(undefined);
+      setEditingTitleId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
@@ -376,33 +465,57 @@ function NovelProjectWorkspace({
     }
   };
 
-  const toggleArchive = async () => {
-    if (!selected || busy || !writable) return;
+  const toggleArchive = async (chapter: NovelChapterInfo) => {
+    if (busy || !writable) return;
+    const hasLocalChanges =
+      selected?.id === chapter.id &&
+      document &&
+      (title !== document.title || content !== (document.currentVersion?.contentMarkdown ?? ''));
     if (
-      selected.lifecycleStatus !== 'archived' &&
+      chapter.lifecycleStatus !== 'archived' &&
       !window.confirm(
-        `确定删除“${selected.displayLabel} ${selected.title}”吗？可从“显示已删除”中恢复。`,
+        `确定归档“${chapter.displayLabel} ${chapter.title}”吗？可从“显示已删除”中恢复。${hasLocalChanges ? '当前未保存的标题和正文不会保留。' : ''}`,
       )
     ) {
       return;
     }
     setBusy(true);
     try {
-      if (selected.lifecycleStatus === 'archived') {
+      if (chapter.lifecycleStatus === 'archived') {
         await callWorker('novel.chapter.restore', {
-          chapterId: selected.id,
-          expectedRowVersion: selected.rowVersion,
+          chapterId: chapter.id,
+          expectedRowVersion: chapter.rowVersion,
         });
-        setMessage('草稿已恢复。');
+        setMessage('章节已恢复。');
       } else {
         await callWorker('novel.chapter.archive', {
-          chapterId: selected.id,
-          expectedRowVersion: selected.rowVersion,
+          chapterId: chapter.id,
+          expectedRowVersion: chapter.rowVersion,
           reason: 'user_archive',
         });
-        setMessage('草稿已删除，可从“显示已删除”中恢复。');
+        setMessage('章节已归档，可从“显示已删除”中恢复。');
       }
-      await loadChapters(selected.id);
+      await loadChapters(chapter.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restoreReference = async (item: DocumentSummary) => {
+    if (!writable || busy) return;
+    setBusy(true);
+    try {
+      await callWorker('document.unarchive', {
+        documentId: item.id,
+        expectedDocumentRowVersion: item.rowVersion,
+      });
+      setArchivedReferences((rows) => rows.filter((row) => row.id !== item.id));
+      setDeletedReferenceIds((ids) => ids.filter((id) => id !== item.id));
+      await onReferencesChanged?.();
+      await openReference(item.id);
+      setMessage(`已恢复“${item.title}”。`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '恢复小说资料失败');
     } finally {
       setBusy(false);
     }
@@ -533,6 +646,7 @@ function NovelProjectWorkspace({
 
   return (
     <div className="novel-workspace">
+      {batch.dialog}
       <header className="novel-toolbar">
         <div className="novel-toolbar-row">
           <div className="novel-toolbar-title">
@@ -569,6 +683,36 @@ function NovelProjectWorkspace({
               <ShieldCheck size={14} />
             </button>
           </div>
+        </div>
+        <div className="novel-toolbar-command-row" role="group" aria-label="小说操作">
+          {onGenerateScript && (
+            <button
+              className="button primary production-generate-button"
+              type="button"
+              disabled={
+                !writable ||
+                busy ||
+                productionBusy ||
+                productionChapters.length === 0 ||
+                productionChapters.length > 50
+              }
+              title="使用已勾选章节；未勾选时使用当前打开的章节"
+              onClick={() => {
+                if (
+                  productionChapters.some((chapter) => chapter.id === selected?.id) &&
+                  (content !== (document?.currentVersion?.contentMarkdown ?? '') ||
+                    title !== document?.title)
+                ) {
+                  setMessage('请先保存当前章节，再生成剧本。');
+                  return;
+                }
+                void onGenerateScript(productionChapters);
+              }}
+            >
+              <Clapperboard size={15} aria-hidden="true" />
+              {productionBusy ? '正在生成…' : `一键生成剧本（${productionChapters.length}章）`}
+            </button>
+          )}
           <div className="novel-toolbar-actions" role="group" aria-label="小说文档操作">
             <button
               className="button secondary"
@@ -598,46 +742,6 @@ function NovelProjectWorkspace({
             </button>
           </div>
         </div>
-        {onGenerateScript && (
-          <div className="production-action-bar" role="group" aria-label="小说制作">
-            <div className="production-action-copy">
-              <strong>小说 → 短剧资料</strong>
-              <p>
-                {selectedChapters.length > 0
-                  ? `已勾选 ${productionChapters.length} 章用于制作`
-                  : productionChapters[0]
-                    ? `当前章节：${productionChapters[0].displayLabel} ${productionChapters[0].title}`
-                    : '勾选章节，或打开一个章节'}
-              </p>
-            </div>
-            <button
-              className="button primary"
-              type="button"
-              disabled={
-                !writable ||
-                busy ||
-                productionBusy ||
-                productionChapters.length === 0 ||
-                productionChapters.length > 50
-              }
-              title="使用已勾选章节；未勾选时使用当前打开的章节"
-              onClick={() => {
-                if (
-                  productionChapters.some((chapter) => chapter.id === selected?.id) &&
-                  (content !== (document?.currentVersion?.contentMarkdown ?? '') ||
-                    title !== document?.title)
-                ) {
-                  setMessage('请先保存当前章节，再生成短剧资料。');
-                  return;
-                }
-                void onGenerateScript(productionChapters);
-              }}
-            >
-              <Clapperboard size={15} aria-hidden="true" />
-              {productionBusy ? '正在准备…' : `一键生成短剧资料（${productionChapters.length}章）`}
-            </button>
-          </div>
-        )}
         {message && <span className="inline-status">{message}</span>}
       </header>
       {exportOpen && (
@@ -814,101 +918,121 @@ function NovelProjectWorkspace({
                   onChange={(event) => setSearchKeyword(event.target.value)}
                 />
               </label>
-              <div className="novel-chapter-selection" aria-label="章节选择">
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={exportBusy || productionBusy || visibleActiveChapters.length === 0}
-                  onClick={selectVisibleChapters}
-                >
-                  {normalizedSearch ? '全选搜索结果' : '全选'}
-                </button>
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={exportBusy || productionBusy || selectedChapters.length === 0}
-                  onClick={() => setChapterSelection([])}
-                >
-                  取消全选
-                </button>
-                <span>已选 {selectedChapters.length} 章</span>
-              </div>
+              {batch.controls(
+                normalizedSearch ? '全选搜索结果' : '全选',
+                `已选 ${selectedChapters.length} 章${batch.selectedIds.size > selectedChapters.length ? ` · ${batch.selectedIds.size - selectedChapters.length} 份资料` : ''}`,
+              )}
+              {batch.message && <small role="status">{batch.message}</small>}
             </div>
-            {referenceDocuments.length > 0 && (
-              <div className="novel-volume-group" aria-label="小说资料">
-                <strong>小说资料</strong>
-                {referenceDocuments
-                  .filter(
-                    (item) =>
-                      !normalizedSearch ||
-                      item.title.toLocaleLowerCase('zh-CN').includes(normalizedSearch),
-                  )
-                  .map((item) => (
-                    <button
-                      className={`tree-item ${selectedReferenceId === item.id ? 'selected' : ''}`}
-                      type="button"
-                      key={item.id}
-                      disabled={busy}
-                      onClick={() => void openReference(item.id)}
-                    >
-                      <FileText size={13} />
-                      <span>{item.title}</span>
-                      <small>{item.kind === 'outline' ? '大纲' : '资料'}</small>
-                    </button>
-                  ))}
-              </div>
-            )}
-            {volumes.map((volume) => (
-              <div key={volume.id} className="novel-volume-group">
-                <strong>{volume.title}</strong>
-                {filteredChapters
-                  .filter((chapter) => chapter.volumeId === volume.id)
-                  .map((chapter) => renderChapterItem(chapter))}
-              </div>
-            ))}
-            {filteredChapters
-              .filter((chapter) => !chapter.volumeId)
-              .map((chapter) => renderChapterItem(chapter))}
-            {filteredChapters.length === 0 && (
-              <small className="tree-empty">
-                {chapters.length === 0 ? '暂无小说草稿。' : '没有匹配的草稿。'}
-              </small>
-            )}
+            <div
+              className="novel-chapter-list"
+              role="region"
+              aria-label="小说目录列表"
+              tabIndex={0}
+            >
+              {visibleReferences.length > 0 && (
+                <div className="novel-volume-group" aria-label="小说资料">
+                  <strong>小说资料</strong>
+                  {visibleReferences.map((item) => {
+                    const isSelected = selectedReferenceId === item.id;
+                    const itemTitle = isSelected ? title : item.title;
+                    const titleKey = `reference:${item.id}`;
+                    const editing = isSelected && editingTitleId === titleKey;
+
+                    return (
+                      <div
+                        className="novel-reference-row novel-chapter-row document-directory-item"
+                        key={item.id}
+                      >
+                        {batch.checkbox(item, `选择小说资料 ${item.title}`)}
+                        {editing ? (
+                          <div className="tree-item novel-reference-title-edit selected">
+                            <FileText size={13} />
+                            <input
+                              className="document-directory-title-input"
+                              type="text"
+                              aria-label="小说资料标题"
+                              autoFocus
+                              value={title}
+                              readOnly={!writable || busy}
+                              onChange={(event) => setTitle(event.target.value)}
+                              onBlur={() => {
+                                if (!title.trim()) setTitle(document?.title ?? item.title);
+                                setEditingTitleId(undefined);
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  event.currentTarget.blur();
+                                }
+                                if (event.key === 'Escape') {
+                                  setTitle(document?.title ?? item.title);
+                                  setEditingTitleId(undefined);
+                                }
+                              }}
+                            />
+                            <small>{item.kind === 'outline' ? '大纲' : '资料'}</small>
+                          </div>
+                        ) : (
+                          <button
+                            className={`tree-item ${isSelected ? 'selected' : ''}`}
+                            type="button"
+                            aria-label={
+                              isSelected
+                                ? `编辑小说资料标题 ${itemTitle}`
+                                : `打开小说资料 ${item.title}`
+                            }
+                            disabled={busy}
+                            onClick={() => {
+                              if (isSelected) setEditingTitleId(titleKey);
+                              else {
+                                setEditingTitleId(undefined);
+                                void openReference(item.id);
+                              }
+                            }}
+                          >
+                            <FileText size={13} />
+                            <DocumentDirectoryTitleText text={itemTitle} />
+                            <small>{item.kind === 'outline' ? '大纲' : '资料'}</small>
+                          </button>
+                        )}
+                        {item.lifecycleStatus === 'archived' && (
+                          <button
+                            className="icon-button subtle"
+                            type="button"
+                            aria-label={`恢复小说资料 ${item.title}`}
+                            disabled={!writable || busy || batch.deleting}
+                            onClick={() => void restoreReference(item)}
+                          >
+                            <RotateCcw size={14} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {volumes.map((volume) => (
+                <div key={volume.id} className="novel-volume-group">
+                  <strong>{volume.title}</strong>
+                  {filteredChapters
+                    .filter((chapter) => chapter.volumeId === volume.id)
+                    .map((chapter) => renderChapterItem(chapter))}
+                </div>
+              ))}
+              {filteredChapters
+                .filter((chapter) => !chapter.volumeId)
+                .map((chapter) => renderChapterItem(chapter))}
+              {filteredChapters.length === 0 && (
+                <small className="tree-empty">
+                  {chapters.length === 0 ? '暂无小说草稿。' : '没有匹配的草稿。'}
+                </small>
+              )}
+            </div>
           </aside>
           <section className="novel-editor">
             {(selected || selectedReferenceId) && document ? (
               <>
-                <div className="novel-editor-heading">
-                  <input
-                    aria-label={selectedReferenceId ? '小说资料标题' : '章节标题'}
-                    value={title}
-                    disabled={!writable || busy}
-                    onChange={(event) => setTitle(event.target.value)}
-                  />
-                  <span className="document-state">
-                    {document.currentVersion
-                      ? documentStateLabel(document.currentVersion.state)
-                      : '未保存'}
-                  </span>
-                  {selected && (
-                    <span
-                      className={`document-state ${selected.ragChunkCount > 0 ? 'rag-ready' : 'rag-pending'}`}
-                    >
-                      {selected.ragChunkCount > 0 ? `已切片 ${selected.ragChunkCount}` : '未切片'}
-                    </span>
-                  )}
-                  {onOpenDocument && (
-                    <button
-                      className="icon-button subtle"
-                      type="button"
-                      title="在文档工作区打开"
-                      aria-label="在文档工作区打开"
-                      onClick={() => onOpenDocument(document.id)}
-                    >
-                      <ExternalLink size={14} />
-                    </button>
-                  )}
-                </div>
                 {conflictDocument && (
                   <div className="novel-conflict" role="alert">
                     <strong>另一个窗口修改了本章节。</strong>
@@ -923,12 +1047,13 @@ function NovelProjectWorkspace({
                     </div>
                   </div>
                 )}
-                <textarea
-                  aria-label={selectedReferenceId ? '小说资料内容' : '章节内容'}
-                  className="markdown-editor novel-markdown-editor"
+                <MarkdownEditor
+                  label={selectedReferenceId ? '小说资料内容' : '章节内容'}
+                  className="novel-markdown-editor"
                   value={content}
                   disabled={!writable || busy}
-                  onChange={(event) => setContent(event.target.value)}
+                  onChange={setContent}
+                  autoPreviewOnBlur
                 />
                 <div className="novel-editor-actions">
                   <button
@@ -938,20 +1063,15 @@ function NovelProjectWorkspace({
                   >
                     <Save size={13} /> 保存并切片
                   </button>
-                  {selected && (
+                  {onOpenDocument && (
                     <button
-                      className={selected.lifecycleStatus === 'archived' ? '' : 'danger'}
+                      className="icon-button subtle"
                       type="button"
-                      disabled={!writable || busy}
-                      onClick={() => void toggleArchive()}
+                      title="在文档工作区打开"
+                      aria-label="在文档工作区打开"
+                      onClick={() => onOpenDocument(document.id)}
                     >
-                      {selected.lifecycleStatus === 'archived' ? (
-                        '恢复草稿'
-                      ) : (
-                        <>
-                          <Trash2 size={13} /> 删除草稿
-                        </>
-                      )}
+                      <ExternalLink size={14} />
                     </button>
                   )}
                 </div>

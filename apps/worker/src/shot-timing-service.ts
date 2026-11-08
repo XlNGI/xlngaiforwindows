@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { validateProductionAuthoringIR, validateProductionTiming } from '@ai-video/contracts';
 import { createRepositories } from '@ai-video/persistence';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
@@ -27,6 +27,7 @@ export class ShotTimingService {
         'expectedRowVersion',
         'estimatedDurationSeconds',
         'rationale',
+        'beats',
       ]);
       if (typeof entry.shotId !== 'string' || !entry.shotId.trim() || entry.shotId.length > 200)
         throw new Error('shotId 必须是已有镜头的真实 ID。');
@@ -41,6 +42,7 @@ export class ShotTimingService {
         timing: validateProductionTiming({
           estimatedDurationSeconds: entry.estimatedDurationSeconds,
           rationale: entry.rationale,
+          ...(entry.beats !== undefined ? { beats: entry.beats } : {}),
         }),
       };
     });
@@ -56,16 +58,6 @@ export class ShotTimingService {
         throw new Error('镜头时长更新不属于当前项目会话。');
       let changedAt: string | undefined;
       const result = db.transaction(() => {
-        const requestHash = createHash('sha256').update(JSON.stringify(shots)).digest('hex');
-        const executionKey = identity.taskId
-          ? `shot-timings:${identity.projectSessionId}:${identity.taskId}:${requestHash}`
-          : `shot-timings:${randomUUID()}`;
-        const previous = db
-          .prepare(
-            'SELECT result_json FROM agent_write_receipts WHERE project_id=? AND execution_key=?',
-          )
-          .get(project.id, executionKey) as { result_json: string } | undefined;
-        if (previous) return JSON.parse(previous.result_json) as Record<string, unknown>;
         const repositories = createRepositories(db);
         const candidates = shots.map((entry) => {
           const shot = repositories.shots.get(entry.shotId);
@@ -86,7 +78,8 @@ export class ShotTimingService {
             shot,
             changed:
               current?.estimatedDurationSeconds !== entry.timing.estimatedDurationSeconds ||
-              current?.rationale !== entry.timing.rationale,
+              current?.rationale !== entry.timing.rationale ||
+              JSON.stringify(current?.beats) !== JSON.stringify(entry.timing.beats),
             ir: validateProductionAuthoringIR(
               {
                 ...ir,
@@ -98,9 +91,7 @@ export class ShotTimingService {
         });
         const now = new Date().toISOString();
         const executionId = randomUUID();
-        db.prepare(
-          'INSERT INTO agent_write_receipts(id,project_id,execution_key,request_hash,request_json,result_json,created_at) VALUES(?,?,?,?,?,?,?)',
-        ).run(executionId, project.id, executionKey, requestHash, JSON.stringify(args), '{}', now);
+
         for (const candidate of candidates) {
           if (!candidate.changed) continue;
           const updated = db
@@ -135,10 +126,6 @@ export class ShotTimingService {
           })),
           paidRequests: 0,
         };
-        db.prepare('UPDATE agent_write_receipts SET result_json=? WHERE id=?').run(
-          JSON.stringify(saved),
-          executionId,
-        );
         return saved;
       })();
       if (changedAt) project.updatedAt = changedAt;

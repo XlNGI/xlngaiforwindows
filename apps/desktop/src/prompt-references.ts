@@ -13,6 +13,12 @@ export interface PromptReference {
   aliases: string[];
 }
 
+type PromptReferenceInput = {
+  kind: PromptReference['kind'];
+  url: string;
+  role: string;
+};
+
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -23,7 +29,7 @@ export function promptReferences(
   adapter: AdapterDescriptor,
   parameters: AdapterParameters,
 ): PromptReference[] {
-  const inputs: Array<{ kind: PromptReference['kind']; url: string; role: string }> = [];
+  const inputs: PromptReferenceInput[] = [];
   const properties = adapter.parameterSchema.properties;
   const items = properties.media ? parameters.media : properties.content ? parameters.content : [];
   if (Array.isArray(items))
@@ -47,6 +53,23 @@ export function promptReferences(
         inputs.push({ kind: 'image', url, role: 'reference_image' });
   if (typeof parameters.video === 'string' && parameters.video.trim())
     inputs.push({ kind: 'video', url: parameters.video, role: 'reference_video' });
+  return referenceTokens(adapter, inputs);
+}
+
+/** Shot prompts use model-neutral numbering until a production adapter is selected. */
+export function promptImageReferences(
+  images: Array<{ url: string; role?: string }>,
+): PromptReference[] {
+  return referenceTokens(
+    {},
+    images.map(({ url, role }) => ({ kind: 'image', url, role: role ?? 'reference' })),
+  );
+}
+
+function referenceTokens(
+  adapter: Partial<Pick<AdapterDescriptor, 'contractId' | 'contractRevision' | 'capability'>>,
+  inputs: PromptReferenceInput[],
+): PromptReference[] {
   const counts = { image: 0, audio: 0, video: 0 };
   const occurrences = new Map<string, number>();
   return inputs.map(({ kind, url, role }) => {

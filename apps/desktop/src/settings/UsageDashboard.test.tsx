@@ -125,6 +125,20 @@ describe('UsageDashboard', () => {
           dispatched: true,
           sent: false,
           startedAt: '2026-08-03T01:00:02Z',
+          errorCode: 'CONTEXT_BUDGET_EXCEEDED',
+          failureOrigin: 'local_context',
+          context: {
+            estimatedInputTokens: 59300,
+            contextWindowTokens: 64000,
+            windowSource: 'fallback',
+            reservedOutputTokens: 16000,
+            compactionCount: 2,
+            initialInputBudgetTokens: 44800,
+            maximumInputBudgetTokens: 58752,
+            safetyTokens: 3200,
+            deficitTokens: 548,
+            sections: { history: { bytes: 100, hash: 'hash', estimatedTokens: 37706 } },
+          },
           coverage: 'unknown',
         },
       ],
@@ -142,6 +156,9 @@ describe('UsageDashboard', () => {
     fireEvent.click(screen.getByText('请求明细（3）'));
     expect(screen.getByText('3. 输出修正 · failed')).toBeInTheDocument();
     expect(screen.getByText(/输入 未知.*输出 未知.*用量未知/)).toBeInTheDocument();
+    expect(screen.getByText(/本地上下文检查未通过/)).toBeInTheDocument();
+    expect(screen.getByText(/自适应输入上限 58,752.*缺口 548/)).toBeInTheDocument();
+    expect(screen.getByText('任务历史：约 37,706 Token')).toBeInTheDocument();
   });
 
   it('shows currencies separately and applies usage filters', async () => {
@@ -157,6 +174,74 @@ describe('UsageDashboard', () => {
         expect.objectContaining({ status: 'failed' }),
       ),
     );
+  });
+
+  it('labels an unknown window as advisory and separates final protocol estimates from reported usage', async () => {
+    const accounting: LlmUsageAccounting = {
+      version: 1,
+      generationId: 'g',
+      conversationId: 'c',
+      requestCount: 1,
+      reportedRequests: 1,
+      completeRequests: 1,
+      coverage: 'complete',
+      cacheInputTokens: 0,
+      cacheReadTokens: 0,
+      cacheReportedRequests: 0,
+      estimatedCostCoverage: 'unknown',
+      requests: [
+        {
+          requestId: 'r',
+          stage: 'complete',
+          purpose: 'continuation',
+          dispatched: true,
+          sent: true,
+          startedAt: '2026-08-03T01:00:00Z',
+          usage: { inputTokens: 81557, outputTokens: 100 },
+          coverage: 'complete',
+          context: {
+            limitEnforcement: 'advisory_fallback',
+            estimatedInputTokens: 60000,
+            contextWindowTokens: 64000,
+            windowSource: 'fallback',
+            reservedOutputTokens: 16000,
+            compactionCount: 2,
+            initialInputBudgetTokens: 44800,
+            maximumInputBudgetTokens: 58752,
+            deficitTokens: 1248,
+            sections: {},
+            nativeWire: {
+              limitEnforcement: 'advisory_fallback',
+              estimatedInputTokens: 88000,
+              meter: 'local_heuristic_estimate',
+              protocol: 'openai-chat-completions',
+              requestBodyBytes: 190000,
+              systemTokens: 17000,
+              toolSchemaTokens: 11000,
+              messageTokens: 60000,
+              imageTokens: 0,
+              reservedOutputTokens: 16000,
+              capabilitySource: 'fallback',
+            },
+          },
+        },
+      ],
+    };
+    vi.mocked(usageClient.list).mockResolvedValue({
+      entries: [{ ...entries[0]!, accounting }],
+      summaries: [],
+    });
+    render(<UsageDashboard />);
+    fireEvent.click(await screen.findByText('请求明细（1）'));
+    expect(
+      screen.getByText(/模型能力未知 · 规划参考 64,000（不作为请求硬限制）/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/自适应输入上限/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/缺口 1,248/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/最终协议估算 88,000.*系统 17,000.*工具定义 11,000/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/输入 81,557.*输出 100/)).toBeInTheDocument();
   });
 
   it('rebuilds the derived usage index and refreshes the list', async () => {

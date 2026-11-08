@@ -19,6 +19,8 @@ import type {
   ModelPricingInfo,
   ProviderModelInfo,
   ProviderProfileInfo,
+  ProductionCompileResult,
+  SceneMaterialBindingInfo,
   VideoAssetKind,
   VideoGenerationJobInfo,
   VideoGenerationPrepareParams,
@@ -27,11 +29,14 @@ import type {
 import { createHash, randomUUID } from 'node:crypto';
 import {
   isWanVideoBaseUrl,
-  isWanMediaAdapter,
+  isStructuredVideoAdapter,
   seedProductionInputs,
   addProductionRoleVoices,
   productionImagesFromParameters,
   productionInputSupport,
+  supportsProductionAudioUpload,
+  prepareSceneReferenceImageProposal,
+  sceneReferenceImageParameters,
 } from '@ai-video/contracts';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { adapterBindsCatalogModel, getAdapter } from '@ai-video/generation-adapters';
@@ -50,6 +55,70 @@ const MAX_MEDIA_CANDIDATES = 50;
 const MAX_MEDIA_PARAMETERS = 40;
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROLLED_IMAGE_BYTES = 25 * 1024 * 1024;
+
+type ProductionSceneInputs = NonNullable<ProductionCompileResult['sceneInputs']>;
+
+function productionSceneVoiceInputs(sceneInputs: ProductionSceneInputs) {
+  return sceneInputs.scene.dialogueAudioId
+    ? []
+    : (sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
+        if (binding.voiceDisabled) return [];
+        const voice = binding.voiceReferenceVersionId
+          ? sceneInputs.media.voices.find(
+              (item) =>
+                item.versionId === binding.voiceReferenceVersionId &&
+                item.characterDocumentId === binding.characterDocumentId,
+            )
+          : sceneInputs.media.characters.find(
+              (character) => character.characterDocumentId === binding.characterDocumentId,
+            )?.voice;
+        return voice ? [voice] : [];
+      });
+}
+
+function productionSceneImageBindings(
+  sceneInputs: ProductionSceneInputs,
+): SceneMaterialBindingInfo[] {
+  return [
+    ...(sceneInputs.scene.materialBindings ?? []).filter((binding) => binding.role !== 'character'),
+    ...(sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
+      const assetId = binding.imageDisabled
+        ? undefined
+        : (binding.imageAssetId ??
+          sceneInputs.media.characters.find(
+            (character) => character.characterDocumentId === binding.characterDocumentId,
+          )?.defaultImage?.id);
+      return assetId
+        ? [
+            {
+              id: 'cast-' + binding.characterDocumentId,
+              role: 'character' as const,
+              label: sceneInputs.characterNames[binding.characterDocumentId] ?? '角色',
+              assetId,
+              source: binding.imageAssetId ? ('manual' as const) : ('auto' as const),
+              sourceDocumentId: binding.characterDocumentId,
+            },
+          ]
+        : [];
+    }),
+  ];
+}
+
+function bindProductionSceneVoices(
+  adapter: AdapterDescriptor,
+  parameters: AdapterParameters,
+  sceneInputs: ProductionSceneInputs,
+): AdapterParameters {
+  if (!adapter.capability.endsWith('_VIDEO') || !supportsProductionAudioUpload(adapter))
+    return parameters;
+  return addProductionRoleVoices(
+    adapter,
+    parameters,
+    productionSceneVoiceInputs(sceneInputs),
+    sceneInputs.scene.dialogueAudioId,
+    productionSceneImageBindings(sceneInputs),
+  );
+}
 
 export interface MediaPrepareArguments {
   prompt: string;
@@ -95,8 +164,9 @@ export class MediaPreparationService {
     ) => LlmInputAttachment[] = () => [],
   ) {}
 
+  // Form submission uses the edited adapter parameters. Production compilation
+  // belongs to explicit fill or Agent selection, never to this submit path.
   prepareImage(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
-    params = this.prepareProductionDraft(params);
     const materialized = this.materializeInputs([], params.parameters);
     try {
       return this.images.prepare({
@@ -111,7 +181,6 @@ export class MediaPreparationService {
   }
 
   prepareVideo(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
-    params = this.prepareProductionDraft(params);
     if (isOfficialVideoAdapter(params.adapterKey)) {
       const profile = params.providerProfileId
         ? this.settings.getProfile(params.providerProfileId)
@@ -157,7 +226,8 @@ export class MediaPreparationService {
       };
     }
     const materialized =
-      isOfficialVideoAdapter(params.adapterKey) || isWanMediaAdapter(getAdapter(params.adapterKey))
+      isOfficialVideoAdapter(params.adapterKey) ||
+      isStructuredVideoAdapter(getAdapter(params.adapterKey))
         ? materializeOfficialVideoInputs(this.projects, params)
         : this.materializeInputs([], params.parameters);
     try {
@@ -172,32 +242,6 @@ export class MediaPreparationService {
     }
   }
 
-  private prepareProductionDraft<
-    T extends ImageGenerationPrepareParams | VideoGenerationPrepareParams,
-  >(params: T): T {
-    if (params.productionSource) return params;
-    const target =
-      'sceneId' in params && params.sceneId
-        ? { kind: 'scene' as const, id: params.sceneId }
-        : params.shotId
-          ? { kind: 'shot' as const, id: params.shotId }
-          : undefined;
-    if (!target) return params;
-    const compiled = new ProductionService(this.projects).compile({
-      target,
-      adapterKey: params.adapterKey,
-    });
-    if (compiled.issues.length)
-      throw new Error(compiled.issues.map((issue) => issue.message).join('\n'));
-    return compiled.source
-      ? {
-          ...params,
-          productionSource: compiled.source,
-          parameters: { ...compiled.parameters, ...params.parameters },
-        }
-      : params;
-  }
-
   selectionContext(
     kind: MediaGenerationKind,
     rawArguments: unknown,
@@ -206,19 +250,36 @@ export class MediaPreparationService {
   ): MediaSelectionContext {
     this.assertIdentity(identity);
     const args = parseMediaPrepareArguments(kind, rawArguments);
+    if (kind === 'image') {
+      if (args.sourceDocumentId) {
+        this.projects.access(false, (db, project) => {
+          const doc = db
+            .prepare(
+              "SELECT kind FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
+            )
+            .get(args.sourceDocumentId, project.id) as { kind: string } | undefined;
+          if (
+            !doc ||
+            (['character', 'scene', 'prop'].includes(args.assetKind ?? '') &&
+              args.assetKind !== doc.kind)
+          )
+            throw new Error('制作源文档不可用或与素材类型不一致。');
+          if (doc.kind === 'scene') args.assetKind = 'scene';
+        });
+      }
+      if (args.assetKind === 'scene')
+        Object.assign(args, prepareSceneReferenceImageProposal(args.prompt, args.parameters));
+      parseMediaPrepareArguments(kind, args);
+    }
     this.assertInputAssets(args.inputAssetIds);
     const inputAttachments = (includeAttachments ? this.resolveAttachments(identity) : []).flatMap(
       (attachment) => {
         if (!attachment.mimeType.toLowerCase().startsWith('image/') || !attachment.dataUrl)
           return [];
+        // Desktop may have transcoded the original file (e.g. PNG -> JPEG).
+        // The canonical data URL is checked against the bytes below; the outer
+        // label can describe the original file and must not override that type.
         const parsed = parseCanonicalImageDataUrl(attachment.dataUrl);
-        if (normalizeImageContentType(attachment.mimeType) !== parsed.contentType) {
-          throw new AgentToolPolicyError(
-            'AGENT_TOOL_ARGUMENTS_INVALID',
-            'An image attachment MIME type does not match its encoded content.',
-            true,
-          );
-        }
         return [{ contentType: parsed.contentType, sha256: parsed.sha256 }];
       },
     );
@@ -253,6 +314,26 @@ export class MediaPreparationService {
       candidates: structuredClone(context.candidates),
       expiresAt,
     };
+  }
+
+  /** Only call after the desktop's one-use model/review token has been verified.
+   * Local files chosen in that form become this decision's frozen inputs. Agent
+   * tool arguments still pass through the original attachment allowlist.
+   */
+  prepareReviewedSelection(
+    context: MediaSelectionContext,
+    selection: MediaModelSelectionDecision,
+    identity: MediaIdentity,
+  ): MediaGenerationDraft {
+    this.assertIdentity(identity);
+    const inputAttachments = Array.isArray(selection.parameters.images)
+      ? selection.parameters.images.flatMap((image) => {
+          if (typeof image !== 'string' || !/^data:/iu.test(image)) return [];
+          const { contentType, sha256 } = parseCanonicalImageDataUrl(image);
+          return [{ contentType, sha256 }];
+        })
+      : context.inputAttachments;
+    return this.prepareSelected({ ...context, inputAttachments }, selection, identity);
   }
 
   prepareSelected(
@@ -318,8 +399,9 @@ export class MediaPreparationService {
       : context.arguments.shotId
         ? { kind: 'shot' as const, id: context.arguments.shotId }
         : undefined;
+    const productionService = new ProductionService(this.projects);
     const production = target
-      ? new ProductionService(this.projects).compile({
+      ? productionService.compile({
           target,
           adapterKey: adapter.key,
           ...(reviewedImages || inputImages.length ? { inputImages } : {}),
@@ -341,54 +423,7 @@ export class MediaPreparationService {
       selection.parameters,
     );
     const sceneInputs = production?.sceneInputs;
-    if (sceneInputs && adapter.capability.endsWith('_VIDEO')) {
-      const voices = sceneInputs.scene.dialogueAudioId
-        ? []
-        : (sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
-            if (binding.voiceDisabled) return [];
-            const voice = binding.voiceReferenceVersionId
-              ? sceneInputs.media.voices.find(
-                  (voice) =>
-                    voice.versionId === binding.voiceReferenceVersionId &&
-                    voice.characterDocumentId === binding.characterDocumentId,
-                )
-              : sceneInputs.media.characters.find(
-                  (character) => character.characterDocumentId === binding.characterDocumentId,
-                )?.voice;
-            return voice ? [voice] : [];
-          });
-      parameters = addProductionRoleVoices(
-        adapter,
-        parameters,
-        voices,
-        sceneInputs.scene.dialogueAudioId,
-        [
-          ...(sceneInputs.scene.materialBindings ?? []).filter(
-            (binding) => binding.role !== 'character',
-          ),
-          ...(sceneInputs.scene.characterBindings ?? []).flatMap((binding) => {
-            const assetId = binding.imageDisabled
-              ? undefined
-              : (binding.imageAssetId ??
-                sceneInputs.media.characters.find(
-                  (c) => c.characterDocumentId === binding.characterDocumentId,
-                )?.defaultImage?.id);
-            return assetId
-              ? [
-                  {
-                    id: 'cast-' + binding.characterDocumentId,
-                    role: 'character' as const,
-                    label: sceneInputs.characterNames[binding.characterDocumentId] ?? '角色',
-                    assetId,
-                    source: 'auto' as const,
-                    sourceDocumentId: binding.characterDocumentId,
-                  },
-                ]
-              : [];
-          }),
-        ],
-      );
-    }
+    if (sceneInputs) parameters = bindProductionSceneVoices(adapter, parameters, sceneInputs);
     const validation = this.adapters.validate({ adapterKey: adapter.key, parameters });
     if (!validation.valid) {
       throw new AgentToolPolicyError(
@@ -510,6 +545,7 @@ export class MediaPreparationService {
               parameterTemplateKey: model.parameterTemplateKey,
               contractStatus: model.contractStatus,
             }) &&
+            modelSupportsMediaAdapter(model, adapter) &&
             adapterSupportsInputs(adapter, kind, inputCount, hasVideo) &&
             this.settings.getAdapterSchemaRecord(adapter.key)?.status !== 'needs_confirmation',
         );
@@ -560,7 +596,11 @@ export class MediaPreparationService {
       providerProfileId: candidate.providerProfileId,
       providerType: route.providerType,
       providerBaseUrlCategory: route.baseUrlCategory,
-      ...(route.providerType === 'wan-video' ? { providerBaseUrl: profile.baseUrl } : {}),
+      ...(route.providerType === 'wan-video' ||
+      route.providerType === 'openai' ||
+      route.providerType === 'custom'
+        ? { providerBaseUrl: profile.baseUrl }
+        : {}),
       providerRegion: route.providerRegion,
       modelId: candidate.modelId,
       remoteModelId: candidate.remoteModelId,
@@ -590,7 +630,9 @@ export class MediaPreparationService {
     }
     Object.assign(
       parameters,
-      cloneParameters(context.arguments.parameters),
+      context.kind === 'image' && context.arguments.assetKind === 'scene'
+        ? sceneReferenceImageParameters(adapter, cloneParameters(context.arguments.parameters))
+        : cloneParameters(context.arguments.parameters),
       cloneParameters(selected),
     );
     const images = productionImagesFromParameters(adapter, parameters);
@@ -805,6 +847,17 @@ export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
       baseUrlCategory: MediaProviderBaseUrlCategory;
     }
   | undefined {
+  if (profile.accessType === 'custom') {
+    return (profile.category === 'llm' || profile.category === 'multi') &&
+      profile.providerType === 'custom' &&
+      ['openai-responses', 'openai-chat-completions'].includes(profile.protocol)
+      ? {
+          providerType: 'custom',
+          providerRegion: 'global',
+          baseUrlCategory: 'custom-openai-compatible',
+        }
+      : undefined;
+  }
   if (
     profile.accessType !== 'official' ||
     (profile.providerType === 'unicompapi' &&
@@ -818,6 +871,17 @@ export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
       providerType: 'unicompapi',
       providerRegion: 'unicompapi',
       baseUrlCategory: 'official-unicompapi',
+    };
+  }
+  if (
+    profile.providerType === 'openai' &&
+    profile.protocol === 'openai-responses' &&
+    profile.baseUrl === 'https://api.openai.com/v1'
+  ) {
+    return {
+      providerType: 'openai',
+      providerRegion: 'global',
+      baseUrlCategory: 'official-openai',
     };
   }
   const officialVideoRoutes = {
@@ -896,7 +960,9 @@ export function parseMediaPrepareArguments(
       true,
     );
   }
-  const prompt = requireText(record.prompt, 'prompt', 5_000);
+  // Keep the Agent media handoff aligned with ProductionAuthoringIR. Provider
+  // adapters still enforce their own prompt limits during parameter validation.
+  const prompt = requireText(record.prompt, 'prompt', 20_000);
   const inputAssetIds = Array.isArray(record.inputAssetIds)
     ? record.inputAssetIds.map((item) => requireText(item, 'inputAssetIds', 200))
     : [];
@@ -990,6 +1056,18 @@ function modelSupportsKind(model: ProviderModelInfo, kind: MediaGenerationKind):
   return kind === 'image'
     ? model.capabilities.imageGeneration || model.capabilities.imageEditing === true
     : model.capabilities.videoGeneration;
+}
+
+export function modelSupportsMediaAdapter(
+  model: ProviderModelInfo,
+  adapter: AdapterDescriptor,
+): boolean {
+  if (adapter.capability === 'REFERENCE_TO_IMAGE') {
+    return model.capabilities.imageGeneration || model.capabilities.imageEditing === true;
+  }
+  if (adapter.capability.endsWith('TO_IMAGE')) return model.capabilities.imageGeneration;
+  if (adapter.capability.endsWith('TO_VIDEO')) return model.capabilities.videoGeneration;
+  return false;
 }
 
 function costNotice(pricing: ModelPricingInfo[], model: ProviderModelInfo) {

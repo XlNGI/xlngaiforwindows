@@ -532,7 +532,7 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
           version.version,
           version.contentMarkdown,
           version.contentIRJson ?? null,
-          version.state ?? 'published',
+          version.state ?? 'draft',
           version.baseVersionId ?? null,
           version.titleSnapshot ?? record.title,
           version.scopeTypeSnapshot ?? record.scopeType,
@@ -546,24 +546,16 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
           version.stateUpdatedAt ?? version.createdAt,
           version.createdAt,
         );
-      const autoPublish = (version.state ?? 'published') === 'published';
+      const versionPublished = (version.state ?? 'draft') === 'published';
       this.database
         .prepare(
           `UPDATE documents
            SET current_version_id = ?,
-               published_version_id = CASE WHEN ? THEN ? ELSE published_version_id END,
                updated_at = ?,
                row_version = row_version + CASE WHEN ? THEN 1 ELSE 0 END
            WHERE id = ?`,
         )
-        .run(
-          version.id,
-          autoPublish ? 1 : 0,
-          version.id,
-          record.updatedAt,
-          autoPublish ? 1 : 0,
-          record.id,
-        );
+        .run(version.id, record.updatedAt, versionPublished ? 1 : 0, record.id);
     })();
   }
 
@@ -1138,10 +1130,12 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
     return row ? mapScene(row) : undefined;
   }
 
-  listByProject(projectId: string): SceneRecord[] {
+  listByProject(projectId: string, includeArchived = false): SceneRecord[] {
     return (
       this.database
-        .prepare('SELECT * FROM scenes WHERE project_id = ? ORDER BY position, id')
+        .prepare(
+          `SELECT * FROM scenes WHERE project_id = ? ${includeArchived ? '' : 'AND archived_at IS NULL'} ORDER BY position, id`,
+        )
         .all(projectId) as SceneRow[]
     ).map(mapScene);
   }
@@ -1150,6 +1144,7 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
 interface SceneRow {
   id: string;
   project_id: string;
+  archived_at: string | null;
   title: string;
   scene_document_id: string | null;
   video_prompt: string | null;
@@ -1166,6 +1161,7 @@ function mapScene(row: SceneRow): SceneRecord {
   return {
     id: row.id,
     projectId: row.project_id,
+    archivedAt: row.archived_at ?? undefined,
     title: row.title,
     sceneDocumentId: row.scene_document_id ?? undefined,
     videoPrompt: row.video_prompt ?? undefined,
@@ -1241,10 +1237,12 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
     return row ? mapShot(row) : undefined;
   }
 
-  listByScene(sceneId: string): ShotRecord[] {
+  listByScene(sceneId: string, includeArchived = false): ShotRecord[] {
     return (
       this.database
-        .prepare('SELECT * FROM shots WHERE scene_id = ? ORDER BY position, id')
+        .prepare(
+          `SELECT * FROM shots WHERE scene_id = ? ${includeArchived ? '' : 'AND archived_at IS NULL AND EXISTS (SELECT 1 FROM scenes WHERE scenes.id = shots.scene_id AND scenes.archived_at IS NULL)'} ORDER BY position, id`,
+        )
         .all(sceneId) as ShotRow[]
     ).map(mapShot);
   }
@@ -1253,6 +1251,7 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
 interface ShotRow {
   id: string;
   scene_id: string;
+  archived_at: string | null;
   title: string;
   position: number;
   status: string;
@@ -1268,6 +1267,7 @@ function mapShot(row: ShotRow): ShotRecord {
   return {
     id: row.id,
     sceneId: row.scene_id,
+    archivedAt: row.archived_at ?? undefined,
     title: row.title,
     position: row.position,
     status: row.status,
@@ -1535,18 +1535,23 @@ class SqliteChatMessageRepository extends ProjectScopedRepository implements Cha
     return rows.map(mapChatMessage);
   }
 
-  failStreamingByProject(projectId: string, failureMessage: string): number {
+  failStreamingByProject(
+    projectId: string,
+    failureMessage: string,
+    excludedGenerationIds: string[] = [],
+  ): number {
     const result = this.database
       .prepare(
         `UPDATE chat_messages
          SET status = 'failed',
              content = CASE WHEN length(trim(content)) = 0 THEN ? ELSE content END
          WHERE status = 'streaming'
+           AND id NOT IN (SELECT assistant_message_id FROM llm_generations WHERE id IN (SELECT value FROM json_each(?)))
            AND conversation_id IN (
              SELECT id FROM conversations WHERE project_id = ?
            )`,
       )
-      .run(failureMessage, projectId);
+      .run(failureMessage, JSON.stringify(excludedGenerationIds), projectId);
     return result.changes;
   }
 }
@@ -1668,15 +1673,21 @@ class SqliteLlmGenerationAttemptRepository
     ).map(mapLlmGenerationAttempt);
   }
 
-  failActiveByProject(projectId: string, completedAt: string, errorMessage: string): number {
+  failActiveByProject(
+    projectId: string,
+    completedAt: string,
+    errorMessage: string,
+    excludedGenerationIds: string[] = [],
+  ): number {
     return this.database
       .prepare(
         `UPDATE llm_generation_attempts
          SET status = 'failed', completed_at = ?, error_code = 'worker-restarted', error_message = ?
          WHERE status IN ('prepared', 'streaming', 'interrupted')
+           AND generation_id NOT IN (SELECT value FROM json_each(?))
            AND conversation_id IN (SELECT id FROM conversations WHERE project_id = ?)`,
       )
-      .run(completedAt, errorMessage, projectId).changes;
+      .run(completedAt, errorMessage, JSON.stringify(excludedGenerationIds), projectId).changes;
   }
 }
 
@@ -1690,9 +1701,9 @@ class SqliteLlmGenerationRepository
         `INSERT INTO llm_generations
          (id, project_id, project_session_id, conversation_id, context_snapshot_id,
           user_message_id, assistant_message_id, status, execution_mode,
-          retry_of_generation_id, idempotency_key, provider_profile_id, model_id,
+          retry_of_generation_id, idempotency_key, request_fingerprint, provider_profile_id, model_id,
           error_code, error_message, retryable, created_at, updated_at, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -1706,6 +1717,7 @@ class SqliteLlmGenerationRepository
         record.executionMode,
         record.retryOfGenerationId ?? null,
         record.idempotencyKey ?? null,
+        record.requestFingerprint ?? null,
         record.providerProfileId ?? null,
         record.modelId ?? null,
         record.errorCode ?? null,
@@ -1762,15 +1774,20 @@ class SqliteLlmGenerationRepository
     return result.changes === 1;
   }
 
-  failActiveByProject(projectId: string, updatedAt: string, errorMessage: string): number {
+  failActiveByProject(
+    projectId: string,
+    updatedAt: string,
+    errorMessage: string,
+    excludedGenerationIds: string[] = [],
+  ): number {
     return this.database
       .prepare(
         `UPDATE llm_generations
          SET status = 'failed', error_code = 'worker-restarted', error_message = ?,
              retryable = 1, updated_at = ?, version = version + 1
-         WHERE project_id = ? AND status IN ('prepared', 'streaming')`,
+         WHERE project_id = ? AND status IN ('prepared', 'streaming') AND id NOT IN (SELECT value FROM json_each(?))`,
       )
-      .run(errorMessage, updatedAt, projectId).changes;
+      .run(errorMessage, updatedAt, projectId, JSON.stringify(excludedGenerationIds)).changes;
   }
 }
 
@@ -1786,6 +1803,7 @@ interface LlmGenerationRow {
   execution_mode: LlmGenerationRecord['executionMode'];
   retry_of_generation_id: string | null;
   idempotency_key: string | null;
+  request_fingerprint: string | null;
   provider_profile_id: string | null;
   model_id: string | null;
   error_code: string | null;
@@ -1809,6 +1827,7 @@ function mapLlmGeneration(row: LlmGenerationRow): LlmGenerationRecord {
     executionMode: row.execution_mode,
     retryOfGenerationId: row.retry_of_generation_id ?? undefined,
     idempotencyKey: row.idempotency_key ?? undefined,
+    requestFingerprint: row.request_fingerprint ?? undefined,
     providerProfileId: row.provider_profile_id ?? undefined,
     modelId: row.model_id ?? undefined,
     errorCode: row.error_code ?? undefined,

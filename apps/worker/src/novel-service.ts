@@ -83,7 +83,12 @@ function bindingInfo(record: DocumentBindingRecord): NovelBindingInfo {
 
 export class NovelServiceError extends Error {
   constructor(
-    readonly code: 'CONFLICT' | 'INVALID_PARAMETERS' | 'INVALID_STATE' | 'NOT_FOUND',
+    readonly code:
+      | 'CONFLICT'
+      | 'DOCUMENT_PUBLISHED_READ_ONLY'
+      | 'INVALID_PARAMETERS'
+      | 'INVALID_STATE'
+      | 'NOT_FOUND',
     message: string,
   ) {
     super(message);
@@ -266,6 +271,12 @@ export class NovelService {
           if (!document || document.projectId !== project.id) {
             throw new NovelServiceError('INVALID_STATE', 'Chapter document is missing.');
           }
+          if (document.publishedVersionId) {
+            throw new NovelServiceError(
+              'DOCUMENT_PUBLISHED_READ_ONLY',
+              'Published chapter documents are read-only. Unpublish the document before editing.',
+            );
+          }
           database
             .prepare(
               `UPDATE documents SET title = ?, lifecycle_status = ?, updated_at = ?, row_version = row_version + 1
@@ -345,6 +356,12 @@ export class NovelService {
           throw new NovelServiceError(
             'INVALID_STATE',
             'Only active chapter metadata can be edited.',
+          );
+        }
+        if (document.publishedVersionId) {
+          throw new NovelServiceError(
+            'DOCUMENT_PUBLISHED_READ_ONLY',
+            'Published chapter documents are read-only. Unpublish the document before editing.',
           );
         }
         if (chapter.rowVersion !== params.expectedChapterRowVersion) {
@@ -621,6 +638,12 @@ export class NovelService {
         const document = repositories.documents.get(params.documentId);
         if (!document || document.projectId !== project.id) {
           throw new NovelServiceError('NOT_FOUND', 'Document was not found.');
+        }
+        if (document.publishedVersionId) {
+          throw new NovelServiceError(
+            'DOCUMENT_PUBLISHED_READ_ONLY',
+            'Published documents are read-only. Unpublish the document before changing bindings.',
+          );
         }
         const now = new Date().toISOString();
         const record: DocumentBindingRecord = {

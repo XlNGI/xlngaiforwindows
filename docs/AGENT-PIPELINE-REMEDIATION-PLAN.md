@@ -81,8 +81,8 @@ P5：Schema v58 独立记录每次请求的 generation/attempt/project/session �
 ### 不变量、状态和所有权
 
 - 恢复属于原 generation/attempt/project/session/conversation；保留原请求、约束、成功工具结果和真实 ID，不创建第二条用户消息或重复任务。每次实际 Native 请求仍独立审计，失败请求保持 failed。
-- 仅已明确声明“该响应没有工具执行”的 JSON 对象错误和 length/max_tokens/max_output_tokens 终止允许恢复。单个 generation 合计最多两次自动修正；既有 Schema 修复次数、24 轮和业务调用上限继续生效。不自动修复网络中断、鉴权、内容过滤、未知失败或业务写入失败。
-- 状态为原任务 running → 参数拒绝/审计 → repairing_tool_output → running → complete/failed/cancelled。最终重复失败用 TOOL_OUTPUT_REPAIR_LIMIT 结束；关闭/切换/取消后不发起恢复请求。崩溃/重开仍由现有 generation 终态恢复处理，分段数据按原会话保留。
+- 仅已明确声明“该响应没有工具执行”的 JSON 对象错误和 length/max_tokens/max_output_tokens 终止允许恢复；不设固定修复次数，允许不同失败输出继续在同一 generation 内修正。Provider 只在本次进程内计算工具参数指纹，不保存或记录参数正文；相同失败输出重复时以 AGENT_OUTPUT_REPAIR_STALLED 结束，避免无进展循环。Provider 请求逐次记账，但不因任务规模或总请求数终止。不自动修复网络中断、鉴权、内容过滤、未知失败或业务写入失败。
+- 状态为原任务 running → 参数拒绝/审计 → repairing_tool_output → running → complete/failed/cancelled。重复失败以 AGENT_OUTPUT_REPAIR_STALLED 结束；关闭/切换/取消后不发起恢复请求。崩溃/重开仍由现有 generation 终态恢复处理，分段数据按原会话保留。
 - 场次失败只加载 Worker 已授权的 scene.structure.stage；先查现有分段，再按最新 stageId/rowVersion 续写。新创作建议每批一到两镜；已有场次修订保留 sceneId/CAS，仍可加载原更新入口，不能改成新建。
 - 保持 2026-10-19 已确认的自动保存要求（见 PRODUCTION-EXECUTION-IMPLEMENTATION-PLAN.md）：完整结构经原服务校验后直接写可编辑草稿，无需新增审核。只有真实 scene_structure_saved 返回才记录保存成功；暂存分段不等于完整场次已保存。
 - Native 只增加 JSON 错误类别和行列号，不记录或回显失败参数正文。UI 以真实 read 引用判断“资料已读取”，不把请求结束误作读取成功；明确显示自动修正、保存成功、失败提交未执行及已有草稿/分段保留。
@@ -136,8 +136,43 @@ P5：Schema v58 独立记录每次请求的 generation/attempt/project/session �
 
 实际缓存是否命中仍取决于后续请求的完整前缀、Provider 缓存策略及路由；离线验证只能证明请求组织与统计正确，不能证明线上命中率提升。本轮不进行真实 Provider 调用或重发用户任务。Windows 12152 流读取失败属于另一问题，本次不宣称已修复。
 
+## 2026-10-27 参数修复与任务预算修订
+
+本节按用户本次要求审计并实施，取代此前“连续三次 Schema 校验失败即终止”的规则。两类 Pi 网关（普通 Worker 工具与计划工作流）都存在独立三次计数；计数按整个 generation 累加，不区分错误是否相同，也不区分缺字段、格式错误或大提交，因此“请缩小为分段提交”并不总是成立。Worker 网关还将执行前的 Schema 拒绝记入实际工具调用额度；该失败同时消耗 Provider 请求额度和工具额度，虽然没有执行工具。
+
+预算边界审计：每任务默认最多 24 次 Provider 请求；业务工具默认 16 次，读取场景/生产数据的任务可扩至 32 次。Provider 请求数与已报告 Token/费用按独立请求记录；没有本地美元硬上限，也没有原任务暂停后继续运行的 API。预算触顶时任务状态仍是终态 `failed`，已保存草稿和分段保留，用户需在原会话检查任务日志后提交未完成部分。上述额度属于本应用的任务保护，不是 Codex 订阅额度。
+
+- [x] P1 移除两类网关各自的三次参数失败终止；修正继续受 24 次持久化 Provider 请求预算约束，业务工具仍受 16/32 次真实执行预算约束。
+- [x] P2 参数 Schema／输出格式拒绝只更新任务审计时间并记录有界失败事件，不扣实际工具调用数或提前暂停工具预算；Provider 请求及用量照常记录。
+- [x] P3 修正旧错误和额度终止的桌面提示：不再推断所有参数问题都应拆小；明确区分模型请求预算与工具调用预算。
+- [x] P4 任务详情返回已用/上限快照；失败提示显示两类计数，并可预填“继续未完成部分”消息。发送后会创建新生成任务；不声称原任务可原地恢复。
+- [x] P5 聚焦回归通过：Worker 六个相关测试文件 243 项、Desktop `ChatPanel.test.tsx` 37 项；`pnpm typecheck` 通过；本次改动文件 ESLint 无错误（CSS 按仓库配置忽略）、Prettier 检查及 `git diff --check` 通过。
+
 ## 2026-10-21 请求账本、按需工作流与上下文预算
 
 用户确认的后续三阶段改造已完成：请求明细与完整/部分/未知统计落地本地账本及可重建索引；有界工具集合稳定顺序，详细工作流随工具加载提供，重复长读取只在新结果引用旧结果；发送前检查整份上下文预算，仅整理具有版本定位的旧资料，保留用户输入、约束和已保存结果。失败/取消的迟到用量不丢失、不重开终态、不重复计费，旧记录不补造请求明细。
 
 全仓 1,714 项、typecheck/lint/format/build、Native host 合同 4 项及生产 Worker 离线八组合通过，`providerRequests=0`。实现顺序、精确预算、迁移和验证边界统一记录于 [Agent 用量、缓存与上下文预算实施计划](./AGENT-USAGE-CONTEXT-IMPLEMENTATION-PLAN.md)。本次按需工作流策略取代 C1 中预先建立全部工作流策略的做法；资料按需检索和 Worker 授权边界不变。线上缓存效果需实际请求复测，未合并分支或手动重启用户应用。
+
+## 2026-10-29 单次请求完成整项任务
+
+目标是用户提交一次请求后，由同一个 generation/attempt/task 连续完成授权范围内的全部工作。任务大小和实际 Provider 请求次数不再触发固定总量上限；每个 Provider 请求仍独立记账。上下文窗口、单次工具参数/结果上限、危险操作确认、会话取消与项目切换边界仍然生效。只有成功且参数内容不同的持久化写入算作续跑进展；重复检索、工具加载、失败写入和相同写入重放不能让卡住的任务无限续跑。已保存内容先按真实 ID 与版本恢复，写入沿用 executionKey、版本/CAS 与既有幂等逻辑；不会重发有歧义的付费媒体提交。
+
+- [x] T1 同任务续跑：章节正文、场次/分镜和分段清单未完成时，在当前 Pi generation 追加续跑指令并复用已有工具结果；完整完成后才允许任务终态成功。没有新增持久化写入进展时以 `AGENT_TASK_CONTINUATION_STALLED` 明确失败。
+- [x] T2 大任务分段与上下文：超过单页容量的场次清单可在同一任务分成持久化页面；压缩旧资料正文与已成功页面回执时保留版本定位、stage/execution key、rowVersion 和真实对象 ID。分段目录按创建顺序稳定分页，包含完成标记，页面完成后继续翻页不会跳项。
+- [x] T3 幂等与安全边界：同内容成功写入的指纹不会重复计为进展；工具授权仍按步骤签发，取消/过期会话不会继续请求；仅对明确保证无工具执行的输出格式失败执行指纹去重的修复，无固定次数上限；重复同一失败输出时停滞退出，不自动重试网络、鉴权、过滤或业务写入错误。
+- [x] T4 验证：同任务续跑、上下文预算、Worker Agent loop、两个协议下跨越旧 Provider 请求边界与 14 场/112 镜头单任务分页持久化用例通过；七个 Agent 相关测试文件共 268 项通过；Worker typecheck/build、相关文件 ESLint/Prettier 与 `git diff --check` 通过。此前 Worker 全量为 1,046 通过、5 失败；失败限定在既存的 `AgentSystemToolService` 场景媒体绑定断言（1）及官方视频音频输入/提示词断言（4），不涉及本次修改文件。全仓 `pnpm lint` 仍报告其他工作区文件问题，`pnpm format:check` 报 3 个非本次文件未格式化。
+
+没有真实 Provider 请求，也未重发用户先前的任务。模型对任意真实长任务的耗时和最终成功率需在新版运行时观察；本地测试验证的是同一任务的状态、续跑和幂等边界。
+
+## 2026-10-30 Agent 提示词正文来源修正
+
+本次实施针对角色、场景和镜头提示词被会话要求遗漏或被界面改写的问题：
+
+- [x] I1 角色与场景页面生图入口直接透传当前文档正文；保留来源文档、素材类型、场景参考图和用户最终确认，不再由界面追加或改写提示词。
+- [x] I2 `composeImageGenerationPrompt`、`composeCharacterImagePrompt` 与 `composeSceneReferenceImagePrompt` 退化为只清理外层空白，通用角色/场景要求仅作为 Agent 创作指导，不作为界面默认正文。
+- [x] I3 统一 Agent 最终正文指导：当前会话约束和本次请求是交付合同；生成相关要求必须进入 `contentMarkdown`、`authoringIR.prompt` 或 `media.*.prepare.prompt`，不能只写 `data`、`references`、备注或普通回复。
+- [x] I4 `media.*.prepare` 的 Agent 提示词输入上限与 ProductionAuthoringIR 对齐到 20,000 字符，Provider 适配器仍负责具体模型上限校验，避免在 Agent/Worker 入口静默截断。
+- [x] I5 定向回归：Desktop character prompt、ProductionPanel；Worker Agent guidance/gateway/media；Contracts scene-reference；Desktop/Worker/Contracts typecheck、Prettier 与 `git diff --check` 通过。
+
+本次不引入自然语言语义自动重写。Worker 仍只校验结构、项目范围、引用和 Provider 参数；会话约束是否完整落实由 Agent 按新增逐项自检指导写入最终正文。Desktop `App.test.tsx` 中依赖项目启动页后再打开文档的旧用例仍受当前工作区已有启动状态变更影响，未将这些前置失败归因于本次提示词透传修正。

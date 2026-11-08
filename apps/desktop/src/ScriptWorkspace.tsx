@@ -1,116 +1,39 @@
-import { FileText, ListChecks, RotateCcw } from 'lucide-react';
-import type { DocumentKind } from '@ai-video/contracts';
-
-const KIND_OPTIONS: Array<{ id: DocumentKind; label: string }> = [
-  { id: 'outline', label: '\u5927\u7eb2' },
-  { id: 'plan', label: '\u8ba1\u5212' },
-  { id: 'note', label: '\u7b14\u8bb0' },
-];
+import { RotateCcw } from 'lucide-react';
+import { MarkdownEditor } from './MarkdownEditor';
 
 export function ScriptWorkspace({
-  title,
-  kind,
   content,
-  stateLabel,
-  stateKey,
   writable,
   versions,
   currentVersionId,
   message,
   episodeChapterCount = 0,
-  onTitleChange,
-  onKindChange,
   onContentChange,
   onRestoreVersion,
-  onPrepareMedia,
-  preparationDisabled,
 }: {
-  title: string;
-  kind: DocumentKind;
   content: string;
-  stateLabel: string;
-  stateKey: string;
   writable: boolean;
   versions: Array<{ id: string; version: number; createdAt: string }>;
   currentVersionId?: string;
   message?: string;
   episodeChapterCount?: number;
-  onTitleChange: (value: string) => void;
-  onKindChange: (value: DocumentKind) => void;
   onContentChange: (value: string) => void;
   onRestoreVersion: (versionId: string) => void;
-  onPrepareMedia?: () => void;
-  preparationDisabled?: boolean;
 }) {
-  const options = KIND_OPTIONS.some((item) => item.id === kind)
-    ? KIND_OPTIONS
-    : [{ id: kind, label: kind }, ...KIND_OPTIONS];
-
   return (
     <div className="script-workspace">
-      <section className="script-document-panel" aria-labelledby="script-document-heading">
-        <div className="script-document-heading">
-          <h2 id="script-document-heading">
-            <FileText size={16} aria-hidden="true" />
-            {'\u9879\u76ee\u6587\u6863'}
-          </h2>
-        </div>
-        {onPrepareMedia && (
-          <div className="production-action-bar" role="group" aria-label="剧本制作">
-            <div className="production-action-copy">
-              <strong>剧本 → 媒体表单</strong>
-              <p>准备图片、视频及所需音频，调整表单后提交生成</p>
-            </div>
-            <button
-              type="button"
-              className="button primary"
-              disabled={!writable || preparationDisabled}
-              onClick={onPrepareMedia}
-            >
-              <ListChecks size={15} aria-hidden="true" />
-              一键准备媒体表单
-            </button>
-          </div>
-        )}
+      <section className="script-document-panel">
         {episodeChapterCount > 0 ? (
           <p className="script-episode-hint">
             {`\u5df2\u6307\u5b9a ${episodeChapterCount} \u4e2a\u7ae0\u8282\u4f5c\u4e3a\u672c\u96c6\u8303\u56f4\u3002\u8fd9\u4efd\u6587\u6863\u53ea\u5199\u672c\u96c6\u628a\u63a7\uff0c\u4e0d\u8981\u628a\u955c\u5934\u63d0\u793a\u8bcd\u5199\u8fdb\u6765\u53d1\u7ed9\u751f\u4ea7 API\u3002`}
           </p>
         ) : null}
-        <div className="document-fields">
-          <label className="title-field">
-            {'\u6807\u9898'}
-            <input
-              value={title}
-              onChange={(event) => onTitleChange(event.target.value)}
-              placeholder={
-                '\u8f93\u5165\u5927\u7eb2\u3001\u8ba1\u5212\u6216\u672c\u96c6\u628a\u63a7\u6807\u9898'
-              }
-              readOnly={!writable}
-            />
-          </label>
-          <label className="kind-field">
-            {'\u7c7b\u578b'}
-            <select
-              value={kind}
-              onChange={(event) => onKindChange(event.target.value as DocumentKind)}
-              disabled={!writable}
-              aria-label={'\u6587\u6863\u7c7b\u578b'}
-            >
-              {options.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className={`document-state document-state-${stateKey}`}>{stateLabel}</span>
-        </div>
-        <textarea
-          className="markdown-editor script-document-editor"
-          aria-label={'\u6587\u6863\u5185\u5bb9'}
+        <MarkdownEditor
+          className="script-document-editor"
+          label="文档内容"
           value={content}
-          onChange={(event) => onContentChange(event.target.value)}
+          onChange={onContentChange}
+          autoPreviewOnBlur
           placeholder={
             '\u4f7f\u7528 Markdown \u7f16\u5199\u5927\u7eb2\u3001\u8ba1\u5212\u6216\u672c\u96c6\u628a\u63a7\u2026'
           }

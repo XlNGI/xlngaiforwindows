@@ -5,6 +5,8 @@ import { createDefaultWorkspaceLayout, workspaceReducer } from './workspace-redu
 import { WorkspaceSurface } from './WorkspaceSurface';
 
 interface WorkspaceFixtureProps {
+  roughCutMode?: boolean;
+  startupMode?: boolean;
   productionOpen?: boolean;
   productionContent?: ReactNode;
   documentActive?: boolean;
@@ -16,6 +18,8 @@ interface WorkspaceFixtureProps {
 }
 
 function WorkspaceFixture({
+  roughCutMode = false,
+  startupMode = false,
   productionOpen = false,
   productionContent = <div>生产内容</div>,
   documentActive = true,
@@ -44,10 +48,12 @@ function WorkspaceFixture({
         测试打开资料
       </button>
       <WorkspaceSurface
+        roughCutMode={roughCutMode}
+        startupMode={startupMode}
         layout={layout}
         dispatch={dispatch}
         documentTitle="文档"
-        conversationContent={<div>会话内容</div>}
+        conversationContent={<textarea aria-label="会话草稿" defaultValue="会话内容" />}
         productionContent={productionContent}
         assetsContent={<input aria-label="素材搜索" defaultValue="" />}
         productionOpen={productionOpen}
@@ -73,6 +79,40 @@ describe('WorkspaceSurface', () => {
     window.localStorage?.clear();
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+  });
+
+  it('uses assets before the editor for rough cut without changing the ordinary pane order', async () => {
+    const { container, rerender } = render(<WorkspaceFixture roughCutMode />);
+    fireEvent.click(screen.getByRole('button', { name: '测试打开素材库' }));
+    const order = () =>
+      Array.from(container.querySelectorAll('.workspace-dock-group [data-pane-id]'), (item) =>
+        item.getAttribute('data-pane-id'),
+      );
+    expect(order()).toEqual(['assets', 'editor', 'conversation']);
+    rerender(<WorkspaceFixture />);
+    await waitFor(() => expect(order()).toEqual(['editor', 'assets', 'conversation']));
+    rerender(<WorkspaceFixture roughCutMode />);
+    await waitFor(() => expect(order()).toEqual(['assets', 'editor', 'conversation']));
+  });
+
+  it('shows only the full-width startup page when no project is open', () => {
+    const { container, rerender } = render(<WorkspaceFixture />);
+    fireEvent.click(screen.getByRole('button', { name: '测试打开素材库' }));
+    rerender(<WorkspaceFixture startupMode productionOpen />);
+
+    expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
+    expect(container.querySelector('.workspace-base-content')).toHaveTextContent('文档内容');
+    expect(container.querySelectorAll('.workspace-docked-page')).toHaveLength(1);
+    expect(container.querySelector('.workspace-assets-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.workspace-production-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.floating-window-assets')).not.toBeInTheDocument();
+    expect(container.querySelector('.floating-window-document')).not.toBeInTheDocument();
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+
+    rerender(<WorkspaceFixture />);
+
+    expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
   });
 
   it('opens the document in a system window from its pane header', () => {
@@ -187,29 +227,37 @@ describe('WorkspaceSurface', () => {
     expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(1);
   });
 
-  it('opens assets beside the editor and conversation without losing unsaved content', () => {
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1920 });
-    const { container } = render(
-      <WorkspaceFixture>
-        <input aria-label="项目正文" defaultValue="已保存内容" />
-      </WorkspaceFixture>,
-    );
-    fireEvent.change(screen.getByLabelText('项目正文'), { target: { value: '未保存修改' } });
-    fireEvent.click(screen.getByText('测试打开素材库'));
+  it.each([1100, 1280, 1440, 1920])(
+    'opens assets beside the editor and conversation at %i px without losing unsaved content',
+    (width) => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      const { container } = render(
+        <WorkspaceFixture>
+          <input aria-label="项目正文" defaultValue="已保存内容" />
+        </WorkspaceFixture>,
+      );
+      fireEvent.change(screen.getByLabelText('项目正文'), { target: { value: '未保存修改' } });
+      const conversationDraft = screen.getByLabelText('会话草稿');
+      fireEvent.change(conversationDraft, { target: { value: '未发送的会话内容' } });
+      fireEvent.click(screen.getByText('测试打开素材库'));
 
-    expect(screen.getByLabelText('项目正文')).toHaveValue('未保存修改');
-    expect(container.querySelector('.workspace-assets-page')).toBeInTheDocument();
-    expect(container.querySelectorAll('.workspace-docked-page')).toHaveLength(3);
-    expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(2);
+      expect(screen.getByLabelText('项目正文')).toHaveValue('未保存修改');
+      expect(container.querySelector('.workspace-assets-page')).toBeInTheDocument();
+      expect(container.querySelector('.workspace-conversation-page')).toBeVisible();
+      expect(screen.getByLabelText('会话草稿')).toBe(conversationDraft);
+      expect(conversationDraft).toHaveValue('未发送的会话内容');
+      expect(container.querySelectorAll('.workspace-docked-page')).toHaveLength(3);
+      expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(2);
 
-    fireEvent.click(screen.getByLabelText('关闭素材库'));
-    expect(container.querySelector('.workspace-assets-page')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('项目正文')).toHaveValue('未保存修改');
-    fireEvent.click(screen.getByText('测试打开素材库'));
-    fireEvent.click(screen.getByLabelText('关闭文档面板'));
-    expect(container.querySelector('.workspace-assets-page')).toBeInTheDocument();
-    expect(container.querySelector('.workspace-editor-page')).not.toBeInTheDocument();
-  });
+      fireEvent.click(screen.getByLabelText('关闭素材库'));
+      expect(container.querySelector('.workspace-assets-page')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('项目正文')).toHaveValue('未保存修改');
+      fireEvent.click(screen.getByText('测试打开素材库'));
+      fireEvent.click(screen.getByLabelText('关闭文档面板'));
+      expect(container.querySelector('.workspace-assets-page')).toBeInTheDocument();
+      expect(container.querySelector('.workspace-editor-page')).not.toBeInTheDocument();
+    },
+  );
 
   it('preserves asset input when the neighboring project page changes', () => {
     const { rerender } = render(<WorkspaceFixture />);
@@ -226,7 +274,7 @@ describe('WorkspaceSurface', () => {
     expect(screen.getByLabelText('素材搜索')).toHaveValue('角色图片');
   });
 
-  it('keeps project, production and assets docked in a compact workspace', () => {
+  it('keeps project, production, assets and conversation docked in a compact workspace', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
     const { container } = render(<WorkspaceFixture productionOpen />);
     fireEvent.click(screen.getByText('测试打开素材库'));
@@ -234,7 +282,9 @@ describe('WorkspaceSurface', () => {
     expect(container.querySelector('.workspace-editor-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
     expect(container.querySelector('.workspace-assets-page')).toBeInTheDocument();
-    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.workspace-conversation-page')).toBeVisible();
+    expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.workspace-docked-page')).toHaveLength(4);
   });
 
   it('floats assets on a narrow screen and makes them reachable again after closing', () => {
@@ -384,13 +434,13 @@ describe('WorkspaceSurface', () => {
     expect(container.querySelectorAll('.workspace-dock-separator')).toHaveLength(0);
   });
 
-  it('auto-hides the docked conversation beside production in a compact workspace', () => {
+  it('keeps the docked conversation beside production in a compact workspace', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
     const { container } = render(<WorkspaceFixture productionOpen />);
 
     expect(container.querySelector('.workspace-editor-page')).toBeVisible();
     expect(container.querySelector('.workspace-production-page')).toBeInTheDocument();
-    expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
+    expect(container.querySelector('.workspace-conversation-page')).toBeVisible();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
   });
 

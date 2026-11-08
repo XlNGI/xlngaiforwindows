@@ -1,4 +1,468 @@
-export const CURRENT_SCHEMA_VERSION = 65;
+export const CURRENT_SCHEMA_VERSION = 76;
+
+export const MIGRATION_V69 = `
+CREATE TABLE IF NOT EXISTS agent_task_usage_counters (
+  task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  tool_call_count INTEGER NOT NULL DEFAULT 0 CHECK (tool_call_count >= 0),
+  updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO agent_task_usage_counters(task_id, tool_call_count, updated_at)
+SELECT id, tool_call_count, updated_at FROM agent_tasks;
+`;
+
+export const MIGRATION_V70 = `
+CREATE TRIGGER IF NOT EXISTS agent_task_usage_counter_insert
+AFTER INSERT ON agent_tasks
+BEGIN
+  INSERT INTO agent_task_usage_counters(task_id, tool_call_count, updated_at)
+  VALUES (NEW.id, NEW.tool_call_count, NEW.updated_at);
+END;
+`;
+
+export const MIGRATION_V68 = `
+CREATE TRIGGER IF NOT EXISTS project_library_revision_projects_update
+AFTER UPDATE ON projects
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_documents_insert
+AFTER INSERT ON documents
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_documents_update
+AFTER UPDATE ON documents
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_documents_delete
+AFTER DELETE ON documents
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_bindings_insert
+AFTER INSERT ON document_bindings
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_bindings_update
+AFTER UPDATE ON document_bindings
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_bindings_delete
+AFTER DELETE ON document_bindings
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_profiles_insert
+AFTER INSERT ON novel_profiles
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_profiles_update
+AFTER UPDATE ON novel_profiles
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_profiles_delete
+AFTER DELETE ON novel_profiles
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_volumes_insert
+AFTER INSERT ON novel_volumes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_volumes_update
+AFTER UPDATE ON novel_volumes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_volumes_delete
+AFTER DELETE ON novel_volumes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_chapters_insert
+AFTER INSERT ON novel_chapters
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_chapters_update
+AFTER UPDATE ON novel_chapters
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_novel_chapters_delete
+AFTER DELETE ON novel_chapters
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_scenes_insert
+AFTER INSERT ON scenes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_scenes_update
+AFTER UPDATE ON scenes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_scenes_delete
+AFTER DELETE ON scenes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_shots_insert
+AFTER INSERT ON shots
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT scenes.project_id, 1 FROM scenes WHERE scenes.id = NEW.scene_id
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_shots_update
+AFTER UPDATE ON shots
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT scenes.project_id, 1 FROM scenes WHERE scenes.id = OLD.scene_id
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT scenes.project_id, 1 FROM scenes WHERE scenes.id = NEW.scene_id
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_shots_delete
+AFTER DELETE ON shots
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT scenes.project_id, 1 FROM scenes WHERE scenes.id = OLD.scene_id
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_assets_insert
+AFTER INSERT ON assets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_assets_update
+AFTER UPDATE ON assets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_assets_delete
+AFTER DELETE ON assets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_conversations_insert
+AFTER INSERT ON conversations
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_conversations_update
+AFTER UPDATE ON conversations
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_conversations_delete
+AFTER DELETE ON conversations
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_memories_insert
+AFTER INSERT ON memories
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_memories_update
+AFTER UPDATE ON memories
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_memories_delete
+AFTER DELETE ON memories
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_constraints_insert
+AFTER INSERT ON constraints
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_constraints_update
+AFTER UPDATE ON constraints
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_constraints_delete
+AFTER DELETE ON constraints
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_change_sets_insert
+AFTER INSERT ON agent_change_sets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_change_sets_update
+AFTER UPDATE ON agent_change_sets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_change_sets_delete
+AFTER DELETE ON agent_change_sets
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_adaptations_insert
+AFTER INSERT ON novel_adaptation_proposals
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_adaptations_update
+AFTER UPDATE ON novel_adaptation_proposals
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_adaptations_delete
+AFTER DELETE ON novel_adaptation_proposals
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_generation_jobs_insert
+AFTER INSERT ON generation_jobs
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_generation_jobs_update
+AFTER UPDATE ON generation_jobs
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_generation_jobs_delete
+AFTER DELETE ON generation_jobs
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+`;
+
+export const MIGRATION_V67 = `
+CREATE TABLE IF NOT EXISTS project_library_revisions (
+  project_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_chunks_insert
+AFTER INSERT ON project_library_chunks
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_chunks_update
+AFTER UPDATE ON project_library_chunks
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_chunks_delete
+AFTER DELETE ON project_library_chunks
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER IF NOT EXISTS project_library_revision_structure_insert
+AFTER INSERT ON project_structure_nodes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_structure_update
+AFTER UPDATE ON project_structure_nodes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT NEW.project_id, 1 WHERE NEW.project_id <> OLD.project_id
+    AND EXISTS (SELECT 1 FROM projects WHERE id = NEW.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS project_library_revision_structure_delete
+AFTER DELETE ON project_structure_nodes
+BEGIN
+  INSERT INTO project_library_revisions(project_id, revision)
+  SELECT OLD.project_id, 1 WHERE EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)
+  ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+`;
+
+export const MIGRATION_V66 = `
+CREATE TABLE IF NOT EXISTS rough_cut_sequences (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
+  scene_ids_json TEXT NOT NULL CHECK(json_valid(scene_ids_json) AND json_type(scene_ids_json)='array'),
+  clips_json TEXT NOT NULL CHECK(json_valid(clips_json) AND json_type(clips_json)='array'),
+  row_version INTEGER NOT NULL CHECK(row_version > 0),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rough_cut_project ON rough_cut_sequences(project_id,updated_at DESC,id);
+`;
 
 export const MIGRATION_V49 = `
 ALTER TABLE shots RENAME COLUMN prompt TO prompt_v29;

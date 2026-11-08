@@ -8,8 +8,10 @@ import type {
   LibrarySourceStatus,
 } from '@ai-video/contracts';
 import { validateProjectContentIR } from '@ai-video/contracts';
+import type Database from 'better-sqlite3';
 import {
   getProjectLibraryChunk,
+  getProjectLibraryRevision,
   librarySnippet,
   LIBRARY_SOURCE_TYPES,
   listProjectLibrarySourceChunks,
@@ -18,10 +20,11 @@ import {
   taskLibraryVisibility,
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
+import { taskPlanScope } from './agent-task-deliverables.js';
 
 const SOURCE_HANDLE_TTL_MS = 10 * 60_000;
-export const LIBRARY_SEARCH_CALL_LIMIT = 8;
-export const LIBRARY_READ_CALL_LIMIT = 16;
+const SEARCH_CACHE_LIMIT = 64;
+const SOURCE_HANDLE_LIMIT = 4_000;
 const DEFAULT_READ_CHARS = 4_000;
 const MAX_READ_CHARS = 20_000;
 const DRAFT_CANDIDATE_NOTE = '未审核候选资料，不能当作已发布权威';
@@ -42,6 +45,7 @@ interface LibraryHandleRecord {
   taskId: string;
   attemptId: string;
   projectId: string;
+  projectRoot: string;
   chunkId: string;
   citationLabel: string;
   structureKind?: LibrarySearchResult['sources'][number]['structureKind'];
@@ -50,14 +54,17 @@ interface LibraryHandleRecord {
   expiresAt: number;
 }
 
-interface LibraryUsage {
-  search: number;
-  read: number;
+type ContentSearchHit = ReturnType<typeof searchProjectLibraryChunksPage>['hits'][number];
+type StructureSearchHit = ReturnType<typeof searchProjectStructureNodesPage>['hits'][number];
+
+interface LibrarySearchPage {
+  hits: Array<ContentSearchHit | StructureSearchHit>;
+  truncated: boolean;
 }
 
 export class LibrarySearchService {
   private readonly sourceHandles = new Map<string, LibraryHandleRecord>();
-  private readonly usage = new Map<string, LibraryUsage>();
+  private readonly searchCache = new Map<string, LibrarySearchPage>();
 
   constructor(private readonly projects: ProjectService) {}
 
@@ -76,7 +83,6 @@ export class LibrarySearchService {
     includeArchived?: boolean;
     limit?: number;
   }): LibrarySearchResult {
-    this.assertBudget(params.taskId, params.attemptId, 'search');
     const searchMode = params.searchMode ?? 'content';
     if (searchMode !== 'content' && searchMode !== 'structure') {
       throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library search mode is invalid.', false);
@@ -92,34 +98,58 @@ export class LibrarySearchService {
           .get(params.attemptId) as { id: string } | undefined
       )?.id;
       const limit = boundedInteger(params.limit, searchMode === 'structure' ? 20 : 8, 1, 20);
-      const page =
-        searchMode === 'structure'
-          ? searchProjectStructureNodesPage(database, {
-              projectId: project.id,
-              generationId,
-              query,
-              sourceTypes,
-              status: params.status,
-              kind: params.kind,
-              scopeType: params.scopeType,
-              scopeId: params.scopeId,
-              includeArchived: params.includeArchived,
-              structurePath,
-              offset,
-              limit,
-            })
-          : searchProjectLibraryChunksPage(database, {
-              projectId: project.id,
-              generationId,
-              query,
-              sourceTypes,
-              status: params.status,
-              kind: params.kind,
-              scopeType: params.scopeType,
-              scopeId: params.scopeId,
-              includeArchived: params.includeArchived,
-              limit,
-            });
+      const revision = getProjectLibraryRevision(database, project.id);
+      const cacheKey = sha256(
+        JSON.stringify({
+          projectRoot: project.rootPath,
+          projectId: project.id,
+          generationId: generationId ?? `unverified:${params.attemptId}`,
+          revision,
+          query,
+          searchMode,
+          sourceTypes: sourceTypes ? [...new Set(sourceTypes)].sort() : null,
+          status: params.status ?? null,
+          kind: params.kind ?? null,
+          scopeType: params.scopeType ?? null,
+          scopeId: params.scopeId ?? null,
+          structurePath: structurePath ?? null,
+          offset,
+          includeArchived: params.includeArchived === true,
+          limit,
+        }),
+      );
+      let page = this.readCachedPage(database, project.id, generationId, cacheKey);
+      if (!page) {
+        page =
+          searchMode === 'structure'
+            ? searchProjectStructureNodesPage(database, {
+                projectId: project.id,
+                generationId,
+                query,
+                sourceTypes,
+                status: params.status,
+                kind: params.kind,
+                scopeType: params.scopeType,
+                scopeId: params.scopeId,
+                includeArchived: params.includeArchived,
+                structurePath,
+                offset,
+                limit,
+              })
+            : searchProjectLibraryChunksPage(database, {
+                projectId: project.id,
+                generationId,
+                query,
+                sourceTypes,
+                status: params.status,
+                kind: params.kind,
+                scopeType: params.scopeType,
+                scopeId: params.scopeId,
+                includeArchived: params.includeArchived,
+                limit,
+              });
+        this.writeCachedPage(cacheKey, page);
+      }
       const { hits, truncated } = page;
       this.pruneExpiredHandles();
       const sources = hits.map((hit, index) => {
@@ -132,6 +162,7 @@ export class LibrarySearchService {
           taskId: params.taskId,
           attemptId: params.attemptId,
           projectId: project.id,
+          projectRoot: project.rootPath,
           chunkId: chunk.id,
           citationLabel,
           structureKind: structure?.kind,
@@ -139,6 +170,10 @@ export class LibrarySearchService {
           structureNodeId: structure?.id,
           expiresAt: Date.now() + SOURCE_HANDLE_TTL_MS,
         });
+        if (this.sourceHandles.size > SOURCE_HANDLE_LIMIT) {
+          const oldestHandle = this.sourceHandles.keys().next().value;
+          if (oldestHandle) this.sourceHandles.delete(oldestHandle);
+        }
         const matchKind: LibrarySearchMatchKind =
           searchMode === 'structure' ||
           chunk.title.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN'))
@@ -168,7 +203,6 @@ export class LibrarySearchService {
             : {}),
         };
       });
-      this.incrementUsage(params.taskId, params.attemptId, 'search');
       return {
         status: 'searched' as const,
         searchMode,
@@ -187,6 +221,85 @@ export class LibrarySearchService {
     });
   }
 
+  /** Direct versioned readback of a known task target, using the existing read path. */
+  readArtifact(params: {
+    taskId: string;
+    attemptId: string;
+    documentId: string;
+    expectedVersionId: string;
+    maxChars?: number;
+    includeContentIR?: boolean;
+    offset?: number;
+  }): LibraryReadResult {
+    const sourceHandle = this.projects.access(false, (database, project) => {
+      const generation = database
+        .prepare(
+          `SELECT g.id FROM llm_generation_attempts a JOIN llm_generations g ON g.id=a.generation_id
+         JOIN agent_task_generations l ON l.generation_id=g.id
+         WHERE a.id=? AND l.task_id=? AND g.project_id=?`,
+        )
+        .get(params.attemptId, params.taskId, project.id) as { id: string } | undefined;
+      if (!generation)
+        throw new LibraryError('LIBRARY_READ_BLOCKED', 'Artifact is outside this task.', false);
+      const known =
+        taskPlanScope(database, project.id, generation.id, params.taskId).some((item) =>
+          item.targetIds.includes(params.documentId),
+        ) ||
+        Boolean(
+          database
+            .prepare(
+              `SELECT 1 FROM agent_tool_calls WHERE project_id=? AND task_id=? AND status='succeeded'
+           AND tool_name='document.submit_draft' AND json_extract(result_summary_json,'$.documentId')=? LIMIT 1`,
+            )
+            .get(project.id, params.taskId, params.documentId),
+        ) ||
+        Boolean(
+          database
+            .prepare(
+              `SELECT 1 FROM agent_context_results WHERE project_id=? AND task_id=? AND status='completed'
+           AND tool_name IN ('library.read','document.read') AND json_valid(content)
+           AND (json_extract(content,'$.sourceId')=? OR json_extract(content,'$.documentId')=?) LIMIT 1`,
+            )
+            .get(project.id, params.taskId, params.documentId, params.documentId),
+        );
+      if (!known)
+        throw new LibraryError(
+          'LIBRARY_READ_BLOCKED',
+          'Direct read requires a saved task artifact or registered target. Discover other sources using library.search.',
+          false,
+        );
+      const chunk = database
+        .prepare(
+          `SELECT chunks.id FROM project_library_chunks chunks JOIN documents d ON d.id=chunks.document_id
+         WHERE chunks.project_id=? AND d.id=? AND d.lifecycle_status='active'
+         AND chunks.version_id=? AND d.current_version_id=chunks.version_id
+         AND ${taskLibraryVisibility()} ORDER BY chunks.id LIMIT 1`,
+        )
+        .get(project.id, params.documentId, params.expectedVersionId, generation.id) as
+        { id: string } | undefined;
+      if (!chunk)
+        throw new LibraryError(
+          'LIBRARY_READ_BLOCKED',
+          'Artifact version is stale or unavailable. Read current task state/metadata before deciding how to proceed.',
+          false,
+        );
+      this.pruneExpiredHandles();
+      const handle = randomBytes(24).toString('base64url');
+      this.sourceHandles.set(handle, {
+        sourceHandle: handle,
+        taskId: params.taskId,
+        attemptId: params.attemptId,
+        projectId: project.id,
+        projectRoot: project.rootPath,
+        chunkId: chunk.id,
+        citationLabel: 'Artifact',
+        expiresAt: Date.now() + SOURCE_HANDLE_TTL_MS,
+      });
+      return handle;
+    });
+    return this.read({ ...params, sourceHandle, readMode: 'source' });
+  }
+
   read(params: {
     taskId: string;
     attemptId: string;
@@ -196,7 +309,6 @@ export class LibrarySearchService {
     includeContentIR?: boolean;
     offset?: number;
   }): LibraryReadResult {
-    this.assertBudget(params.taskId, params.attemptId, 'read');
     const handle = this.sourceHandles.get(params.sourceHandle);
     if (
       !handle ||
@@ -233,7 +345,7 @@ export class LibrarySearchService {
       ? Math.min(requestedMaxChars, 4_000)
       : requestedMaxChars;
     return this.projects.access(false, (database, project) => {
-      if (project.id !== handle.projectId) {
+      if (project.id !== handle.projectId || project.rootPath !== handle.projectRoot) {
         throw new LibraryError(
           'LIBRARY_HANDLE_INVALID',
           'Library source handle is invalid or expired.',
@@ -339,7 +451,6 @@ export class LibrarySearchService {
       }
       const content = contentBeforeLimit.slice(offset, endOffset);
       const truncated = endOffset < contentBeforeLimit.length;
-      this.incrementUsage(params.taskId, params.attemptId, 'read');
       return {
         status: 'read' as const,
         sourceHandle: handle.sourceHandle,
@@ -373,25 +484,43 @@ export class LibrarySearchService {
     });
   }
 
-  private assertBudget(taskId: string, attemptId: string, operation: 'search' | 'read'): void {
-    const usage = this.usage.get(usageKey(taskId, attemptId)) ?? { search: 0, read: 0 };
-    const limit = operation === 'search' ? LIBRARY_SEARCH_CALL_LIMIT : LIBRARY_READ_CALL_LIMIT;
-    if (usage[operation] >= limit) {
-      throw new LibraryError(
-        'LIBRARY_BUDGET_EXCEEDED',
-        operation === 'search'
-          ? '本轮检索次数已达上限。请停止检索；已有证据不足时说明缺口，不得编造未读取的项目内容。'
-          : '本轮正文读取次数已达上限。请停止读取并说明已读取范围及缺口，不得把未读部分当作已知内容。',
-        false,
-      );
+  private readCachedPage(
+    database: Database.Database,
+    projectId: string,
+    generationId: string | undefined,
+    cacheKey: string,
+  ): LibrarySearchPage | undefined {
+    const cached = this.searchCache.get(cacheKey);
+    if (!cached) return undefined;
+    const refreshedHits: LibrarySearchPage['hits'] = [];
+    for (const hit of cached.hits) {
+      const chunk = getProjectLibraryChunk(database, projectId, hit.chunk.id);
+      if (!chunk) return undefined;
+      if (
+        generationId &&
+        !database
+          .prepare(
+            `SELECT 1 FROM project_library_chunks chunks WHERE chunks.id=? AND ${taskLibraryVisibility()}`,
+          )
+          .get(chunk.id, generationId)
+      ) {
+        return undefined;
+      }
+      refreshedHits.push({ ...hit, chunk });
     }
+    this.searchCache.delete(cacheKey);
+    this.searchCache.set(cacheKey, cached);
+    return { ...cached, hits: refreshedHits };
   }
 
-  private incrementUsage(taskId: string, attemptId: string, operation: 'search' | 'read'): void {
-    const key = usageKey(taskId, attemptId);
-    const usage = this.usage.get(key) ?? { search: 0, read: 0 };
-    usage[operation] += 1;
-    this.usage.set(key, usage);
+  private writeCachedPage(cacheKey: string, page: LibrarySearchPage): void {
+    this.searchCache.delete(cacheKey);
+    this.searchCache.set(cacheKey, page);
+    while (this.searchCache.size > SEARCH_CACHE_LIMIT) {
+      const oldestKey = this.searchCache.keys().next().value;
+      if (!oldestKey) break;
+      this.searchCache.delete(oldestKey);
+    }
   }
 
   private pruneExpiredHandles(): void {
@@ -462,10 +591,6 @@ function boundedInteger(
     throw new LibraryError('LIBRARY_SEARCH_FAILED', 'Library numeric argument is invalid.', false);
   }
   return value;
-}
-
-function usageKey(taskId: string, attemptId: string): string {
-  return `${taskId}:${attemptId}`;
 }
 
 function sha256(value: string): string {

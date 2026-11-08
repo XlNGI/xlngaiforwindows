@@ -124,6 +124,40 @@ describe.runIf(process.platform === 'win32')('bundled LGPL FFmpeg media integrat
     });
   });
 
+  it('adapts a detailed image to its transport budget without changing its original pixels', async () => {
+    const original = join(directory, 'detailed.png');
+    encode([
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=s=1920x1080:r=1',
+      '-frames:v',
+      '1',
+      '-pix_fmt',
+      'rgb24',
+      '-threads',
+      '1',
+      original,
+    ]);
+    const before = await readFile(original);
+    const output = join(directory, 'bounded-preview.jpg');
+    await runtime.previewImage(original, output, undefined, { maxBytes: 16000 });
+    const preview = await readFile(output);
+    expect(preview.length).toBeLessThanOrEqual(16000);
+    expect(preview.subarray(0, 2).toString('hex')).toBe('ffd8');
+    const info = JSON.parse(
+      execFileSync(
+        join(resources, 'ffprobe.exe'),
+        ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'json', output],
+        { windowsHide: true, encoding: 'utf8' },
+      ),
+    ) as { streams: { width: number; height: number }[] };
+    expect(info.streams[0]!.width).toBeLessThan(1920);
+    expect(info.streams[0]!.width / info.streams[0]!.height).toBeCloseTo(16 / 9, 1);
+    expect(await readFile(original)).toEqual(before);
+    expect((await readdir(directory)).filter((name) => name.startsWith('.ffmpeg-'))).toEqual([]);
+  });
+
   it('extracts the precise interval to playable H264 rather than copying keyframe ranges', async () => {
     const output = join(directory, 'accurate clip.mp4');
     const result = await runtime.extractClip(source, output, 360, 1160);

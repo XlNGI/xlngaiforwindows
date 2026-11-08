@@ -74,6 +74,48 @@ export function productionInputSupport(adapter: Pick<AdapterDescriptor, 'paramet
   };
 }
 
+/** Read declared frame/reference exclusivity without guessing from provider names. */
+export function productionImageRoleSupport(adapter: Pick<AdapterDescriptor, 'parameterSchema'>) {
+  const schema = adapter.parameterSchema;
+  // A restriction inside one optional union branch is not a global prohibition.
+  const requiredRules = (value: unknown): Schema[] => {
+    const rule = object(value);
+    return rule
+      ? [rule, ...(Array.isArray(rule.allOf) ? rule.allOf.flatMap(requiredRules) : [])]
+      : [];
+  };
+  const tags = (value: unknown) =>
+    itemVariants(value).flatMap((variant) => {
+      const fields = object(variant.properties);
+      return ['type', 'role'].flatMap((key) => {
+        const field = object(fields?.[key]);
+        return typeof field?.const === 'string'
+          ? [field.const]
+          : Array.isArray(field?.enum)
+            ? field.enum.filter((v): v is string => typeof v === 'string')
+            : [];
+      });
+    });
+  const frames = (values: string[]) =>
+    values.some((v) => ['first_frame', 'last_frame'].includes(v));
+  const references = (values: string[]) => values.some((v) => v.startsWith('reference_'));
+  return {
+    references: ['media', 'content'].some((field) =>
+      tags(schema.properties[field]?.items).includes('reference_image'),
+    ),
+    exclusive: requiredRules(schema).some((rule) =>
+      ['media', 'content'].some((field) => {
+        const when = object(object(object(rule.if)?.properties)?.[field]);
+        const then = object(object(object(rule.then)?.properties)?.[field]);
+        if (then?.maxContains !== 0) return false;
+        const before = tags(when?.contains),
+          after = tags(then.contains);
+        return (frames(before) && references(after)) || (references(before) && frames(after));
+      }),
+    ),
+  };
+}
+
 /** Drop fields from a previous model without removing values for declared optional fields. */
 export function projectProductionParameters(
   adapter: Pick<AdapterDescriptor, 'parameterSchema'>,

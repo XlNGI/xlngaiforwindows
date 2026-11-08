@@ -7,6 +7,7 @@ import type {
   ProjectContentIR,
 } from '@ai-video/contracts';
 import { rebuildLibraryChunksForDocument } from '@ai-video/persistence';
+import { DOCUMENT_KINDS, validateProjectContentIR } from '@ai-video/contracts';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -18,15 +19,7 @@ import {
   resolveWriteResource,
 } from './project-resource-map.js';
 
-const KINDS = new Set<DocumentKind>([
-  'outline',
-  'plan',
-  'character',
-  'scene',
-  'prop',
-  'storyboard',
-  'note',
-]);
+const KINDS = new Set<DocumentKind>(DOCUMENT_KINDS);
 const ROLES = new Set<DocumentBindingRole>([
   'work-outline',
   'character-bible',
@@ -47,7 +40,7 @@ type ParentTask = {
   request_snapshot_json: string;
 };
 
-/** One model submission owns one reviewable artifact. The conversation stays runnable. */
+/** One model submission owns one artifact; the parent workflow controls review and completion. */
 export class AgentDraftSubmissionService {
   constructor(
     private readonly projects: ProjectService,
@@ -59,14 +52,19 @@ export class AgentDraftSubmissionService {
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
     artifactKey = identity.toolCallId,
+    compatibility?: { useParentArtifact: boolean },
   ): Record<string, unknown> {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
-        const parent = this.requireParent(database, identity);
+        const parent = this.requireParent(database, identity, !!compatibility);
         const resource = resolveWriteResource(database, project, args)!;
         const title = text(args.title, 'title', 200);
         const contentMarkdown = text(args.contentMarkdown, 'contentMarkdown', 1_000_000);
-        const contentIR = args.contentIR as ProjectContentIR | undefined;
+        let contentIR = args.contentIR as ProjectContentIR | undefined;
+        const parentSnapshot = JSON.parse(parent.request_snapshot_json) as Record<string, unknown>;
+        const productionSkillId =
+          parentSnapshot.productionSkillId === 'script-to-media' ? 'script-to-media' : undefined;
+        const reviewRequired = productionSkillId !== 'script-to-media';
         const requestHash = createHash('sha256')
           .update(JSON.stringify({ operation, args }))
           .digest('hex');
@@ -82,8 +80,9 @@ export class AgentDraftSubmissionService {
           title,
           contentHash: createHash('sha256').update(contentMarkdown).digest('hex'),
           contentLength: Buffer.byteLength(contentMarkdown, 'utf8'),
-          modelSelection: (JSON.parse(parent.request_snapshot_json) as Record<string, unknown>)
-            .modelSelection,
+          modelSelection: parentSnapshot.modelSelection,
+          ...(productionSkillId ? { productionSkillId } : {}),
+          reviewRequired,
         };
         const now = new Date().toISOString();
         let taskId: string;
@@ -215,6 +214,10 @@ export class AgentDraftSubmissionService {
           ]);
           kind = text(args.documentKind, 'documentKind', 30) as DocumentKind;
           if (!KINDS.has(kind)) throw new Error('Invalid documentKind.');
+          // A production task may also request analysis/plan documents. The
+          // completion contract checks real shots and their typed material
+          // references; restricting every saved document to a material kind
+          // prevents those additional deliverables from ever being completed.
           if (args.documentId !== undefined) {
             documentId = text(args.documentId, 'documentId', 200);
             const target = database
@@ -239,9 +242,11 @@ export class AgentDraftSubmissionService {
             args.expectedDocumentRowVersion !== undefined ||
             args.baseVersionId !== undefined
           )
-            throw new Error('New documents cannot specify CAS for an existing target.');
+            throw new Error(
+              'New documents cannot specify CAS for an existing target. Omit expectedDocumentRowVersion and baseVersionId entirely, including null; source versions belong in provenance. Retry with the same complete contentMarkdown/contentIR.',
+            );
           if (args.documentId === undefined) {
-            if (kind === 'storyboard')
+            if (kind === 'storyboard' && !compatibility)
               throw new Error(
                 'Standalone storyboard documents are not visible in the scene/shot directory. Use scene.submit_structure with workspace:shots to save editable scene and shot drafts without user confirmation.',
               );
@@ -268,39 +273,45 @@ export class AgentDraftSubmissionService {
             !ROLES.has(text(args.bindingRole, 'bindingRole', 80) as DocumentBindingRole)
           )
             throw new Error('Invalid novel reference binding role.');
-          taskId = randomUUID();
-          database
-            .prepare(
-              `INSERT INTO agent_tasks
+          if (contentIR !== undefined) {
+            if (!['character', 'scene', 'prop'].includes(kind))
+              throw new Error('contentIR is only valid for character, scene or prop documents.');
+            contentIR = validateProjectContentIR(contentIR, kind as 'character' | 'scene' | 'prop');
+          }
+          taskId = compatibility?.useParentArtifact ? parent.id : randomUUID();
+          if (!compatibility?.useParentArtifact)
+            database
+              .prepare(
+                `INSERT INTO agent_tasks
           (id, project_id, project_session_id, conversation_id, user_message_id, context_snapshot_id,
            task_type, scope_type, scope_id, title, request_snapshot_json, request_hash, status, phase,
            idempotency_key, created_at, started_at, updated_at, row_version)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'model_running', ?, ?, ?, ?, 0)`,
-            )
-            .run(
-              taskId,
-              project.id,
-              identity.projectSessionId,
-              parent.conversation_id,
-              parent.user_message_id,
-              parent.context_snapshot_id,
-              documentId ? 'document-update' : 'document-create',
-              parent.scope_type,
-              parent.scope_id,
-              title,
-              JSON.stringify({
-                ...snapshot,
-                documentId,
-                documentKind: kind,
-                expectedDocumentRowVersion,
-                baseVersionId,
-              }),
-              requestHash,
-              `model-tool:${artifactKey}`,
-              now,
-              now,
-              now,
-            );
+              )
+              .run(
+                taskId,
+                project.id,
+                identity.projectSessionId,
+                parent.conversation_id,
+                parent.user_message_id,
+                parent.context_snapshot_id,
+                documentId ? 'document-update' : 'document-create',
+                parent.scope_type,
+                parent.scope_id,
+                title,
+                JSON.stringify({
+                  ...snapshot,
+                  documentId,
+                  documentKind: kind,
+                  expectedDocumentRowVersion,
+                  baseVersionId,
+                }),
+                requestHash,
+                `model-tool:${artifactKey}`,
+                now,
+                now,
+                now,
+              );
         }
         const common = {
           taskId,
@@ -312,6 +323,7 @@ export class AgentDraftSubmissionService {
           scopeId: parent.scope_id ?? undefined,
           sourceMessageId: parent.user_message_id ?? undefined,
           contextSnapshotId: parent.context_snapshot_id ?? undefined,
+          reviewRequired,
         };
         const document = documentId
           ? this.documents.writeTrustedAgentUpdateInTransaction(database, project, {
@@ -366,7 +378,7 @@ export class AgentDraftSubmissionService {
                 ...(args.bindingRole !== undefined ? { bindingRole: args.bindingRole } : {}),
               }
             : {}),
-          reviewRequired: false,
+          reviewRequired,
         };
       })(),
     );
@@ -375,18 +387,20 @@ export class AgentDraftSubmissionService {
   private requireParent(
     database: Database.Database,
     identity: AgentSystemToolIdentity,
+    compatibility: boolean,
   ): ParentTask {
     const parent = database
       .prepare(
         `SELECT tasks.* FROM agent_tasks tasks JOIN agent_tool_calls calls ON calls.task_id = tasks.id
       WHERE tasks.id = ? AND tasks.project_id = ? AND tasks.project_session_id = ? AND tasks.conversation_id = ?
-        AND tasks.status = 'running' AND tasks.phase = 'model_running' AND calls.id = ? AND calls.status = 'executing'`,
+        AND tasks.status = 'running' AND (tasks.phase = 'model_running' OR (? = 1 AND tasks.phase = 'artifact_persisting')) AND calls.id = ? AND calls.status = 'executing'`,
       )
       .get(
         identity.taskId,
         identity.projectId,
         identity.projectSessionId,
         identity.conversationId,
+        compatibility ? 1 : 0,
         identity.toolCallId,
       ) as ParentTask | undefined;
     if (!parent)

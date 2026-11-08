@@ -10,6 +10,48 @@
   grid-column: 1 / -1;
   flex: 0 0 auto;
 }
+.character-audio-items {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.character-audio .button.secondary {
+  display: inline-flex;
+}
+.character-audio-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.character-audio-preview:hover,
+.character-audio-preview.is-playing {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.character-audio-preview:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.character-audio-preview:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.character-audio [role='status'] {
+  flex-basis: 100%;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
 .scene-workspace:has(.dubbing-panel) {
   padding-bottom: 14px;
 }

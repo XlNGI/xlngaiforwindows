@@ -5,6 +5,7 @@ import { resolveSceneMedia } from './scene-media-service.js';
 import { ProductionService } from './production-service.js';
 import { ImageThumbnailService } from './image-thumbnail-service.js';
 import { ShotContinuityService } from './shot-continuity-service.js';
+import { RoughCutService } from './rough-cut-service.js';
 import type { CharacterVoiceReferenceSaveParams } from '@ai-video/contracts';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
@@ -14,7 +15,6 @@ import {
   type ChatMessageSaveParams,
   type AgentTaskCreateDocumentDraftParams,
   type AgentGenerationPrepareParams,
-  type AgentDocumentIntent,
   type NovelWritingIntent,
   type UnifiedAgentRunParams,
   type UnifiedAgentCapability,
@@ -170,7 +170,6 @@ import { ProjectRuntimeRegistry, ProjectRuntimeScopeError } from './project-runt
 import { resetRuntime, recoverRuntime } from './worker-commands.js';
 import { DubbingService, DubbingValidationError } from './dubbing-service.js';
 import type { DubbingWorkerMethodMap } from '@ai-video/contracts';
-import { resolvePiConversationRuntimeEnabled } from './conversation-runtime.js';
 import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { prepareAgentGeneration } from './agent-generation-preparation.js';
 import { MediaReviewService } from './media-review-service.js';
@@ -301,6 +300,9 @@ function resolveMediaSelectionForRequest(
       providerProfileId: profile.id,
       providerType: route.providerType,
       providerBaseUrlCategory: route.baseUrlCategory,
+      ...(route.providerType === 'openai' || route.providerType === 'custom'
+        ? { providerBaseUrl: profile.baseUrl }
+        : {}),
       providerRegion,
       modelId: model.id,
       remoteModelId: model.remoteModelId,
@@ -312,34 +314,6 @@ function resolveMediaSelectionForRequest(
       contractStatus: model.contractStatus,
     },
   };
-}
-
-/**
- * Map read-only schema questions onto the controlled Agent tool loop.
- *
- * This intentionally stays conservative: only an explicit inspection-style
- * request containing schema/parameter vocabulary is classified as a schema
- * query. Everything else keeps the normal document-draft default.
- */
-export function inferAgentDocumentIntent(prompt: string): AgentDocumentIntent {
-  const value = prompt.normalize('NFC').trim();
-  const mentionsSchema = /(schema|参数|字段|配置项|输入项|接口定义|能力描述)/iu.test(value);
-  const asksToInspect =
-    /(?:查看|查询|查一下|了解|支持哪些|有哪些|哪些|什么|列出|获取|inspect|show|get|list|what|which)/iu.test(
-      value,
-    );
-  if (mentionsSchema && /(?:历史|审计|记录|版本|history|audit|changes)/iu.test(value)) {
-    return { operation: 'adapter.schema.audit.list' };
-  }
-  if (
-    mentionsSchema &&
-    /(?:添加|新增|修改|更新|补充|调整|add|update|modify|change)/iu.test(value)
-  ) {
-    return { operation: 'adapter.schema.propose' };
-  }
-  return mentionsSchema && asksToInspect
-    ? { operation: 'adapter.schema.get' }
-    : { operation: 'document.create_draft' };
 }
 
 /** Compatibility wrapper around resolveAgentRunWorkflow. Prompt language is not a router. */
@@ -443,9 +417,17 @@ export function modelMatchesUnifiedAgentRequest(
 function adapterMatchesCapability(
   adapter: { provider: string; model: string; capability: string },
   profile: { providerType: string },
-  model: { remoteModelId: string; parameterTemplateKey?: string; contractStatus?: string },
+  model: {
+    remoteModelId: string;
+    parameterTemplateKey?: string;
+    contractStatus?: string;
+    capabilities: { imageGeneration: boolean };
+  },
   capability: UnifiedAgentCapability | undefined,
 ): boolean {
+  if (adapter.model === 'openai-images' && model.capabilities.imageGeneration !== true) {
+    return false;
+  }
   if (
     !adapterBindsCatalogModel(adapter, {
       providerType: profile.providerType,
@@ -541,7 +523,12 @@ const methods = new Set<WorkerMethod>([
   'characterVoice.save',
   'characterVoiceReference.list',
   'characterVoiceReference.save',
+  'characterVoiceReference.generate',
+  'characterVoiceReference.prepare',
+  'characterVoiceReference.confirm',
   'audio.import',
+  'audio.sample.prepare',
+  'audio.sample.confirm',
   'audio.list',
   'audio.get',
   'audio.mediaSource',
@@ -567,6 +554,7 @@ const methods = new Set<WorkerMethod>([
   'project.open',
   'project.close',
   'project.current',
+  'project.rename',
   'project.runtime.attach',
   'project.runtime.create',
   'project.runtime.createSample',
@@ -613,6 +601,7 @@ const methods = new Set<WorkerMethod>([
   'maintenance.diagnostics.export',
   'maintenance.diagnostics.reveal',
   'document.list',
+  'document.archived.list',
   'novel.profile.get',
   'novel.profile.update',
   'novel.volume.list',
@@ -645,11 +634,14 @@ const methods = new Set<WorkerMethod>([
   'document.draft.save',
   'document.versions',
   'document.restore',
+  'document.archive',
+  'document.unarchive',
   'document.review.submit',
   'document.review.requestChanges',
   'document.review.reject',
   'document.publish',
   'document.selfPublish',
+  'document.unpublish',
   'agent.task.createDocumentDraft',
   'agent.task.list',
   'agent.task.get',
@@ -691,15 +683,24 @@ const methods = new Set<WorkerMethod>([
   'production.read',
   'production.compile',
   'shot.continuity.get',
+  'shot.continuity.assets',
+  'shot.continuity.import',
+  'shot.continuity.probe',
+  'shot.continuity.selection.confirm',
+  'shot.continuity.references',
   'shot.continuity.preview',
   'shot.continuity.confirm',
+  'shot.continuity.reconfirm',
   'shot.continuity.clear',
   'shot.continuity.firstFrame',
+  'shot.continuity.reference',
+  'shot.continuity.intent.save',
   'shot.continuity.prompt.prepare',
   'shot.continuity.prompt.save',
   'production.defaults.get',
   'production.defaults.save',
   'scene.save',
+  'production.lifecycle.change',
   'shot.list',
   'shot.save',
   'shot.references.get',
@@ -788,6 +789,17 @@ const methods = new Set<WorkerMethod>([
   'assetGroup.update',
   'assetGroup.delete',
   'assetGroup.resolve',
+  'roughCut.list',
+  'roughCut.episodes',
+  'roughCut.get',
+  'roughCut.save',
+  'roughCut.delete',
+  'roughCut.prepare',
+  'roughCut.export.start',
+  'roughCut.export.assets',
+  'roughCut.export.get',
+  'roughCut.export.cancel',
+  'roughCut.export.reveal',
 ]);
 const isPackaged = 'pkg' in process;
 // A literal require lets pkg discover and extract the native addon from the executable.
@@ -798,6 +810,7 @@ const packagedSqliteBinding = isPackaged
 const appSettingsService = new AppSettingsService({ nativeBinding: packagedSqliteBinding });
 setAdapterOverrides(appSettingsService.listConfirmedAdapterSchemas());
 let nativeProviderBridge: NativeProviderBridge | undefined;
+let workerStopReason: import('./project-runtime-registry.js').RuntimeStopReason | undefined;
 const taskCapacity = new TaskCapacity();
 const executionPool = new ExecutionPool();
 const llmProvider = new OpenAIResponsesProvider({
@@ -821,7 +834,46 @@ function createProjectRuntimeServices() {
   const taskPlanService = new TaskPlanService(projectService);
   let piConversationRuntime: PiConversationRuntime | undefined;
 
+  function resumeContextTasks(): void {
+    if (
+      workerStopReason ||
+      !piConversationRuntime ||
+      projectService.current()?.mode !== 'read-write'
+    )
+      return;
+    for (const candidate of generationService.recoverableContextTasks()) {
+      if (piConversationRuntime.hasActive(candidate.generationId)) continue;
+      try {
+        const recovered = generationService.resumeContextTask(candidate.taskId);
+        const prepared = agentProviderLoopService.prepare(recovered.identity, recovered.prompt);
+        generationService.configureAgentTools(recovered.identity, prepared.tools);
+        void piConversationRuntime
+          .start({
+            ...recovered.identity,
+            identity: recovered.identity,
+            taskId: candidate.taskId,
+            mode: recovered.mode,
+            prompt: recovered.prompt,
+          })
+          .catch((error) => {
+            projectService.access(true, (db, project) =>
+              new AgentContextStore(db).diagnose(project.id, candidate.taskId, {
+                recoveryError: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          });
+      } catch (error) {
+        projectService.access(true, (db, project) =>
+          new AgentContextStore(db).diagnose(project.id, candidate.taskId, {
+            recoveryError: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }
+  }
+
   function configureRuntime(bridge: NativeProviderBridge): void {
+    if (workerStopReason) return;
     nativeProviderBridge = bridge;
     projectTaskRuntime.start();
     dubbingService.recover();
@@ -840,7 +892,10 @@ function createProjectRuntimeServices() {
           identity,
         ),
       providerTools: agentProviderLoopService,
+      createContextManager: (identity, taskId, prompt) =>
+        new AgentContextManager(projectService, identity, taskId, prompt, contextService),
     });
+    resumeContextTasks();
   }
   const adapterService = new AdapterService(projectService);
   const imageGenerationService = new ImageGenerationService(
@@ -888,13 +943,17 @@ function createProjectRuntimeServices() {
     videoGenerationService,
     (identity) => generationService.runtime(identity).attachments ?? [],
   );
+  const roughCutService = new RoughCutService(
+    projectService,
+    imageGenerationService,
+    undefined,
+    executionPool,
+  );
   const shotContinuityService = new ShotContinuityService(
     projectService,
     imageGenerationService,
     undefined,
     executionPool,
-    generationService,
-    appSettingsService,
   );
   const taskScheduleService = new TaskScheduleService(projectService, {
     enabled: process.env.AI_VIDEO_TASK_SCHEDULER_ENABLED !== '0',
@@ -958,6 +1017,7 @@ function createProjectRuntimeServices() {
       readSource: (...args) => novelBatchService.readSource(...args),
     },
     mediaReviewService,
+    shotContinuityService,
   );
   const agentProviderLoopService: AgentProviderLoopService = new AgentProviderLoopService(
     projectService,
@@ -1015,7 +1075,7 @@ function createProjectRuntimeServices() {
     mediaOrchestrationService,
   );
   const novelBatchService: NovelBatchService = new NovelBatchService(projectService, {
-    available: () => Boolean(piConversationRuntime) && resolvePiConversationRuntimeEnabled(),
+    available: () => Boolean(piConversationRuntime),
     prepare: (params, target) =>
       prepareAgentGeneration(
         {
@@ -1085,6 +1145,7 @@ function createProjectRuntimeServices() {
     generationService,
     mediaPreparationService,
     shotContinuityService,
+    roughCutService,
     taskScheduleService,
     mediaOrchestrationService,
     projectTaskRuntime,
@@ -1096,15 +1157,28 @@ function createProjectRuntimeServices() {
       return piConversationRuntime;
     },
     configureRuntime,
-    async stop() {
+    resumeContextTasks,
+    suspend(reason: string) {
+      projectTaskRuntime.stop();
+      piConversationRuntime?.suspendAll(reason);
+    },
+    async stop(
+      reason: import('./project-runtime-registry.js').RuntimeStopReason = 'project_unload',
+    ) {
+      if (reason !== 'project_unload') services.suspend(reason);
       shotContinuityService.cancelAll();
+      await roughCutService.stop();
       await imageThumbnailService.stop();
       await fileTaskService.stop();
       await markdownExportService.stop();
       taskScheduleService.cancelAllWaiting();
-      piConversationRuntime?.cancelAll();
+      if (reason === 'project_unload') piConversationRuntime?.cancelAll();
       await piConversationRuntime?.drain();
-      await resetRuntime(services);
+      if (reason === 'project_unload') await resetRuntime(services);
+      else {
+        projectTaskRuntime.stop();
+        generationService.suspend();
+      }
     },
     recover() {
       recoverRuntime(services);
@@ -1146,10 +1220,23 @@ export function configurePiConversationRuntime(bridge: NativeProviderBridge): vo
     .catch((error: unknown) => recordWorkerError('project.runtime.restore', error));
 }
 
-/** Used by controlled host shutdown and integration harnesses after admission stops. */
-export async function shutdownWorker(): Promise<void> {
-  await runtimeRegistry.shutdown();
-  await runtimeRegistry.fallback.stop();
+/** Snapshot before rejecting pending Native callbacks, so failures cannot terminalize tasks. */
+export function beginWorkerShutdown(
+  reason: import('./project-runtime-registry.js').RuntimeStopReason,
+): void {
+  if (workerStopReason) return;
+  workerStopReason = reason;
+  for (const runtime of runtimeRegistry.all()) runtime.suspend(reason);
+}
+
+/** Used after transport admission has stopped and in-flight business callbacks have drained. */
+export async function shutdownWorker(
+  reason: import('./project-runtime-registry.js').RuntimeStopReason = 'host_shutdown',
+): Promise<void> {
+  beginWorkerShutdown(reason);
+  await runtimeRegistry.shutdown(reason);
+  await runtimeRegistry.fallback.stop(reason);
+  runtimeRegistry.fallback.projectService.close();
   appSettingsService.close();
 }
 
@@ -1385,6 +1472,7 @@ const lifecycleMethods = new Set<string>([
 export function bindWorkerRequest(request: WorkerRequest): {
   queueKey: string;
   run: () => Promise<WorkerResponse>;
+  release: () => void;
 } {
   let services: RuntimeServices = runtimeRegistry.fallback;
   let epoch: string | undefined;
@@ -1397,8 +1485,15 @@ export function bindWorkerRequest(request: WorkerRequest): {
   } catch (error) {
     bindingError = error;
   }
-  const release = runtimeRegistry.retain(services);
+  const unretain = runtimeRegistry.retain(services);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    unretain();
+  };
   return {
+    release,
     queueKey:
       control || lifecycleMethods.has(request.method)
         ? 'project-lifecycle'
@@ -1535,6 +1630,7 @@ async function handleRequestCore(
     agentProviderLoopService,
     shotContinuityService,
     piConversationRuntime,
+    roughCutService,
     novelBatchService,
   } = services;
   try {
@@ -1600,6 +1696,46 @@ async function handleRequestCore(
       result = infrastructure.result;
     } else {
       switch (request.method) {
+        case 'roughCut.episodes':
+          result = roughCutService.episodes();
+          break;
+        case 'roughCut.list':
+          result = roughCutService.list();
+          break;
+        case 'roughCut.get':
+          result = roughCutService.get(requireString(params, 'id'));
+          break;
+        case 'roughCut.save':
+          result = await roughCutService.save(
+            params as unknown as import('@ai-video/contracts').RoughCutSaveParams,
+          );
+          break;
+        case 'roughCut.delete':
+          result = roughCutService.delete(
+            requireString(params, 'id'),
+            params.expectedRowVersion as number,
+          );
+          break;
+        case 'roughCut.prepare':
+          result = await roughCutService.prepare(params);
+          break;
+        case 'roughCut.export.start':
+          result = roughCutService.startExport(
+            params as unknown as import('@ai-video/contracts').WorkerMethodMap['roughCut.export.start']['params'],
+          );
+          break;
+        case 'roughCut.export.get':
+          result = roughCutService.exportJob(requireString(params, 'id'));
+          break;
+        case 'roughCut.export.assets':
+          result = await roughCutService.exportAssets(requireStringArray(params, 'assetIds'));
+          break;
+        case 'roughCut.export.cancel':
+          result = roughCutService.cancelExport(requireString(params, 'id'));
+          break;
+        case 'roughCut.export.reveal':
+          result = await roughCutService.revealExport(requireString(params, 'id'));
+          break;
         case 'media.review.list':
           result = mediaReviewService.list(
             typeof params.conversationId === 'string' ? params.conversationId : undefined,
@@ -1639,6 +1775,34 @@ async function handleRequestCore(
         case 'shot.continuity.get':
           result = shotContinuityService.get(requireString(params, 'shotId'));
           break;
+        case 'shot.continuity.assets':
+          result = shotContinuityService.resolveAssets(
+            requireString(params, 'shotId'),
+            params.assetIds as string[],
+          );
+          break;
+        case 'shot.continuity.import':
+          result = await shotContinuityService.importFiles(
+            requireString(params, 'shotId'),
+            params.sourcePaths as string[],
+          );
+          break;
+        case 'shot.continuity.probe':
+          result = await shotContinuityService.probe(
+            requireString(params, 'shotId'),
+            requireString(params, 'videoAssetId'),
+          );
+          break;
+        case 'shot.continuity.selection.confirm':
+          result = await shotContinuityService.confirmSelection(
+            params as unknown as import('@ai-video/contracts').ShotContinuitySelectionParams,
+          );
+          break;
+        case 'shot.continuity.references':
+          result = shotContinuityService.references(
+            params as unknown as import('@ai-video/contracts').ShotContinuityReferencesParams,
+          );
+          break;
         case 'shot.continuity.preview':
           result = await shotContinuityService.preview(
             params as unknown as import('@ai-video/contracts').ShotContinuityPreviewParams,
@@ -1647,6 +1811,13 @@ async function handleRequestCore(
         case 'shot.continuity.confirm':
           result = await shotContinuityService.confirm(
             params as unknown as import('@ai-video/contracts').ShotContinuityConfirmParams,
+          );
+          break;
+        case 'shot.continuity.reconfirm':
+          result = await shotContinuityService.reconfirm(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+            params.expectedTargetRowVersion as number,
           );
           break;
         case 'shot.continuity.clear':
@@ -1663,8 +1834,21 @@ async function handleRequestCore(
           );
           break;
         case 'shot.continuity.prompt.prepare':
-          result = await shotContinuityService.preparePrompt(
-            params as unknown as import('@ai-video/contracts').ShotContinuityPromptPrepareParams,
+          result = shotContinuityService.preparePrompt();
+          break;
+        case 'shot.continuity.reference':
+          result = shotContinuityService.reference(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+            params.assetId as string | undefined,
+            params.role as 'reference' | 'first-frame',
+          );
+          break;
+        case 'shot.continuity.intent.save':
+          result = shotContinuityService.saveIntent(
+            requireString(params, 'shotId'),
+            params.expectedRowVersion as number,
+            params.notes as string,
           );
           break;
         case 'shot.continuity.prompt.save':
@@ -1701,6 +1885,21 @@ async function handleRequestCore(
             ),
           );
           break;
+        case 'characterVoiceReference.generate':
+          result = await dubbingService.generateVoiceReference(
+            params as unknown as import('@ai-video/contracts').CharacterVoiceReferenceGenerateParams,
+          );
+          break;
+        case 'characterVoiceReference.prepare':
+          result = dubbingService.prepareVoiceReferenceSubmission(
+            params as unknown as import('@ai-video/contracts').CharacterVoiceReferencePrepareParams,
+          );
+          break;
+        case 'characterVoiceReference.confirm':
+          result = await dubbingService.confirmVoiceReferenceSubmission(
+            params as unknown as import('@ai-video/contracts').CharacterVoiceReferenceConfirmParams,
+          );
+          break;
         case 'characterVoice.save':
           result = dubbingService.saveVoice(
             params as unknown as DubbingWorkerMethodMap['characterVoice.save']['params'],
@@ -1709,6 +1908,16 @@ async function handleRequestCore(
         case 'audio.import':
           result = await dubbingService.importAudio(
             params as unknown as DubbingWorkerMethodMap['audio.import']['params'],
+          );
+          break;
+        case 'audio.sample.prepare':
+          result = dubbingService.prepareAudioSampleSubmission(
+            params as unknown as DubbingWorkerMethodMap['audio.sample.prepare']['params'],
+          );
+          break;
+        case 'audio.sample.confirm':
+          result = await dubbingService.confirmAudioSampleSubmission(
+            params as unknown as DubbingWorkerMethodMap['audio.sample.confirm']['params'],
           );
           break;
         case 'audio.list':
@@ -1790,6 +1999,9 @@ async function handleRequestCore(
           break;
         case 'document.list':
           result = documentWorkflowService.listDocuments();
+          break;
+        case 'document.archived.list':
+          result = documentWorkflowService.listArchivedDocuments();
           break;
         case 'novel.profile.get':
           result = novelService.getProfile(params) ?? null;
@@ -1909,6 +2121,16 @@ async function handleRequestCore(
         case 'document.restore':
           result = contentService.restoreDocument(params as unknown as DocumentRestoreParams);
           break;
+        case 'document.archive':
+          result = documentWorkflowService.archiveDocument(
+            params as unknown as import('@ai-video/contracts').DocumentArchiveParams,
+          );
+          break;
+        case 'document.unarchive':
+          result = documentWorkflowService.unarchiveDocument(
+            params as unknown as import('@ai-video/contracts').DocumentUnarchiveParams,
+          );
+          break;
         case 'document.review.submit':
           result = documentWorkflowService.submitReview(
             params as unknown as DocumentReviewSubmitParams,
@@ -1929,6 +2151,11 @@ async function handleRequestCore(
           break;
         case 'document.selfPublish':
           result = documentWorkflowService.selfPublish(params as unknown as DocumentPublishParams);
+          break;
+        case 'document.unpublish':
+          result = documentWorkflowService.unpublish(
+            params as unknown as import('@ai-video/contracts').DocumentUnpublishParams,
+          );
           break;
         case 'agent.task.createDocumentDraft':
           result = documentWorkflowService.createDocumentDraftFromMessage(
@@ -2226,9 +2453,7 @@ async function handleRequestCore(
             {
               conversationId: agentParams.conversationId,
               prompt: agentParams.prompt,
-              ...(resolvePiConversationRuntimeEnabled()
-                ? { taskExecution: agentParams.taskExecution ?? ('parallel' as const) }
-                : {}),
+              taskExecution: agentParams.taskExecution ?? ('parallel' as const),
               providerProfileId: selected.providerProfileId,
               modelId: selected.modelId,
               attachments: agentParams.attachments,
@@ -2239,6 +2464,7 @@ async function handleRequestCore(
               documentIntent,
               selectedChapterIds: agentParams.selectedChapterIds,
               targetPlatform: agentParams.targetPlatform,
+              productionSkillId: agentParams.productionSkillId,
               ...(novelIntent ? { novelIntent } : {}),
             },
             undefined,
@@ -2248,7 +2474,7 @@ async function handleRequestCore(
             status: 'started',
             capability: capabilityHint,
             ...prepared,
-            runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+            runtimeOwner: 'pi',
             runtimeMode: 'document',
           };
           break;
@@ -2296,7 +2522,7 @@ async function handleRequestCore(
           );
           result = {
             ...prepared,
-            runtimeOwner: resolvePiConversationRuntimeEnabled() ? 'pi' : 'native-agent',
+            runtimeOwner: 'pi',
             runtimeMode: 'document',
           };
           break;
@@ -2472,13 +2698,21 @@ async function handleRequestCore(
           );
           break;
         case 'scene.list':
-          result = contentService.listScenes();
+          result = contentService.listScenes(params.includeArchived === true);
+          break;
+        case 'production.lifecycle.change':
+          result = contentService.changeProductionLifecycle(
+            params as unknown as import('@ai-video/contracts').ProductionLifecycleParams,
+          );
           break;
         case 'scene.save':
           result = contentService.saveScene(params as unknown as SceneSaveParams);
           break;
         case 'shot.list':
-          result = contentService.listShots(requireString(params, 'sceneId'));
+          result = contentService.listShots(
+            requireString(params, 'sceneId'),
+            params.includeArchived === true,
+          );
           break;
         case 'shot.save':
           result = contentService.saveShot(params as unknown as ShotSaveParams);
@@ -2522,6 +2756,12 @@ async function handleRequestCore(
           );
           break;
         case 'conversation.modelPreference.set':
+          if (['text', 'document', 'short-drama', 'novel'].includes(String(params.capability)))
+            generationService.switchConversationModel(
+              requireString(params, 'conversationId'),
+              requireString(params, 'providerProfileId'),
+              requireString(params, 'modelId'),
+            );
           result = contentService.setConversationModelPreference(
             params as unknown as ConversationModelPreferenceSetParams,
           );
@@ -2594,7 +2834,12 @@ async function handleRequestCore(
           const failParams = params as unknown as LlmGenerationFailParams;
           partialArtifactService.captureInterrupted(failParams, failParams.content);
           const failed = generationService.failNative(failParams);
-          agentProviderLoopService.terminateGeneration(failed.generationId, 'failed');
+          agentProviderLoopService.terminateGeneration(
+            failed.generationId,
+            'failed',
+            failParams.error,
+            failParams.providerErrorCode,
+          );
           result = failed;
           break;
         }
@@ -3232,3 +3477,7 @@ function requireVideoFailureKind(
   }
   throw new Error(`${key} must be a supported video failure kind.`);
 }
+
+import { AgentContextManager } from './agent-context-manager.js';
+
+import { AgentContextStore } from '@ai-video/persistence';

@@ -1,5 +1,88 @@
 [
   {
+    "bindingId": "unicomp-seedance-2-0",
+    "providerType": "unicompapi",
+    "remoteModelId": "doubao-seedance-2-0-260128",
+    "contractId": "cn.bytedance.seedance2-0.video",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": { "videoCancellation": false },
+    "inputTransport": { "audio": "url-only" },
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-video",
+      "request": [
+        { "operation": "extract", "from": "content[].text", "to": "prompt" },
+        { "operation": "copy", "from": "content", "to": "metadata.content" },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "seconds",
+          "valueEncoding": "integer-string"
+        },
+        { "operation": "copy", "from": "resolution", "to": "metadata.resolution" },
+        { "operation": "copy", "from": "ratio", "to": "metadata.ratio" },
+        { "operation": "copy", "from": "generate_audio", "to": "metadata.generate_audio" },
+        { "operation": "copy", "from": "watermark", "to": "metadata.watermark" },
+        { "operation": "copy", "from": "return_last_frame", "to": "metadata.return_last_frame" },
+        { "operation": "copy", "from": "callback_url", "to": "metadata.callback_url" },
+        { "operation": "copy", "from": "service_tier", "to": "metadata.service_tier" },
+        {
+          "operation": "copy",
+          "from": "execution_expires_after",
+          "to": "metadata.execution_expires_after"
+        }
+      ],
+      "response": [
+        { "operation": "extract", "from": "id", "to": "taskId" },
+        { "operation": "extract", "from": "status", "to": "state" }
+      ]
+    }
+  },
+  {
+    "bindingId": "unicomp-seedance-2-5",
+    "providerType": "unicompapi",
+    "remoteModelId": "doubao-seedance-2-5-260628",
+    "contractId": "cn.bytedance.seedance2-5.video",
+    "contractRevision": 2,
+    "protocol": "openai-compatible-video",
+    "compatibility": "partial",
+    "status": "enabled",
+    "capabilitiesOverride": { "videoCancellation": false },
+    "inputTransport": { "audio": "url-only" },
+    "transportOverride": {
+      "protocolFamily": "openai-compatible-video",
+      "request": [
+        { "operation": "extract", "from": "content[].text", "to": "prompt" },
+        { "operation": "copy", "from": "content", "to": "metadata.content" },
+        {
+          "operation": "copy",
+          "from": "duration",
+          "to": "seconds",
+          "valueEncoding": "integer-string"
+        },
+        { "operation": "copy", "from": "resolution", "to": "metadata.resolution" },
+        { "operation": "copy", "from": "ratio", "to": "metadata.ratio" },
+        { "operation": "copy", "from": "generate_audio", "to": "metadata.generate_audio" },
+        { "operation": "copy", "from": "watermark", "to": "metadata.watermark" },
+        { "operation": "copy", "from": "return_last_frame", "to": "metadata.return_last_frame" },
+        { "operation": "copy", "from": "callback_url", "to": "metadata.callback_url" },
+        { "operation": "copy", "from": "service_tier", "to": "metadata.service_tier" },
+        {
+          "operation": "copy",
+          "from": "execution_expires_after",
+          "to": "metadata.execution_expires_after"
+        },
+        { "operation": "copy", "from": "draft", "to": "metadata.draft" }
+      ],
+      "response": [
+        { "operation": "extract", "from": "id", "to": "taskId" },
+        { "operation": "extract", "from": "status", "to": "state" }
+      ]
+    }
+  },
+  {
     "bindingId": "unicomp-happyhorse-1.0-t2v",
     "providerType": "unicompapi",
     "remoteModelId": "happyhorse-1.0-t2v",

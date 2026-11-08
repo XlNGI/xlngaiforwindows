@@ -1,11 +1,42 @@
 import { describe, expect, it } from 'vitest';
-import { VIDEO_PROMPT_AUTHORING_REQUIREMENTS } from '@ai-video/contracts';
+import {
+  SCENE_REFERENCE_IMAGE_REQUIREMENTS,
+  VIDEO_PROMPT_AUTHORING_REQUIREMENTS,
+} from '@ai-video/contracts';
 import {
   composeConversationPrompt,
   SCENE_PROMPT_CONSTRAINT_TEMPLATE,
+  splitComposedConversationPrompt,
 } from './conversation-prompt-template.js';
 
 describe('conversation prompt constraints', () => {
+  it('uses composite scene image guidance without changing a custom template', () => {
+    expect(SCENE_PROMPT_CONSTRAINT_TEMPLATE).toContain(SCENE_REFERENCE_IMAGE_REQUIREMENTS);
+    expect(SCENE_PROMPT_CONSTRAINT_TEMPLATE).toContain(
+      '每个场景默认生成一张主图为全景、次图为关键特写的复合参考图',
+    );
+    expect(SCENE_PROMPT_CONSTRAINT_TEMPLATE).toContain(
+      '同一场景的全景和特写合在一个画布及一次生图请求中',
+    );
+    expect(composeConversationPrompt('生成场景图', '只制作一张正面图')).toBe(
+      '【本会话要求约束】\n只制作一张正面图\n\n【用户本次请求】\n生成场景图',
+    );
+  });
+
+  it('splits the displayed constraint from the request without losing either part', () => {
+    const composed = composeConversationPrompt('生成场次', '固定风格\n标注镜头运动');
+    expect(splitComposedConversationPrompt(composed)).toEqual({
+      constraints: '固定风格\n标注镜头运动',
+      request: '生成场次',
+    });
+    expect(splitComposedConversationPrompt('普通请求')).toBeUndefined();
+    expect(
+      splitComposedConversationPrompt(
+        '【本会话要求约束】\r\n固定风格\r\n\r\n【用户本次请求】\r\n生成场次',
+      ),
+    ).toEqual({ constraints: '固定风格', request: '生成场次' });
+  });
+
   it('keeps temporary props as individually generated assets with real references', () => {
     expect(SCENE_PROMPT_CONSTRAINT_TEMPLATE).toContain('每件道具分别提供独立的道具图片提示词');
     expect(SCENE_PROMPT_CONSTRAINT_TEMPLATE).toContain('不自动发起图片生成');

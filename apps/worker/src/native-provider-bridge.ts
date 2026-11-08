@@ -1,3 +1,4 @@
+import { validateContextLimits } from './model-context-policy.js';
 import {
   SIDECAR_ENVELOPE_MAX_BYTES,
   type HostError,
@@ -38,7 +39,7 @@ export class JsonLineWriter {
     } catch (error) {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
-    if (Buffer.byteLength(line, 'utf8') > SIDECAR_ENVELOPE_MAX_BYTES) {
+    if (Buffer.byteLength(line, 'utf8') > envelopeLimit(value)) {
       return Promise.reject(
         new SidecarEnvelopeSizeError('Sidecar envelope exceeds the 2 MiB limit.'),
       );
@@ -120,6 +121,7 @@ export class NativeProviderBridge {
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
   >();
   private nextRequestOrdinal = 0;
+  private closed = false;
 
   constructor(
     private readonly transport: NativeProviderTransport,
@@ -132,6 +134,7 @@ export class NativeProviderBridge {
     callbacks: NativeProviderStreamCallbacks,
     signal?: AbortSignal,
   ): NativeProviderStreamHandle {
+    if (this.closed) throw this.closedRequestError();
     validateStartParams(params);
     const requestId = this.createRequestId();
     if (!requestId || this.pending.has(requestId)) {
@@ -173,6 +176,7 @@ export class NativeProviderBridge {
 
   /** Send a bounded one-shot request to the Native host and await its correlated response. */
   request<M extends HostMethod>(method: M, params: unknown, timeoutMs = 120_000): Promise<unknown> {
+    if (this.closed) return Promise.reject(this.closedRequestError());
     assertNoSensitiveData(params);
     const requestId = this.createRequestId();
     if (!requestId || this.pending.has(requestId) || this.pendingRequests.has(requestId)) {
@@ -238,6 +242,21 @@ export class NativeProviderBridge {
       this.pendingRequests.delete(requestId);
       pending.reject(new NativeProviderRequestError(error));
     }
+  }
+
+  /** Shutdown is permanent for this transport; retry callbacks cannot submit new work. */
+  close(error: HostError): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.interruptAll(error);
+  }
+
+  private closedRequestError(): NativeProviderRequestError {
+    return new NativeProviderRequestError({
+      code: 'REQUEST_NOT_SENT',
+      message: 'Native host admission is closed; the request was not sent.',
+      retryable: true,
+    });
   }
 
   private handleResponse(value: Record<string, unknown>): void {
@@ -364,79 +383,247 @@ export function createPiStreamFunction(
     requestId: string,
     usage: Extract<NativeProviderHostEvent, { type: 'usage' }>['usage'],
   ) => void,
+  beforeRetry?: () => void,
+  recoverContext?: () => boolean,
 ): StreamFunction {
   return (model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const message = createAssistantMessage(model);
-    const requestId = randomUUID();
-    observe?.(requestId, 'preparing', {});
+    const toolArgumentOutputs = new Map<string, { name: string; argumentsJson: string }>();
+    const contextRejected = new Set<string>();
     stream.push({ type: 'start', partial: cloneMessage(message) });
-    void Promise.resolve()
-      .then(() => resolveParams(model, context, options))
-      .then((params) => {
-        observe?.(requestId, 'dispatching', {
-          inputHash: createHash('sha256').update(JSON.stringify(params)).digest('hex'),
-          inputBytes: Buffer.byteLength(JSON.stringify(params)),
-          toolCount: params.tools?.length ?? 0,
-          inferenceSettings: params.inferenceSettings ?? {
-            reasoning: 'provider_default',
-            output: 'provider_default',
-          },
-        });
-        let terminalObserved = false;
-        bridge.start(
-          params,
-          {
-            onEvent: (event) => {
-              if (terminalObserved) return;
-              if (event.type === 'usage') onUsage?.(requestId, event.usage);
-              applyPiEvent(stream, message, event);
-              if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-                terminalObserved = true;
-                observe?.(requestId, message.stopReason === 'aborted' ? 'cancelled' : 'failed', {
-                  errorCode:
-                    event.type === 'failed' ? event.error.code : 'INVALID_PROVIDER_RESPONSE',
-                });
-                return;
-              }
-              if (event.type === 'request_progress')
-                observe?.(requestId, event.stage, {
-                  argumentBytes: event.argumentBytes,
-                  toolName: event.toolName,
-                  receivedBytes: event.receivedBytes,
-                  requestBodyHash: event.requestBodyHash,
-                  requestBodyBytes: event.requestBodyBytes,
-                });
-              else if (event.type === 'text_delta' || event.type === 'thinking_delta')
-                observe?.(requestId, event.type === 'text_delta' ? 'visible_text' : 'thinking', {});
-              else if (['complete', 'failed', 'cancelled'].includes(event.type))
-                observe?.(
-                  requestId,
-                  event.type,
-                  event.type === 'complete'
-                    ? { finishReason: event.finishReason }
-                    : event.type === 'failed'
-                      ? { errorCode: event.error.code }
-                      : {},
-                );
-              if (event.type === 'complete') terminalObserved = true;
-            },
-          },
-          options?.signal,
-        );
-      })
-      .catch((error) => {
-        observe?.(requestId, 'failed', { errorCode: 'BRIDGE_FAILED' });
-        finishPiError(stream, message, 'error', errorMessage(error));
+    const startAttempt = (retryAttempt: number): void => {
+      const requestId = randomUUID();
+      const retryMetadata = { retryAttempt };
+      let unchangedContext = false;
+      const cancelled = (): boolean => {
+        if (!options?.signal?.aborted) return false;
+        observe?.(requestId, 'cancelled', retryMetadata);
+        finishPiError(stream, message, 'aborted', 'Native Provider request was cancelled.');
+        return true;
+      };
+      const dispatch = () =>
+        Promise.resolve()
+          .then(() => resolveParams(model, context, options))
+          .then((params) => {
+            if (cancelled()) return;
+            const inputHash = createHash('sha256').update(JSON.stringify(params)).digest('hex');
+            if (contextRejected.has(inputHash)) {
+              unchangedContext = true;
+              throw new Error(
+                'CONTEXT_BUDGET_EXCEEDED: Context recovery produced the same rejected request. Original task data and saved results are preserved.',
+              );
+            }
+            observe?.(requestId, 'dispatching', {
+              ...retryMetadata,
+              inputHash,
+              inputBytes: Buffer.byteLength(JSON.stringify(params)),
+              toolCount: params.tools?.length ?? 0,
+              inferenceSettings: params.inferenceSettings ?? {
+                reasoning: 'provider_default',
+                output: 'provider_default',
+              },
+            });
+            let terminalObserved = false;
+            let receivedOutput = false;
+            bridge.start(
+              params,
+              {
+                onEvent: (event) => {
+                  if (terminalObserved) return;
+                  // A retry replaces only a rejected model request. Never replay a
+                  // response after text, reasoning, tool arguments or usage arrived.
+                  if (
+                    [
+                      'text_delta',
+                      'thinking_delta',
+                      'tool_call_start',
+                      'tool_call_delta',
+                      'tool_call_end',
+                      'usage',
+                    ].includes(event.type)
+                  )
+                    receivedOutput = true;
+                  if (event.type === 'request_progress' && event.stage === 'tool_arguments')
+                    receivedOutput = true;
+                  if (
+                    event.type === 'failed' &&
+                    !receivedOutput &&
+                    retryAttempt < 2 &&
+                    !options?.signal?.aborted &&
+                    event.error.code === 'PROVIDER_FAILED' &&
+                    event.error.retryable &&
+                    // Gateways also use 520/524/529. Honor the native retryable
+                    // classification across HTTP server errors, under the same
+                    // output fence and retry limit as ordinary 500/502 failures.
+                    (((event.error.providerStatus ?? 0) >= 500 &&
+                      (event.error.providerStatus ?? 0) <= 599) ||
+                      (event.error.providerStatus == null &&
+                        ['WINHTTP_RESPONSE_HEADERS', 'WINHTTP_REQUEST_SEND'].includes(
+                          event.error.providerErrorCode ?? '',
+                        )))
+                  ) {
+                    terminalObserved = true;
+                    observe?.(requestId, 'failed', {
+                      ...retryMetadata,
+                      errorCode: event.error.code,
+                      failureOrigin: 'provider',
+                      providerStatus: event.error.providerStatus,
+                      providerErrorCode: event.error.providerErrorCode,
+                      providerErrorMessage: sanitizeTelemetryError(event.error.message),
+                    });
+                    startAttempt(retryAttempt + 1);
+                    return;
+                  }
+                  if (
+                    event.type === 'failed' &&
+                    !receivedOutput &&
+                    retryAttempt < 2 &&
+                    !options?.signal?.aborted &&
+                    isContextLimitFailure(event.error) &&
+                    recoverContext?.()
+                  ) {
+                    terminalObserved = true;
+                    contextRejected.add(inputHash);
+                    observe?.(requestId, 'failed', {
+                      ...retryMetadata,
+                      errorCode: 'CONTEXT_BUDGET_EXCEEDED',
+                      failureOrigin:
+                        event.error.providerErrorCode === 'CONTEXT_BUDGET_EXCEEDED'
+                          ? 'local_context'
+                          : 'provider',
+                    });
+                    startAttempt(retryAttempt + 1);
+                    return;
+                  }
+                  if (event.type === 'usage') onUsage?.(requestId, event.usage);
+                  applyPiEvent(stream, message, event, toolArgumentOutputs);
+                  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+                    terminalObserved = true;
+                    observe?.(
+                      requestId,
+                      message.stopReason === 'aborted' ? 'cancelled' : 'failed',
+                      {
+                        errorCode:
+                          event.type === 'failed' ? event.error.code : 'INVALID_PROVIDER_RESPONSE',
+                        failureOrigin:
+                          event.type === 'failed' &&
+                          event.error.providerErrorCode === 'CONTEXT_BUDGET_EXCEEDED'
+                            ? 'local_context'
+                            : event.type === 'failed' && event.error.code === 'PROVIDER_FAILED'
+                              ? 'provider'
+                              : 'bridge',
+                        ...(event.type === 'failed'
+                          ? {
+                              providerStatus: event.error.providerStatus,
+                              providerErrorCode: event.error.providerErrorCode,
+                              providerErrorMessage: sanitizeTelemetryError(event.error.message),
+                            }
+                          : {}),
+                      },
+                    );
+                    return;
+                  }
+                  if (event.type === 'request_progress')
+                    observe?.(requestId, event.stage, {
+                      argumentBytes: event.argumentBytes,
+                      toolName: event.toolName,
+                      receivedBytes: event.receivedBytes,
+                      requestBodyHash: event.requestBodyHash,
+                      requestBodyBytes: event.requestBodyBytes,
+                      wireContext: event.wireContext,
+                    });
+                  else if (event.type === 'text_delta' || event.type === 'thinking_delta')
+                    observe?.(
+                      requestId,
+                      event.type === 'text_delta' ? 'visible_text' : 'thinking',
+                      {},
+                    );
+                  else if (['complete', 'failed', 'cancelled'].includes(event.type))
+                    observe?.(
+                      requestId,
+                      event.type,
+                      event.type === 'complete'
+                        ? { finishReason: event.finishReason }
+                        : event.type === 'failed'
+                          ? {
+                              errorCode: event.error.code,
+                              providerStatus: event.error.providerStatus,
+                              providerErrorCode: event.error.providerErrorCode,
+                              providerErrorMessage: sanitizeTelemetryError(event.error.message),
+                            }
+                          : {},
+                    );
+                  if (event.type === 'complete') terminalObserved = true;
+                },
+              },
+              options?.signal,
+            );
+          });
+      const run = async () => {
+        observe?.(requestId, 'preparing', retryMetadata);
+        if (retryAttempt > 0) {
+          const delayMs = retryAttempt * 1000;
+          observe?.(requestId, 'retry_wait', { ...retryMetadata, delayMs });
+          await waitForProviderRetry(delayMs, options?.signal);
+          if (cancelled()) return;
+          // Re-admit every HTTP request through the task budget and session fence.
+          beforeRetry?.();
+        }
+        if (cancelled()) return;
+        await dispatch();
+      };
+      void run().catch((error) => {
+        const aborted = options?.signal?.aborted;
+        const localContext = /^(CONTEXT_BUDGET_EXCEEDED|AGENT_REPEATED_READ_STALLED)(?::|$)/.exec(
+          errorMessage(error),
+        )?.[1];
+        try {
+          observe?.(requestId, aborted ? 'cancelled' : 'failed', {
+            ...retryMetadata,
+            errorCode: localContext ?? 'BRIDGE_FAILED',
+            failureOrigin: localContext ? 'local_context' : 'bridge',
+          });
+        } catch {
+          // A closed project can reject accounting too. Always settle Pi;
+          // the dispatch failed and must not leave the Agent waiting forever.
+        }
+        if (
+          !aborted &&
+          !unchangedContext &&
+          localContext === 'CONTEXT_BUDGET_EXCEEDED' &&
+          retryAttempt < 2 &&
+          recoverContext?.()
+        ) {
+          startAttempt(retryAttempt + 1);
+          return;
+        }
+        finishPiError(stream, message, aborted ? 'aborted' : 'error', errorMessage(error));
       });
+    };
+    startAttempt(0);
     return stream;
   };
+}
+
+function waitForProviderRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    if (signal?.aborted) finish();
+    else signal?.addEventListener('abort', finish, { once: true });
+  });
 }
 
 function applyPiEvent(
   stream: AssistantMessageEventStream,
   message: AssistantMessage,
   event: NativeProviderHostEvent,
+  toolArgumentOutputs: Map<string, { name: string; argumentsJson: string }>,
 ): void {
   if (message.stopReason === 'error' || message.stopReason === 'aborted') return;
   switch (event.type) {
@@ -471,6 +658,7 @@ function applyPiEvent(
       return;
     }
     case 'tool_call_start': {
+      toolArgumentOutputs.set(event.callId, { name: event.name, argumentsJson: '' });
       const call: ToolCall = {
         type: 'toolCall',
         id: event.callId,
@@ -486,6 +674,8 @@ function applyPiEvent(
       return;
     }
     case 'tool_call_delta': {
+      const output = toolArgumentOutputs.get(event.callId);
+      if (output) output.argumentsJson += event.delta;
       const index = findToolCall(message, event.callId);
       if (index >= 0)
         stream.push({
@@ -501,11 +691,16 @@ function applyPiEvent(
       try {
         args = parseArguments(event.call.argumentsJson);
       } catch {
+        const failureFingerprint = createHash('sha256')
+          .update(event.call.name, 'utf8')
+          .update('\0')
+          .update(event.call.argumentsJson, 'utf8')
+          .digest('hex');
         finishPiError(
           stream,
           message,
           'error',
-          `INVALID_TOOL_ARGUMENTS: ${event.call.name.slice(0, 128)} returned invalid object JSON (${Buffer.byteLength(event.call.argumentsJson, 'utf8')} bytes). No tool was executed. Retry with smaller staged submissions.`,
+          `INVALID_TOOL_ARGUMENTS: ${event.call.name.slice(0, 128)} returned invalid object JSON (${Buffer.byteLength(event.call.argumentsJson, 'utf8')} bytes). No tool was executed. Retry with smaller staged submissions. failureFingerprint=${failureFingerprint}`,
         );
         return;
       }
@@ -516,6 +711,10 @@ function applyPiEvent(
         name: event.call.name,
         arguments: args,
       };
+      toolArgumentOutputs.set(event.call.id, {
+        name: event.call.name,
+        argumentsJson: event.call.argumentsJson,
+      });
       if (index < 0) {
         message.content.push(call);
         index = message.content.length - 1;
@@ -547,11 +746,25 @@ function applyPiEvent(
           event.finishReason ?? '',
         )
       ) {
+        const output = {
+          text: message.content
+            .filter((content) => content.type === 'text')
+            .map((content) => content.text),
+          tools: Array.from(toolArgumentOutputs.values(), ({ name, argumentsJson }) => ({
+            name,
+            argumentsJson,
+          })),
+        };
+        const failureFingerprint = createHash('sha256')
+          .update(event.finishReason ?? '')
+          .update('\0')
+          .update(JSON.stringify(output))
+          .digest('hex');
         finishPiError(
           stream,
           message,
           'error',
-          `INCOMPLETE_TOOL_OUTPUT: finishReason=${event.finishReason}. No tool was executed; use smaller staged submissions.`,
+          `INCOMPLETE_TOOL_OUTPUT: finishReason=${event.finishReason}. No tool was executed; use smaller staged submissions. failureFingerprint=${failureFingerprint}`,
         );
         return;
       }
@@ -687,6 +900,8 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
   assertExactKeys(params as unknown as Record<string, unknown>, [
     'generationId',
     'inferenceSettings',
+    'modelCapabilities',
+    'contextTurns',
     'attemptId',
     'projectId',
     'projectSessionId',
@@ -703,6 +918,50 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     'tools',
     'continuation',
   ]);
+  if (params.contextTurns) {
+    if (params.continuation)
+      throw new Error('Cannot combine rebuilt context turns and provider continuation.');
+    // ContextManager selects history using the model budget. The transport
+    // validates its shape and pairing; turn count is not a model limit.
+    if (!Array.isArray(params.contextTurns)) throw new Error('Invalid context turns.');
+    const seen = new Set<string>();
+    for (const turn of params.contextTurns) {
+      assertExactKeys(turn as unknown as Record<string, unknown>, [
+        'content',
+        'calls',
+        'outputs',
+        'userMessages',
+      ]);
+      if (
+        !Array.isArray(turn.calls) ||
+        !Array.isArray(turn.outputs) ||
+        turn.calls.length !== turn.outputs.length
+      )
+        throw new Error('Unpaired context tool outputs.');
+      for (const call of turn.calls) {
+        assertExactKeys(call, ['id', 'name', 'argumentsJson']);
+        if (!call.id || !call.name || seen.has(call.id)) throw new Error('Invalid context call.');
+        seen.add(call.id);
+        JSON.parse(call.argumentsJson);
+      }
+      const outputIds = new Set<string>();
+      for (const output of turn.outputs) {
+        assertExactKeys(output as unknown as Record<string, unknown>, ['callId', 'output']);
+        if (
+          typeof output.output !== 'string' ||
+          outputIds.has(output.callId) ||
+          !turn.calls.some((call) => call.id === output.callId)
+        )
+          throw new Error('Invalid context output.');
+        outputIds.add(output.callId);
+      }
+    }
+  }
+  if (params.modelCapabilities) {
+    validateContextLimits(params.modelCapabilities);
+    if (params.modelCapabilities.modelId !== params.modelId)
+      throw new Error('Model capability identity mismatch.');
+  }
   if (params.inferenceSettings) {
     const settings = params.inferenceSettings;
     assertExactKeys(settings as unknown as Record<string, unknown>, [
@@ -713,7 +972,7 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     if (
       !Number.isSafeInteger(settings.maxOutputTokens) ||
       settings.maxOutputTokens < 1 ||
-      settings.maxOutputTokens > 131072 ||
+      settings.maxOutputTokens > 0xffffffff ||
       settings.reasoning !== 'provider_default' ||
       (params.protocol === 'openai-responses'
         ? settings.outputTokenParameter !== 'max_output_tokens'
@@ -763,6 +1022,7 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
         'receivedBytes',
         'requestBodyHash',
         'requestBodyBytes',
+        'wireContext',
       ]);
       if (
         ![
@@ -776,6 +1036,29 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
         ].includes(String(value.stage))
       )
         throw new Error('Unknown native request stage.');
+      if (value.wireContext !== undefined) {
+        if (!isRecord(value.wireContext)) throw new Error('Invalid wire meter.');
+        const wire = value.wireContext;
+        for (const field of [
+          'estimatedInputTokens',
+          'requestBodyBytes',
+          'systemTokens',
+          'toolSchemaTokens',
+          'messageTokens',
+          'imageTokens',
+          'reservedOutputTokens',
+        ])
+          if (!Number.isSafeInteger(wire[field]) || Number(wire[field]) < 0)
+            throw new Error('Invalid wire meter count.');
+        for (const field of ['meter', 'protocol', 'capabilitySource'])
+          if (typeof wire[field] !== 'string') throw new Error('Invalid wire meter provenance.');
+        if (
+          wire.requestedOutputTokens !== undefined &&
+          (!Number.isSafeInteger(wire.requestedOutputTokens) ||
+            Number(wire.requestedOutputTokens) < Number(wire.reservedOutputTokens))
+        )
+          throw new Error('Invalid requested output allowance.');
+      }
       if (
         value.requestBodyHash !== undefined &&
         (typeof value.requestBodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.requestBodyHash))
@@ -885,9 +1168,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sanitizeTelemetryError(message: string): string {
+  return message
+    .replace(/\b(Bearer\s+)\S+/giu, '$1[redacted]')
+    .replace(
+      /\b(authorization|x-api-key|api[_-]?key|access_token|token|secret|password)\s*[:=]\s*[^\s,;]+/giu,
+      '$1=[redacted]',
+    )
+    .replace(/(https?:\/\/[^\s?#]+)\?[^\s#]*/giu, '$1?[query redacted]')
+    .slice(0, 500);
+}
+
 function assertEnvelopeSize(value: unknown): void {
   const serialized = JSON.stringify(value);
-  if (Buffer.byteLength(serialized, 'utf8') + 1 > SIDECAR_ENVELOPE_MAX_BYTES) {
+  if (Buffer.byteLength(serialized, 'utf8') + 1 > envelopeLimit(value)) {
     throw new Error('Sidecar envelope exceeds the 2 MiB limit.');
   }
 }
@@ -929,4 +1223,24 @@ function requireString(value: unknown, label: string, allowEmpty = false): strin
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function isContextLimitFailure(error: HostError): boolean {
+  return (
+    [
+      'CONTEXT_BUDGET_EXCEEDED',
+      'context_length_exceeded',
+      'context_window_exceeded',
+      'max_context_length',
+      'input_tokens_exceeded',
+    ].includes(error.providerErrorCode ?? '') &&
+    ![402, 403, 429, 500, 502, 503, 504].includes(error.providerStatus ?? 0)
+  );
+}
+
+function envelopeLimit(value: unknown): number {
+  const v = value as { kind?: string; method?: string } | undefined;
+  return v?.kind === 'host.request' && v.method === 'provider.stream.start'
+    ? 64 * 1024 * 1024
+    : SIDECAR_ENVELOPE_MAX_BYTES;
 }

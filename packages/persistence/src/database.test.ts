@@ -41,10 +41,10 @@ function removeSceneBindingMigration(database: Awaited<ReturnType<typeof tempora
   database.exec(`DROP TRIGGER scenes_validate_scene_document_insert;
     DROP TRIGGER scenes_validate_scene_document_update;
     DROP INDEX idx_scenes_scene_document;
-    ALTER TABLE scenes DROP COLUMN scene_document_id;
+    DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN scene_document_id;
     ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
-    ALTER TABLE scenes DROP COLUMN video_prompt;
-    ALTER TABLE scenes DROP COLUMN material_bindings_json;
+    DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN video_prompt;
+    DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN material_bindings_json;
     DELETE FROM schema_migrations WHERE version >= 42;`);
 }
 
@@ -75,6 +75,45 @@ describe('project database', () => {
           )
           .get(),
       ).toEqual({ name: 'agent_task_usage_task' });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('backfills Agent usage counters and initializes counters for new tasks', async () => {
+    const database = await temporaryDatabase();
+    try {
+      migrateDatabase(database);
+      database
+        .prepare('INSERT INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)')
+        .run('usage-project', 'Usage project', 'now', 'now');
+      const insertTask = database.prepare(
+        `INSERT INTO agent_tasks
+         (id,project_id,project_session_id,task_type,scope_type,title,request_snapshot_json,
+          request_hash,status,created_at,updated_at,phase,tool_call_count)
+         VALUES(?,'usage-project','session','document-query','project',?,'{}','hash','running',
+                'now','now','model_running',?)`,
+      );
+      insertTask.run('existing-task', 'Existing task', 7);
+      database.exec(`
+        DROP TRIGGER agent_task_usage_counter_insert;
+        DROP TABLE agent_task_usage_counters;
+        DELETE FROM schema_migrations WHERE version >= 69;
+      `);
+
+      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+      expect(
+        database
+          .prepare('SELECT tool_call_count FROM agent_task_usage_counters WHERE task_id=?')
+          .get('existing-task'),
+      ).toEqual({ tool_call_count: 7 });
+
+      insertTask.run('new-task', 'New task', 0);
+      expect(
+        database
+          .prepare('SELECT tool_call_count FROM agent_task_usage_counters WHERE task_id=?')
+          .get('new-task'),
+      ).toEqual({ tool_call_count: 0 });
     } finally {
       database.close();
     }
@@ -115,7 +154,7 @@ describe('project database', () => {
       migrateDatabase(database);
       database.exec(`INSERT INTO projects(id,name,created_at,updated_at) VALUES('ir-v60','IR Legacy','now','now');
         INSERT INTO scenes(id,project_id,title,position,created_at,updated_at,row_version) VALUES('scene','ir-v60','旧场次',0,'now','now',3);
-        ALTER TABLE scenes DROP COLUMN authoring_bindings_applied;
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN authoring_bindings_applied;
         DELETE FROM schema_migrations WHERE version>=61;
         CREATE TRIGGER fail_ir_binding_v61 BEFORE INSERT ON schema_migrations WHEN NEW.version=61 BEGIN SELECT RAISE(ABORT,'v61 failure'); END;`);
       expect(() => migrateDatabase(database)).toThrow('v61 failure');
@@ -156,9 +195,10 @@ describe('project database', () => {
           VALUES('ir-scene','ir-v59','旧场次',0,'旧场次提示词','now','now',3);
         INSERT INTO shots(id,scene_id,title,position,prompt,created_at,updated_at,row_version)
           VALUES('ir-shot','ir-scene','旧镜头',0,'旧镜头提示词','now','now',4);
+        DROP TRIGGER document_versions_published_read_only_insert;
         ALTER TABLE document_versions DROP COLUMN content_ir_json;
-        ALTER TABLE scenes DROP COLUMN authoring_ir_json;
-        ALTER TABLE shots DROP COLUMN authoring_ir_json;
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN authoring_ir_json;
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE shots DROP COLUMN authoring_ir_json;
         ALTER TABLE agent_change_set_items DROP COLUMN production_authoring_ir_json;
         DELETE FROM schema_migrations WHERE version>=60;
       `);
@@ -211,10 +251,10 @@ describe('project database', () => {
       migrateDatabase(database);
       database.exec(`DROP TABLE production_instruction_versions_archive;
         DROP TABLE production_execution_lists_archive;
-        ALTER TABLE shots RENAME COLUMN prompt TO old_prompt;
-        ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt))<=2000);
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE shots RENAME COLUMN prompt TO old_prompt;
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE shots ADD COLUMN prompt TEXT CHECK(prompt IS NULL OR length(trim(prompt))<=2000);
         UPDATE shots SET prompt=old_prompt;
-        ALTER TABLE shots DROP COLUMN old_prompt;
+        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE shots DROP COLUMN old_prompt;
         DELETE FROM schema_migrations WHERE version>=49;
         INSERT INTO projects(id,name,created_at,updated_at) VALUES('p48','旧项目','now','now');
         INSERT INTO scenes(id,project_id,title,position,created_at,updated_at) VALUES('scene48','p48','场次',0,'now','now');
@@ -293,10 +333,10 @@ describe('project database', () => {
       database.exec(`DROP TRIGGER scenes_validate_scene_document_insert;
       DROP TRIGGER scenes_validate_scene_document_update;
       DROP INDEX idx_scenes_scene_document;
-      ALTER TABLE scenes DROP COLUMN scene_document_id;
+      DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN scene_document_id;
       ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
-      ALTER TABLE scenes DROP COLUMN video_prompt;
-      ALTER TABLE scenes DROP COLUMN material_bindings_json;
+      DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN video_prompt;
+      DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN material_bindings_json;
       DELETE FROM schema_migrations WHERE version >= 42;
       INSERT INTO projects (id,name,created_at,updated_at) VALUES ('binding-project','Binding','now','now');
       INSERT INTO scenes (id,project_id,title,position,created_at,updated_at,row_version) VALUES ('legacy-scene','binding-project','庭院',0,'now','now',3);
@@ -1408,9 +1448,38 @@ describe('project database', () => {
       )
       .run('version', 'document', 1, '# Audit', 'now');
 
-    expect(getSchemaVersion(database)).toBe(12);
+    database.exec(MIGRATION_V13);
+    database
+      .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      .run(13, 'v13');
+    database
+      .prepare(
+        `INSERT INTO document_audit_events
+         (id, project_id, sequence, action, actor_type, actor_id, document_id,
+          document_version_id, metadata_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'audit-preserved',
+        'project',
+        99,
+        'draft_saved',
+        'user',
+        'local-user',
+        'document',
+        'version',
+        '{}',
+        'before-v71',
+      );
+
+    expect(getSchemaVersion(database)).toBe(13);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(
+      database
+        .prepare('SELECT action, sequence FROM document_audit_events WHERE id = ?')
+        .get('audit-preserved'),
+    ).toEqual({ action: 'draft_saved', sequence: 99 });
     const insert = database.prepare(
       `INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
@@ -1434,10 +1503,32 @@ describe('project database', () => {
       '{}',
       'later',
     );
-    expect(database.prepare('SELECT action, sequence FROM document_audit_events').get()).toEqual({
-      action: 'draft_saved',
-      sequence: 0,
-    });
+    expect(
+      database
+        .prepare('SELECT action, sequence FROM document_audit_events WHERE id = ?')
+        .get('audit-1'),
+    ).toEqual({ action: 'draft_saved', sequence: 0 });
+    insert.run(
+      'audit-archive',
+      'project',
+      1,
+      'document_archived',
+      'user',
+      'local-user',
+      'document',
+      'version',
+      null,
+      null,
+      null,
+      null,
+      '{}',
+      'later',
+    );
+    expect(
+      database
+        .prepare('SELECT action, sequence FROM document_audit_events WHERE id = ?')
+        .get('audit-archive'),
+    ).toEqual({ action: 'document_archived', sequence: 1 });
     expect(() =>
       database
         .prepare('UPDATE document_audit_events SET action = ? WHERE id = ?')

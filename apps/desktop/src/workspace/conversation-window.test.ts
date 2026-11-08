@@ -4,7 +4,6 @@ import {
   conversationWindowOpenAction,
   conversationWindowToggleAction,
   conversationWindowToggleLabel,
-  isConversationAutoHidden,
   isConversationWindowPresented,
   usableConversationDockLayout,
 } from './conversation-window';
@@ -55,19 +54,11 @@ describe('conversation window toggle', () => {
     });
   });
 
-  it('floats an auto-hidden docked conversation beside production', () => {
-    const autoHidden = options({ productionOpen: true, viewportWidth: 1100 });
-    expect(isConversationAutoHidden(autoHidden)).toBe(true);
-    expect(isConversationWindowPresented(autoHidden)).toBe(false);
-    expect(conversationWindowToggleAction(autoHidden)).toBe('float');
-  });
-
-  it('floats a closed conversation beside production instead of reopening a hidden dock', () => {
+  it('reopens a closed conversation docked beside production on desktop', () => {
     const closed = options({ open: false, productionOpen: true, viewportWidth: 1100 });
-    expect(isConversationAutoHidden(closed)).toBe(false);
     expect(isConversationWindowPresented(closed)).toBe(false);
-    expect(conversationWindowToggleAction(closed)).toBe('float');
-    expect(conversationWindowOpenAction(closed)).toBe('float');
+    expect(conversationWindowToggleAction(closed)).toBe('open');
+    expect(conversationWindowOpenAction(closed)).toBe('open');
   });
 
   it('floats conversation on demand in a narrow production workspace', () => {
@@ -79,31 +70,29 @@ describe('conversation window toggle', () => {
     expect(conversationWindowToggleAction(narrow)).toBe('float');
   });
 
-  it('floats an auto-hidden conversation beside the asset library', () => {
-    const autoHidden = options({ assetsOpen: true, viewportWidth: 1100 });
-    expect(isConversationAutoHidden(autoHidden)).toBe(true);
-    expect(isConversationWindowPresented(autoHidden)).toBe(false);
-    expect(conversationWindowOpenAction(autoHidden)).toBe('float');
-    expect(conversationWindowToggleAction(autoHidden)).toBe('float');
-
+  it('reopens a closed conversation docked beside the asset library on desktop', () => {
     const closed = options({ open: false, assetsOpen: true, viewportWidth: 1100 });
-    expect(isConversationAutoHidden(closed)).toBe(false);
-    expect(conversationWindowOpenAction(closed)).toBe('float');
+    expect(conversationWindowOpenAction(closed)).toBe('open');
+    expect(conversationWindowToggleAction(closed)).toBe('open');
   });
 
   it.each([
-    { width: 1439, productionOpen: false, assetsOpen: true, hidden: true },
-    { width: 1440, productionOpen: false, assetsOpen: true, hidden: false },
-    { width: 1150, productionOpen: true, assetsOpen: false, hidden: false },
-    { width: 1799, productionOpen: true, assetsOpen: true, hidden: true },
-    { width: 1800, productionOpen: true, assetsOpen: true, hidden: false },
+    { width: 901, productionOpen: false, assetsOpen: true },
+    { width: 1100, productionOpen: false, assetsOpen: true },
+    { width: 1439, productionOpen: false, assetsOpen: true },
+    { width: 1440, productionOpen: false, assetsOpen: true },
+    { width: 1100, productionOpen: true, assetsOpen: false },
+    { width: 1150, productionOpen: true, assetsOpen: false },
+    { width: 1100, productionOpen: true, assetsOpen: true },
+    { width: 1799, productionOpen: true, assetsOpen: true },
+    { width: 1800, productionOpen: true, assetsOpen: true },
   ])(
-    'reserves conversation space at $width px with production=$productionOpen and assets=$assetsOpen',
-    ({ width, productionOpen, assetsOpen, hidden }) => {
+    'keeps conversation docked at $width px with production=$productionOpen and assets=$assetsOpen',
+    ({ width, productionOpen, assetsOpen }) => {
       const docked = options({ viewportWidth: width, productionOpen, assetsOpen });
-      expect(isConversationAutoHidden(docked)).toBe(hidden);
-      expect(isConversationWindowPresented(docked)).toBe(!hidden);
-      expect(conversationWindowOpenAction(docked)).toBe(hidden ? 'float' : 'open');
+      expect(isConversationWindowPresented(docked)).toBe(true);
+      expect(conversationWindowOpenAction(docked)).toBe('open');
+      expect(conversationWindowToggleAction(docked)).toBe('close');
     },
   );
 
@@ -120,7 +109,6 @@ describe('conversation window toggle', () => {
       assetsOpen: true,
       viewportWidth: 1200,
     });
-    expect(isConversationAutoHidden(floating)).toBe(false);
     expect(isConversationWindowPresented(floating)).toBe(true);
     expect(conversationWindowToggleAction(floating)).toBe('close');
   });

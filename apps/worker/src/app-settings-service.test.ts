@@ -29,6 +29,146 @@ async function createService() {
 }
 
 describe('AppSettingsService', () => {
+  it('synchronizes explicit provider context limits and preserves per-model manual overrides', async () => {
+    const service = await createService();
+    try {
+      const profile = service.createProfile({
+        name: 'Context gateway',
+        category: 'llm',
+        providerType: 'openai',
+        accessType: 'official',
+        protocol: 'openai-responses',
+        baseUrl: 'https://api.openai.com/v1',
+      });
+      const sync = (window: number) =>
+        service.completeConnectionTest({
+          profileId: profile.id,
+          status: 'ready',
+          models: [
+            {
+              id: 'known-window',
+              contextLimits: {
+                contextWindow: window,
+                maxInputTokens: window - 10000,
+                maxOutputTokens: 8192,
+                capabilitySource: 'provider',
+              },
+            },
+            { id: 'unknown-window' },
+          ],
+        }).models;
+      const models = sync(128000);
+      const known = models.find((m) => m.remoteModelId === 'known-window')!;
+      expect(known.capabilities.contextLimits).toMatchObject({
+        contextWindow: 128000,
+        capabilitySource: 'provider',
+      });
+      const toggled = service.updateModel({
+        profileId: profile.id,
+        modelId: known.id,
+        displayName: known.displayName,
+        enabled: true,
+        capabilities: { ...known.capabilities, text: true, streaming: true },
+      });
+      expect(toggled.capabilities.contextLimits!.capabilitySource).toBe('provider');
+      expect(
+        models.find((m) => m.remoteModelId === 'unknown-window')!.capabilities.contextLimits,
+      ).toBeUndefined();
+      expect(
+        sync(200000).find((m) => m.id === known.id)!.capabilities.contextLimits!.contextWindow,
+      ).toBe(200000);
+      service.updateModel({
+        profileId: profile.id,
+        modelId: known.id,
+        displayName: known.displayName,
+        enabled: true,
+        capabilities: {
+          ...known.capabilities,
+          text: true,
+          streaming: true,
+          contextLimits: {
+            contextWindow: 1000000,
+            maxInputTokens: 900000,
+            maxOutputTokens: 32768,
+            capabilitySource: 'manual_config',
+          },
+        },
+      });
+      expect(sync(128000).find((m) => m.id === known.id)!.capabilities.contextLimits).toMatchObject(
+        { contextWindow: 1000000, capabilitySource: 'manual_config' },
+      );
+      expect(
+        service.resolveLlmSelection(profile.id, known.id).modelCapabilities!.contextWindow,
+      ).toBe(1000000);
+    } finally {
+      service.close();
+    }
+  });
+  it('backfills synced Seedance rows without creating catalog entries or changing enablement', async () => {
+    const service = await createService();
+    try {
+      const profile = service.createProfile({
+        name: 'UniComp',
+        category: 'multi',
+        providerType: 'unicompapi',
+        accessType: 'official',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://unicompapi.com/v1',
+      });
+      expect(service.listModels(profile.id)).toEqual([]);
+      const remoteIds = ['doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628'];
+      service.completeConnectionTest({
+        profileId: profile.id,
+        status: 'ready',
+        models: remoteIds.map((id) => ({ id })),
+      });
+      const original = service.listModels(profile.id);
+      const legacy = openAppDatabase(join(temporaryDirectories.at(-1)!, 'app-settings.sqlite'));
+      try {
+        for (const [index, model] of original.entries()) {
+          legacy
+            .prepare(
+              'UPDATE provider_models SET contract_id=NULL,contract_revision=NULL,contract_status=NULL,capabilities_json=?,parameter_template_key=?,enabled=? WHERE id=?',
+            )
+            .run(
+              JSON.stringify(emptyModelCapabilities()),
+              'openai-compatible-video',
+              index,
+              model.id,
+            );
+        }
+      } finally {
+        legacy.close();
+      }
+      const backfilled = service.listModels(profile.id);
+      for (const [index, model] of backfilled.entries()) {
+        expect(model).toMatchObject({
+          id: original[index]!.id,
+          remoteModelId: original[index]!.remoteModelId,
+          contractRevision: 2,
+          contractStatus: 'enabled',
+          enabled: Boolean(index),
+          capabilities: { videoGeneration: true, text: false, tools: false },
+        });
+        expect(model.contractId).toBe(
+          model.remoteModelId.includes('2-0')
+            ? 'cn.bytedance.seedance2-0.video'
+            : 'cn.bytedance.seedance2-5.video',
+        );
+        expect(model.parameterTemplateKey).toBeUndefined();
+      }
+      service.completeConnectionTest({
+        profileId: profile.id,
+        status: 'ready',
+        models: remoteIds.map((id) => ({ id })),
+      });
+      expect(service.listModels(profile.id).map((model) => model.enabled)).toEqual(
+        backfilled.map((model) => model.enabled),
+      );
+    } finally {
+      service.close();
+    }
+  });
   it('upgrades Qwen image contracts once and preserves model enablement and subsequent capability choices', async () => {
     const service = await createService();
     try {
@@ -778,7 +918,7 @@ describe('AppSettingsService', () => {
     expect(service.listModelPricing(profile.id)).toEqual([pricing]);
 
     const resolved = service.resolveLlmSelection(profile.id, model.id);
-    expect(resolved).toEqual({
+    expect(resolved).toMatchObject({
       providerProfileId: profile.id,
       providerName: 'Managed OpenAI',
       modelId: model.id,
@@ -883,4 +1023,94 @@ describe('AppSettingsService', () => {
     expect(service.migrateLegacyProfile({ source: 'vidu-cn' })).toEqual({ state: 'archived' });
     service.close();
   });
+});
+
+it('keeps manual context limits isolated by model and provider across synchronization', async () => {
+  const service = await createService();
+  try {
+    const create = (name: string) =>
+      service.createProfile({
+        name,
+        category: 'llm',
+        providerType: 'openai',
+        accessType: 'official',
+        protocol: 'openai-responses',
+        baseUrl: 'https://api.openai.com/v1',
+      });
+    const first = create('A'),
+      second = create('B');
+    const sync = (profile: { id: string }) =>
+      service.completeConnectionTest({
+        profileId: profile.id,
+        status: 'ready',
+        models: [{ id: 'unknown-small' }, { id: 'unknown-large' }],
+      }).models;
+    const a = sync(first),
+      b = sync(second);
+    for (const [profile, models] of [
+      [first, a],
+      [second, b],
+    ] as const)
+      for (const model of models)
+        service.updateModel({
+          profileId: profile.id,
+          modelId: model.id,
+          displayName: model.displayName,
+          enabled: true,
+          capabilities: { ...model.capabilities, text: true, streaming: true },
+        });
+    const limits = {
+      contextWindow: 1000000,
+      maxInputTokens: 900000,
+      maxOutputTokens: 32768,
+      tokenizer: 'o200k_base',
+      capabilitySource: 'manual_config' as const,
+    };
+    service.updateModel({
+      profileId: first.id,
+      modelId: a[1]!.id,
+      displayName: a[1]!.displayName,
+      enabled: true,
+      capabilities: { ...service.listModels(first.id)[1]!.capabilities, contextLimits: limits },
+    });
+    sync(first);
+    sync(second);
+    expect(service.resolveLlmSelection(first.id, a[1]!.id).modelCapabilities).toMatchObject(limits);
+    for (const [profile, model] of [
+      [first, a[0]],
+      [second, b[1]],
+    ] as const)
+      expect(service.resolveLlmSelection(profile.id, model!.id).modelCapabilities).toMatchObject({
+        contextWindow: 512000,
+        capabilitySource: 'fallback',
+      });
+    const updated = service.listModels(first.id).find((m) => m.id === a[1]!.id)!;
+    expect(() =>
+      service.updateModel({
+        profileId: first.id,
+        modelId: updated.id,
+        displayName: updated.displayName,
+        enabled: true,
+        capabilities: {
+          ...updated.capabilities,
+          contextLimits: { ...limits, maxInputTokens: 1000001 },
+        },
+      }),
+    ).toThrow();
+    expect(
+      service.resolveLlmSelection(first.id, updated.id).modelCapabilities?.maxInputTokens,
+    ).toBe(900000);
+    service.updateModel({
+      profileId: first.id,
+      modelId: updated.id,
+      displayName: updated.displayName,
+      enabled: true,
+      capabilities: { ...updated.capabilities, contextLimits: undefined },
+    });
+    expect(
+      service.resolveLlmSelection(first.id, updated.id).modelCapabilities?.capabilitySource,
+    ).toBe('fallback');
+  } finally {
+    service.close();
+  }
 });

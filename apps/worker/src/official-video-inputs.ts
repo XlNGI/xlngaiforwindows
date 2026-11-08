@@ -47,6 +47,7 @@ export function materializeOfficialVideoInputs(
       value.contractRevision === Number(adapterParts[3]?.slice('contract-'.length)),
   );
   if (!contract) throw new Error('官方视频合同不存在。');
+  const seedance = contract.providerFamily === 'bytedance';
   const roots = process.env.AI_VIDEO_MEDIA_INPUT_ROOT?.trim() || project.rootPath;
   const directory = join(roots, 'cache', 'media-inputs');
   const references: MediaInputReferenceV1[] = [];
@@ -63,7 +64,7 @@ export function materializeOfficialVideoInputs(
       /^(character-voice|project-audio):\/\//u.test(original)
     )
       throw new Error(
-        'UniComp 声音参考请提供公网音频 URL；当前渠道未接入本地音频上传。也可选择万相官方连接使用本地样本。',
+        'UniComp 声音参考请提供公网音频 URL；当前渠道未接入本地音频上传。也可选择对应模型的官方视频连接使用本地样本。',
       );
     let bytes: Buffer;
     let sourcePath: string | undefined;
@@ -231,16 +232,11 @@ export function materializeOfficialVideoInputs(
       };
       const video = probe.streams?.find((stream) => stream.codec_type === 'video');
       if (!video?.width || !video.height) throw new Error('媒体缺少有效画面。');
-      const minimum =
-        adapterParts[1] === 'seedance-video'
-          ? 300
-          : adapterParts[1] === 'minimax-video'
-            ? 256
-            : 240;
+      const minimum = seedance ? 300 : adapterParts[1] === 'minimax-video' ? 256 : 240;
       const maximum =
         mime === 'video/mp4'
           ? 4096
-          : adapterParts[1] === 'seedance-video'
+          : seedance
             ? 6000
             : adapterParts[1] === 'minimax-video'
               ? 5760

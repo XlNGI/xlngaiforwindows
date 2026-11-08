@@ -25,9 +25,18 @@ export interface ProductionIRReferences {
   propDocumentIds?: string[];
 }
 
+export interface ProductionTimingBeat {
+  kind: 'action' | 'dialogue' | 'pause' | 'camera';
+  startSeconds: number;
+  endSeconds: number;
+  description: string;
+}
+
 export interface ProductionTiming {
   estimatedDurationSeconds: number;
   rationale: string;
+  /** Relative to this shot/scene; overlaps represent simultaneous performance, not extra shots. */
+  beats?: ProductionTimingBeat[];
 }
 
 export const productionTimingSchema = {
@@ -37,12 +46,28 @@ export const productionTimingSchema = {
   properties: {
     estimatedDurationSeconds: { type: 'number', exclusiveMinimum: 0, maximum: 3600 },
     rationale: { type: 'string', minLength: 1, maxLength: 2000 },
+    beats: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 100,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind', 'startSeconds', 'endSeconds', 'description'],
+        properties: {
+          kind: { type: 'string', enum: ['action', 'dialogue', 'pause', 'camera'] },
+          startSeconds: { type: 'number', minimum: 0, maximum: 3600 },
+          endSeconds: { type: 'number', exclusiveMinimum: 0, maximum: 3600 },
+          description: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+      },
+    },
   },
 };
 
 export function validateProductionTiming(value: unknown): ProductionTiming {
   const timing = record(value, 'timing');
-  exactKeys(timing, ['estimatedDurationSeconds', 'rationale'], 'timing');
+  exactKeys(timing, ['estimatedDurationSeconds', 'rationale', 'beats'], 'timing');
   if (
     typeof timing.estimatedDurationSeconds !== 'number' ||
     !Number.isFinite(timing.estimatedDurationSeconds) ||
@@ -56,7 +81,60 @@ export function validateProductionTiming(value: unknown): ProductionTiming {
     timing.rationale.length > 2000
   )
     throw new Error('timing.rationale must contain between 1 and 2000 characters.');
-  return { estimatedDurationSeconds: timing.estimatedDurationSeconds, rationale: timing.rationale };
+  let beats: ProductionTimingBeat[] | undefined;
+  if (timing.beats !== undefined) {
+    if (!Array.isArray(timing.beats) || !timing.beats.length || timing.beats.length > 100)
+      throw new Error('timing.beats must contain between 1 and 100 beats.');
+    const duration = timing.estimatedDurationSeconds;
+    beats = timing.beats.map((value: unknown, index: number) => {
+      const label = `timing.beats[${index}]`;
+      const beat = record(value, label);
+      exactKeys(beat, ['kind', 'startSeconds', 'endSeconds', 'description'], label);
+      if (
+        typeof beat.kind !== 'string' ||
+        !['action', 'dialogue', 'pause', 'camera'].includes(beat.kind)
+      )
+        throw new Error(`${label}.kind must be action, dialogue, pause or camera.`);
+      if (
+        typeof beat.startSeconds !== 'number' ||
+        !Number.isFinite(beat.startSeconds) ||
+        beat.startSeconds < 0 ||
+        typeof beat.endSeconds !== 'number' ||
+        !Number.isFinite(beat.endSeconds) ||
+        beat.endSeconds <= beat.startSeconds ||
+        beat.endSeconds > duration
+      )
+        throw new Error(
+          `${label} must satisfy 0 <= startSeconds < endSeconds <= estimatedDurationSeconds.`,
+        );
+      if (
+        typeof beat.description !== 'string' ||
+        !beat.description.trim() ||
+        beat.description.length > 1000
+      )
+        throw new Error(`${label}.description must contain between 1 and 1000 characters.`);
+      return {
+        kind: beat.kind as ProductionTimingBeat['kind'],
+        startSeconds: beat.startSeconds,
+        endSeconds: beat.endSeconds,
+        description: beat.description,
+      };
+    });
+    // Union coverage allows action, dialogue and camera movement to happen at once.
+    let coveredUntil = 0;
+    for (const beat of [...beats].sort((a, b) => a.startSeconds - b.startSeconds)) {
+      if (beat.startSeconds - coveredUntil > 0.000001)
+        throw new Error('timing.beats must cover the entire estimated duration without gaps.');
+      coveredUntil = Math.max(coveredUntil, beat.endSeconds);
+    }
+    if (duration - coveredUntil > 0.000001)
+      throw new Error('timing.beats must cover the entire estimated duration without gaps.');
+  }
+  return {
+    estimatedDurationSeconds: timing.estimatedDurationSeconds,
+    rationale: timing.rationale,
+    ...(beats ? { beats } : {}),
+  };
 }
 
 /** Agent-authored prompt and optional descriptive fields, stored with the target. */

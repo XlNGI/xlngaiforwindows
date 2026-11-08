@@ -1,26 +1,14 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DocumentSummary, SceneInfo, SceneMediaResolveResult } from '@ai-video/contracts';
+import type { AssetInfo, DocumentSummary, SceneInfo, ShotInfo } from '@ai-video/contracts';
 import { SceneWorkspace } from './SceneWorkspace';
-import { callWorker } from './worker-client';
-vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
+
 vi.mock('./dubbing/DubbingScenePanel', () => ({ DubbingScenePanel: () => null }));
-afterEach(() => {
-  cleanup();
-  vi.resetAllMocks();
-});
-const character = {
-  id: 'actor',
-  projectId: 'project',
-  kind: 'character',
-  title: '林澈',
-  scopeType: 'project',
-  lifecycleStatus: 'active',
-  rowVersion: 1,
-  createdAt: 'now',
-  updatedAt: 'now',
-} satisfies DocumentSummary;
-const scene = {
+
+afterEach(() => cleanup());
+
+const scene: SceneInfo = {
   id: 'scene',
   projectId: 'project',
   title: '第一场',
@@ -28,356 +16,146 @@ const scene = {
   rowVersion: 1,
   createdAt: 'now',
   updatedAt: 'now',
-  characterBindings: [],
-} satisfies SceneInfo;
-const voice = {
-  id: 'voice',
-  projectId: 'project',
-  characterDocumentId: 'actor',
-  characterName: '林澈',
-  versionId: 'v1',
-  revision: 1,
-  rowVersion: 1,
-  audioId: 'sample',
-  audioName: '林澈样本',
-  durationMs: 3000,
-  sizeBytes: 100,
-  mime: 'audio/wav',
 };
-function mockWorker() {
-  vi.mocked(callWorker).mockImplementation((method: string) =>
-    Promise.resolve(
-      method === 'characterVoiceReference.list'
-        ? [voice]
-        : method === 'scene.media.resolve'
-          ? { characters: [{ characterDocumentId: 'actor', voice }], assets: [], voices: [voice] }
-          : method === 'audio.mediaSource'
-            ? { path: 'D:/sample.wav' }
-            : [],
-    ),
-  );
+
+const documents: DocumentSummary[] = [
+  {
+    id: 'actor',
+    projectId: 'project',
+    kind: 'character',
+    title: '林澈',
+    scopeType: 'project',
+    lifecycleStatus: 'active',
+    rowVersion: 1,
+    createdAt: 'now',
+    updatedAt: 'now',
+  },
+  {
+    id: 'location',
+    projectId: 'project',
+    kind: 'scene',
+    title: '旧码头',
+    scopeType: 'project',
+    lifecycleStatus: 'active',
+    rowVersion: 1,
+    createdAt: 'now',
+    updatedAt: 'now',
+  },
+  {
+    id: 'radio',
+    projectId: 'project',
+    kind: 'prop',
+    title: '旧收音机',
+    scopeType: 'project',
+    lifecycleStatus: 'active',
+    rowVersion: 1,
+    createdAt: 'now',
+    updatedAt: 'now',
+  },
+];
+
+const locationAsset: AssetInfo = {
+  id: 'location-image',
+  projectId: 'project',
+  kind: 'scene',
+  relativePath: 'assets/old-dock.png',
+  contentHash: 'hash',
+  sizeBytes: 100,
+  createdAt: 'now',
+};
+
+function shot(
+  id: string,
+  title: string,
+  references: NonNullable<ShotInfo['authoringIR']>['references'],
+  rowBindings?: ShotInfo['referenceBindings'],
+): ShotInfo {
+  return {
+    id,
+    sceneId: scene.id,
+    title,
+    position: 0,
+    status: 'draft',
+    authoringIR: {
+      schemaVersion: 1,
+      kind: 'shot',
+      prompt: title,
+      references,
+    },
+    referenceBindings: rowBindings,
+    rowVersion: 1,
+    createdAt: 'now',
+    updatedAt: 'now',
+  };
 }
-function props() {
+
+function props(overrides: Partial<ComponentProps<typeof SceneWorkspace>> = {}) {
   return {
     projectId: 'project',
     scene,
-    prompt: '本场对话',
-    bindings: [],
-    documents: [character],
-    assets: [],
+    shots: [
+      shot(
+        'shot-1',
+        '镜头一',
+        {
+          characterDocumentIds: ['actor'],
+          sceneDocumentIds: ['location'],
+          propDocumentIds: ['radio'],
+        },
+        {
+          sceneBindings: [{ sourceDocumentId: 'location', assetId: locationAsset.id }],
+        },
+      ),
+      shot('shot-2', '镜头二', {
+        characterDocumentIds: ['actor'],
+        sceneDocumentIds: [],
+        propDocumentIds: [],
+      }),
+    ],
+    prompt: '本场视频提示词',
+    documents,
+    assets: [locationAsset],
     writable: true,
     onPromptChange: vi.fn(),
     onSave: vi.fn(),
     onGenerateVideo: vi.fn(),
-    onRequestBindings: vi.fn(),
+    onOpenAsset: vi.fn(),
+    ...overrides,
   };
 }
 
-describe('scene cast bindings', () => {
-  it('keeps scene binding and scene image with the cast in a single reference area', async () => {
-    const location = { ...character, id: 'location', kind: 'scene' as const, title: '庭院' };
-    const image = {
-      id: 'location-image',
-      projectId: 'project',
-      kind: 'scene',
-      relativePath: 'assets/courtyard.png',
-      contentHash: 'h',
-      sizeBytes: 10,
-      createdAt: 'now',
-    };
-    vi.mocked(callWorker).mockImplementation((method) =>
-      Promise.resolve(
-        method === 'scene.media.resolve'
-          ? { characters: [], voices: [], assets: [] }
-          : method === 'asset.list'
-            ? [image]
-            : method === 'asset.mediaSource'
-              ? { assetId: image.id, path: 'D:/courtyard.png', contentType: 'image/png' }
-              : [],
-      ),
-    );
-    const p = props();
-    const onBindSceneDocument = vi.fn();
-    render(
-      <SceneWorkspace
-        {...p}
-        scene={{ ...scene, sceneDocumentId: location.id }}
-        documents={[character, location]}
-        onBindSceneDocument={onBindSceneDocument}
-      />,
-    );
-    expect(await screen.findByRole('img', { name: 'courtyard.png' })).toBeInTheDocument();
-    expect(screen.getAllByRole('heading', { name: '角色与场景绑定' })).toHaveLength(1);
-    expect(screen.getByLabelText('场次绑定场景')).toHaveValue(location.id);
-    expect(screen.getByText('0 位角色 · 场景：庭院')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
-    expect(p.onSave).toHaveBeenCalledWith(
-      p.prompt,
-      [
-        expect.objectContaining({
-          role: 'scene',
-          assetId: image.id,
-          sourceDocumentId: location.id,
-          source: 'auto',
-        }),
-      ],
-      [],
-      undefined,
-    );
-    fireEvent.change(screen.getByLabelText('场次绑定场景'), { target: { value: '' } });
-    expect(onBindSceneDocument).toHaveBeenCalledWith('');
-  });
+describe('SceneWorkspace shot binding summary', () => {
+  it('shows the union of per-shot references and identifies which shots use each object', () => {
+    render(<SceneWorkspace {...props()} />);
 
-  it('resolves late media outside the first library page and preserves explicit disabling across updates', async () => {
-    let available = false;
-    const image = {
-      id: 'late-image',
-      projectId: 'project',
-      kind: 'character',
-      relativePath: 'assets/late.png',
-      contentHash: 'hash',
-      sizeBytes: 100,
-      createdAt: 'now',
-    };
-    vi.mocked(callWorker).mockImplementation((method: string) =>
-      Promise.resolve(
-        method === 'scene.media.resolve'
-          ? {
-              characters: [
-                {
-                  characterDocumentId: 'actor',
-                  ...(available ? { defaultImage: image, voice } : {}),
-                },
-              ],
-              assets: available ? [image] : [],
-              voices: available ? [voice] : [],
-            }
-          : method === 'asset.thumbnail' || method === 'asset.mediaSource'
-            ? { assetId: image.id, path: 'D:/late.png', contentType: 'image/png' }
-            : method === 'audio.mediaSource'
-              ? { path: 'D:/sample.wav' }
-              : [],
-      ),
-    );
-    const p = props();
-    render(
-      <SceneWorkspace
-        {...p}
-        scene={{ ...scene, characterBindings: [{ characterDocumentId: 'actor' }] }}
-      />,
-    );
+    expect(screen.getByRole('heading', { name: '镜头绑定汇总' })).toBeVisible();
+    expect(screen.getByText('林澈')).toBeVisible();
+    expect(screen.getByText('旧码头')).toBeVisible();
+    expect(screen.getByText('旧收音机')).toBeVisible();
+    expect(screen.getByText('镜头一、镜头二')).toBeVisible();
     expect(
-      await within(screen.getByLabelText('角色参考：林澈卡片')).findByText('拖入或下拉选择'),
-    ).toBeInTheDocument();
-    available = true;
-    await act(() =>
-      window.dispatchEvent(
-        new CustomEvent('character-voice-reference-updated', {
-          detail: { projectId: 'project', characterDocumentId: 'actor' },
-        }),
-      ),
-    );
-    expect(await screen.findByRole('img', { name: 'late.png' })).toHaveAttribute(
-      'src',
-      '/worker-media/late-image?thumbnail=1',
-    );
-    expect(callWorker).not.toHaveBeenCalledWith('audio.mediaSource', { audioId: voice.audioId });
-    fireEvent.click(screen.getByRole('button', { name: '试听绑定音频' }));
-    expect(await screen.findByLabelText('试听绑定音频')).toHaveAttribute('preload', 'none');
-    fireEvent.change(screen.getByLabelText('林澈角色参考图'), { target: { value: 'none' } });
-    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: 'none' } });
-    await act(() =>
-      window.dispatchEvent(
-        new CustomEvent('character-voice-reference-updated', {
-          detail: { projectId: 'project', characterDocumentId: 'actor' },
-        }),
-      ),
-    );
-    await waitFor(() => expect(screen.getByText('本场不使用参考图')).toBeInTheDocument());
-    expect(screen.queryByRole('img', { name: 'late.png' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '试听绑定音频' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
-    expect(p.onSave).toHaveBeenCalledWith(
-      p.prompt,
-      [],
-      [{ characterDocumentId: 'actor', imageDisabled: true, voiceDisabled: true }],
-      undefined,
-    );
+      screen.getAllByText('镜头一', { selector: '.scene-binding-summary-shots' }),
+    ).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: '助手关联' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('选择出场角色')).not.toBeInTheDocument();
   });
 
-  it('previews a fixed historical voice, ignores foreign updates and discards late project responses', async () => {
-    let release: (value: SceneMediaResolveResult) => void = () => undefined;
-    const old = { ...voice, versionId: 'old', audioId: 'old-audio' };
-    vi.mocked(callWorker).mockImplementation((method: string) =>
-      method === 'scene.media.resolve'
-        ? new Promise<SceneMediaResolveResult>((resolve) => {
-            release = resolve;
-          })
-        : Promise.resolve(method === 'audio.mediaSource' ? { path: 'D:/old.wav' } : []),
-    );
-    const p = props();
-    const view = render(
-      <SceneWorkspace
-        {...p}
-        scene={{
-          ...scene,
-          characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
-        }}
-      />,
-    );
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('scene.media.resolve', expect.anything()),
-    );
-    await act(() =>
-      Promise.resolve(
-        release({
-          characters: [{ characterDocumentId: 'actor', voice }],
-          assets: [],
-          voices: [voice, old],
-        }),
-      ),
-    );
-    fireEvent.click(screen.getByRole('button', { name: '试听绑定音频' }));
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('audio.mediaSource', { audioId: 'old-audio' }),
-    );
-    const before = vi.mocked(callWorker).mock.calls.length;
-    await act(() =>
-      window.dispatchEvent(
-        new CustomEvent('character-voice-reference-updated', { detail: { projectId: 'other' } }),
-      ),
-    );
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 60));
-    });
-    expect(vi.mocked(callWorker).mock.calls).toHaveLength(before);
-    view.rerender(
-      <SceneWorkspace {...p} projectId="next" scene={{ ...scene, projectId: 'next' }} />,
-    );
-    await act(() =>
-      Promise.resolve(
-        release({
-          characters: [{ characterDocumentId: 'actor', voice }],
-          assets: [],
-          voices: [voice, old],
-        }),
-      ),
-    );
-    expect(screen.queryByLabelText('林澈声音样本')).not.toBeInTheDocument();
-  });
-  it('adds a character and default voice without an image and saves the explicit relationship', async () => {
-    mockWorker();
+  it('opens an explicitly selected image from the shot summary', () => {
     const p = props();
     render(<SceneWorkspace {...p} />);
-    await waitFor(() =>
-      expect(callWorker).toHaveBeenCalledWith('scene.media.resolve', {
-        characterDocumentIds: [],
-        assetIds: [],
-        voiceVersionIds: [],
-      }),
-    );
-    await waitFor(() => expect(screen.getByRole('button', { name: '助手关联' })).toBeEnabled());
-    fireEvent.change(screen.getByLabelText('选择出场角色'), { target: { value: 'actor' } });
-    fireEvent.click(screen.getByRole('button', { name: '添加角色' }));
-    await waitFor(() => expect(screen.getByLabelText('林澈声音样本')).toHaveValue('default'));
-    expect(
-      await within(screen.getByLabelText('角色参考：林澈卡片')).findByText('拖入或下拉选择'),
-    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'old-dock.png' }));
+    expect(p.onOpenAsset).toHaveBeenCalledWith(locationAsset.id);
+  });
+
+  it('keeps scene prompt actions limited to prompt save and scene video form', () => {
+    const p = props();
+    render(<SceneWorkspace {...p} />);
+
     fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
-    expect(p.onSave).toHaveBeenCalledWith(
-      '本场对话',
-      [],
-      [{ characterDocumentId: 'actor' }],
-      undefined,
-    );
     fireEvent.click(screen.getByRole('button', { name: '生成场次视频' }));
-    expect(p.onGenerateVideo).toHaveBeenCalledWith(
-      [],
-      [{ characterDocumentId: 'actor' }],
-      undefined,
-    );
-  });
-  it('preserves an outdated voice until explicitly changed and allows clearing it', async () => {
-    mockWorker();
-    const p = props();
-    render(
-      <SceneWorkspace
-        {...p}
-        scene={{
-          ...scene,
-          characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
-        }}
-      />,
-    );
-    expect(await screen.findByText(/声音样本已更新/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
-    expect(p.onSave).toHaveBeenLastCalledWith(
-      p.prompt,
-      [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'old' }],
-      undefined,
-    );
-    fireEvent.change(screen.getByLabelText('林澈声音样本'), { target: { value: 'none' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
-    expect(p.onSave).toHaveBeenLastCalledWith(
-      p.prompt,
-      [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: undefined, voiceDisabled: true }],
-      undefined,
-    );
-  });
-  it('delegates plain text and placeholders to the LLM without establishing local name bindings', async () => {
-    mockWorker();
-    const p = props();
-    render(<SceneWorkspace {...p} prompt="林澈转身，[角色:林澈]看向他。" />);
-    expect(screen.getByRole('heading', { name: '场次提示词' })).toBeVisible();
-    expect(screen.getAllByRole('button', { name: '助手关联' })).toHaveLength(1);
-    await waitFor(() => expect(screen.getByRole('button', { name: '助手关联' })).toBeEnabled());
-    fireEvent.click(screen.getByRole('button', { name: '助手关联' }));
-    expect(p.onRequestBindings).toHaveBeenCalledOnce();
-    expect(screen.queryByLabelText('林澈角色参考图')).not.toBeInTheDocument();
-    expect(vi.mocked(callWorker).mock.calls.some(([method]) => method === 'asset.list')).toBe(
-      false,
-    );
-  });
-  it('shows the approved cast after a revision even when the prompt uses a pronoun', async () => {
-    mockWorker();
-    const p = props();
-    const view = render(<SceneWorkspace {...p} prompt="他转身。" />);
-    expect(screen.queryByLabelText('林澈声音样本')).not.toBeInTheDocument();
-    view.rerender(
-      <SceneWorkspace
-        {...p}
-        prompt="他转身。"
-        scene={{
-          ...scene,
-          rowVersion: 2,
-          characterBindings: [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'v1' }],
-        }}
-      />,
-    );
-    expect(await screen.findByLabelText('林澈声音样本')).toHaveValue('v1');
-    fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
-    expect(p.onSave).toHaveBeenCalledWith(
-      '他转身。',
-      [],
-      [{ characterDocumentId: 'actor', voiceReferenceVersionId: 'v1' }],
-      undefined,
-    );
-  });
-  it('keeps read-only viewing and prevents all binding edits', () => {
-    mockWorker();
-    render(
-      <SceneWorkspace
-        {...props()}
-        writable={false}
-        scene={{ ...scene, characterBindings: [{ characterDocumentId: 'actor' }] }}
-      />,
-    );
-    expect(screen.getByLabelText('林澈角色参考图')).toBeDisabled();
-    expect(screen.getByLabelText('场次完整对白音频')).toBeDisabled();
-    expect(screen.getByRole('button', { name: '移除林澈' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '助手关联' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: '保存提示词' })).toBeDisabled();
+    expect(p.onSave).toHaveBeenCalledWith(p.prompt);
+    expect(p.onGenerateVideo).toHaveBeenCalledOnce();
+    expect(within(screen.getByLabelText('镜头绑定汇总')).getByText('3 个引用对象')).toBeVisible();
   });
 });

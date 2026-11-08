@@ -30,6 +30,9 @@ export function validateProductionIRReferences(
     for (const id of references[field] ?? [])
       if (!find.get(id, projectId, kind))
         throw new Error(
-          `Authoring IR reference ${id} is not an active ${kind} document in this project.`,
+          `Authoring IR reference ${id} in references.${field} is not an active ${kind} document in this project. ` +
+            'Active draft and published production-material documents are both accepted; workspace placement is not the document type. ' +
+            `Verify the exact documentId and documentKind=${kind} from saved receipts or project.structure.read (workspace=characters, kind=document); do not use versionId, a resource ID prefix, or an invented ID. ` +
+            'Correct the reference and retry the rejected write. Do not remove required references or recreate already saved materials to bypass validation.',
         );
 }

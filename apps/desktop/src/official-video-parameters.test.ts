@@ -2,11 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   officialVideoAudioContracts,
   officialVideoContracts,
+  productionAudioSupport,
   type AdapterDescriptor,
   type AdapterParameterValue,
   type CharacterVoiceReferenceInfo,
 } from '@ai-video/contracts';
-import { addOfficialRoleVoices, seedOfficialVideoParameters } from './official-video-parameters';
+import {
+  addOfficialRoleVoices,
+  isOfficialVoiceVideo,
+  seedOfficialVideoParameters,
+} from './official-video-parameters';
 
 function descriptor(input: {
   provider: string;
@@ -55,6 +60,24 @@ const voices = [
   },
 ] satisfies CharacterVoiceReferenceInfo[];
 describe('official production input assembly', () => {
+  it.each([
+    ['wan-video', 'cn.qwen.wan3-0-video', true],
+    ['wan-video', 'cn.qwen.wan3-0-video-prime', true],
+    ['unicompapi', 'cn.qwen.wan3-0-video', false],
+    ['unicompapi', 'cn.qwen.wan3-0-video-prime', false],
+  ] as const)(
+    'keeps voice-reference semantics separate from local upload for %s / %s',
+    (provider, contractId, localUpload) => {
+      const adapter = descriptor({
+        provider,
+        contractId,
+        contractRevision: 3,
+        capability: 'REFERENCE_TO_VIDEO',
+      });
+      expect(productionAudioSupport(adapter).voiceReference).toBe(true);
+      expect(isOfficialVoiceVideo(adapter)).toBe(localUpload);
+    },
+  );
   it('seeds UniComp Wan media without losing a public audio reference or adding empty media', () => {
     const adapter = descriptor({
       provider: 'unicompapi',
@@ -124,15 +147,29 @@ describe('official production input assembly', () => {
     ]);
     const result = addOfficialRoleVoices(adapter, parameters, [second, voices[0]!], undefined, [
       { id: 'room', role: 'scene', label: '客厅', assetId: 'room', source: 'manual' },
-      { id: 'first', role: 'character', label: '主角', assetId: 'first-image', source: 'manual' },
-      { id: 'second', role: 'character', label: '配角', assetId: 'second-image', source: 'manual' },
+      {
+        id: 'first',
+        role: 'character',
+        label: '主角',
+        assetId: 'first-image',
+        sourceDocumentId: 'actor',
+        source: 'manual',
+      },
+      {
+        id: 'second',
+        role: 'character',
+        label: '配角',
+        assetId: 'second-image',
+        sourceDocumentId: 'second',
+        source: 'manual',
+      },
       { id: 'removed', role: 'prop', label: '已移除', assetId: 'removed', source: 'manual' },
     ]);
     expect(result.prompt).toContain('角色「主角」参考图 3');
     expect(result.prompt).toContain('场景「客厅」参考图 2');
     expect(result.prompt).toContain('角色「配角」参考图 1');
-    expect(result.prompt).toContain('角色「配角」使用音频1');
-    expect(result.prompt).toContain('角色「主角」使用音频2');
+    expect(result.prompt).toContain('图 1中的角色「配角」仅使用音频1的音色。');
+    expect(result.prompt).toContain('图 3中的角色「主角」仅使用音频2的音色。');
     expect(result.prompt).not.toContain('已移除');
     expect(JSON.stringify(result)).toContain('character-voice://second/version-2');
     expect(parameters.prompt).toBe('两人对话');

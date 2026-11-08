@@ -19,6 +19,7 @@ export type TaskConfirmation = {
     kind: K;
     request: Requests[K];
     referenceImageInputs?: string[];
+    projectId?: string;
   };
 }[keyof Requests];
 
@@ -38,6 +39,7 @@ export class TaskConfirmationQueue {
     kind: K,
     request: Requests[K],
     referenceImageInputs?: string[],
+    projectId?: string,
   ): Promise<Decisions[K]> {
     const token = 'selectionToken' in request ? request.selectionToken : request.confirmationToken;
     const key = `${owner}:${kind}:${token}`;
@@ -55,6 +57,7 @@ export class TaskConfirmationQueue {
         kind,
         request,
         referenceImageInputs: referenceImageInputs ? [...referenceImageInputs] : undefined,
+        projectId,
       } as TaskConfirmation,
       resolve,
       promise,

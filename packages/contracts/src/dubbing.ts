@@ -94,6 +94,18 @@ export interface AudioImportResult {
   audio: AudioFileInfo;
   take?: DubbingTakeInfo;
 }
+export interface AudioSampleGeneratePrepareParams {
+  adapterKey: string;
+  providerProfileId: string;
+  modelId: string;
+  parameters: Record<string, unknown>;
+}
+export interface AudioSampleGenerateConfirmParams {
+  confirmationToken: string;
+  approved: boolean;
+}
+export type AudioSampleGenerateConfirmResult =
+  { approved: false } | { approved: true; audio: AudioFileInfo };
 export interface AudioListParams {
   deleted?: 'active' | 'trash';
   kind?: AudioFileKind;
@@ -286,6 +298,14 @@ export interface DubbingWorkerMethodMap {
   'characterVoice.list': { params: CharacterVoiceListParams; result: VoiceProfileInfo[] };
   'characterVoice.save': { params: CharacterVoiceSaveParams; result: VoiceProfileInfo };
   'audio.import': { params: AudioImportParams; result: AudioImportResult };
+  'audio.sample.prepare': {
+    params: AudioSampleGeneratePrepareParams;
+    result: { confirmation: import('./index.js').MediaSubmissionConfirmationRequest };
+  };
+  'audio.sample.confirm': {
+    params: AudioSampleGenerateConfirmParams;
+    result: AudioSampleGenerateConfirmResult;
+  };
   'audio.list': { params: AudioListParams; result: AudioFileInfo[] };
   'audio.get': { params: AudioIdParams; result: AudioFileInfo | null };
   'audio.mediaSource': { params: AudioIdParams; result: AudioMediaSourceInfo };

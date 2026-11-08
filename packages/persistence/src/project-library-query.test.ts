@@ -20,6 +20,13 @@ describe('project library query analysis', () => {
     expect(analysis.sourceTypeHints).toContain('novel-chapter');
   });
 
+  it('distinguishes plot constraint documents from production constraint records', () => {
+    const plot = analyzeLibraryQuery('查找剧情约束文档');
+    expect(plot.kindHints).toContain('constraint');
+    expect(plot.sourceTypeHints).not.toContain('constraint');
+    expect(analyzeLibraryQuery('查找生产约束').sourceTypeHints).toContain('constraint');
+  });
+
   it('extracts quoted titles and chapter ranges', () => {
     const quoted = analyzeLibraryQuery('根据《雾港》写大纲');
     expect(quoted.quotedTitles).toEqual(['雾港']);

@@ -171,39 +171,43 @@ async function fixture(
   const prepare = new MediaPreparationService(ps, settings, new AdapterService(ps), images, videos);
   const adapterKey = `REFERENCE_TO_VIDEO:${provider}:${contract}:contract-${revision}`;
   expect(getAdapter(adapterKey)).toBeDefined();
-  const parameters: AdapterParameters =
-    provider === 'wan-video' || provider === 'unicompapi'
-      ? {
-          prompt: '图1的主角用音频1音色说你好。',
-          media: [
-            { type: 'reference_image', url: `asset://${imageId}` },
-            {
-              type: 'reference_audio',
+  const parameters: AdapterParameters = contract.startsWith('cn.qwen.')
+    ? {
+        prompt: '图1的主角用音频1音色说你好。',
+        media: [
+          { type: 'reference_image', url: `asset://${imageId}` },
+          {
+            type: 'reference_audio',
+            url:
+              provider === 'unicompapi'
+                ? 'https://example.com/voice.wav'
+                : `character-voice://${character.id}/${voice.versionId}`,
+          },
+        ],
+        duration: 5,
+      }
+    : {
+        content: [
+          { type: 'text', text: '图1的主角用音频1音色说你好。' },
+          {
+            type: 'image_url',
+            image_url: { url: `asset://${imageId}` },
+            role: 'reference_image',
+          },
+          {
+            type: 'audio_url',
+            audio_url: {
               url:
                 provider === 'unicompapi'
                   ? 'https://example.com/voice.wav'
                   : `character-voice://${character.id}/${voice.versionId}`,
             },
-          ],
-          duration: 5,
-        }
-      : {
-          content: [
-            { type: 'text', text: '图1的主角用音频1音色说你好。' },
-            {
-              type: 'image_url',
-              image_url: { url: `asset://${imageId}` },
-              role: 'reference_image',
-            },
-            {
-              type: 'audio_url',
-              audio_url: { url: `character-voice://${character.id}/${voice.versionId}` },
-              role: 'reference_audio',
-            },
-          ],
-          duration: 5,
-          resolution: provider === 'minimax-video' ? '768P' : '720p',
-        };
+            role: 'reference_audio',
+          },
+        ],
+        duration: 5,
+        resolution: provider === 'minimax-video' ? '768P' : '720p',
+      };
   const request = vi
     .fn<(method: string, params: unknown) => Promise<unknown>>()
     .mockResolvedValue({ status: 200, taskId: `task-${provider}` });
@@ -307,6 +311,8 @@ describe('official audio reference video pipeline with actual local media', () =
     ['seedance-video', 'cn.bytedance.seedance2-5.video', 2, 'doubao-seedance-2-5-260628'],
     ['minimax-video', 'cn.minimax.h3.video', 2, 'MiniMax-H3'],
     ['unicompapi', 'cn.qwen.wan3-0-video', 3, 'wan3.0-video'],
+    ['unicompapi', 'cn.bytedance.seedance2-0.video', 2, 'doubao-seedance-2-0-260128'],
+    ['unicompapi', 'cn.bytedance.seedance2-5.video', 2, 'doubao-seedance-2-5-260628'],
   ] as const)(
     'prepares, confirms, resumes and archives %s output without media bytes in IPC',
     async (provider, contract, revision, remote) => {
@@ -366,6 +372,10 @@ describe('official audio reference video pipeline with actual local media', () =
         expect(sent).toContain('https://example.com/voice.wav');
         expect(sent).not.toContain('character-voice://');
       } else expect(sent).toContain(f.character.id);
+      if (provider === 'wan-video') {
+        const request = f.request.mock.calls[0]?.[1] as { parameters: AdapterParameters };
+        expect(request.parameters.prompt).toBe(f.parameters.prompt);
+      }
       if (provider === 'wan-video') expect(sent).toContain(f.profile.baseUrl);
       const taskId = (submitted.job as { providerTaskId?: string }).providerTaskId;
       expect(taskId).toBe(`task-${provider}`);

@@ -328,6 +328,20 @@ export class ProjectService {
     return this.session?.id;
   }
 
+  rename(name: string): OpenProject {
+    const session = this.requireWritableSession();
+    const projectName = name.trim();
+    if (!projectName) throw new Error('Project name is required.');
+    const updatedAt = new Date().toISOString();
+    session.database
+      .prepare('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?')
+      .run(projectName, updatedAt, session.project.id);
+    session.project.name = projectName;
+    session.project.updatedAt = updatedAt;
+    this.rememberBestEffort(session.project);
+    return session.project;
+  }
+
   setContainerGuard(guard: () => void): void {
     this.containerGuard = guard;
   }

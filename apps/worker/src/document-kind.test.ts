@@ -18,6 +18,12 @@ describe('inferDocumentKindFromDraft', () => {
     expect(inferDocumentKindFromDraft('AI短剧整体大纲（基于现有小说）')).toBe('outline');
   });
 
+  it('maps explicit plot constraint documents to the constraint kind', () => {
+    expect(inferDocumentKindFromDraft('剧情约束')).toBe('constraint');
+    expect(inferDocumentKindFromDraft('写作约束文档')).toBe('constraint');
+    expect(inferDocumentKindFromDraft('Story constraint document')).toBe('constraint');
+  });
+
   it('keeps unmatched drafts as notes so they stay out of the project-document list', () => {
     expect(inferDocumentKindFromDraft('Production brief')).toBe('note');
     expect(inferDocumentKindFromDraft('第一百二十五章《白小弟学医》')).toBe('note');

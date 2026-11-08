@@ -111,6 +111,38 @@ describe('LibrarySearchService', () => {
     expect(read.content).toContain('旧码头');
   });
 
+  it('searches and reads plot constraint documents separately from production constraint records', async () => {
+    const { content, library } = await setup();
+    const document = content.saveDocument({
+      kind: 'constraint',
+      title: '剧情约束',
+      contentMarkdown: '林澈不得在第一幕得知灯塔秘密。',
+    });
+
+    const result = library.search({
+      taskId: 'plot-constraint-task',
+      attemptId: 'plot-constraint-attempt',
+      query: '灯塔秘密',
+      sourceTypes: ['document'],
+      kind: 'constraint',
+    });
+
+    expect(result.sources[0]).toMatchObject({
+      sourceId: document.id,
+      sourceType: 'document',
+      kind: 'constraint',
+      status: 'draft',
+      title: '剧情约束',
+    });
+    const read = library.read({
+      taskId: 'plot-constraint-task',
+      attemptId: 'plot-constraint-attempt',
+      sourceHandle: result.sources[0]!.sourceHandle,
+      readMode: 'source',
+    });
+    expect(read.content).toBe('林澈不得在第一幕得知灯塔秘密。');
+  });
+
   it('returns the structural path used to locate a matching section', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -256,19 +288,54 @@ describe('LibrarySearchService', () => {
     ).toThrow(LibraryError);
   });
 
-  it('exhausts the per-task search budget', async () => {
+  it('allows repeated searches while keeping returned handles task and attempt scoped', async () => {
     const { content, library } = await setup();
     content.saveDocument({
       kind: 'outline',
       title: '大纲',
       contentMarkdown: '林澈的故事从雾港开始。',
     });
-    for (let index = 0; index < 8; index += 1) {
-      library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' });
-    }
-    expect(() => library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' })).toThrow(
-      /LIBRARY_BUDGET_EXCEEDED|budget|上限/,
+    const results = Array.from({ length: 12 }, () =>
+      library.search({ taskId: 'task', attemptId: 'attempt', query: '林澈' }),
     );
+    expect(results.every((result) => result.resultCount === 1)).toBe(true);
+    expect(new Set(results.map((result) => result.sources[0]!.sourceHandle)).size).toBe(12);
+    expect(() =>
+      library.read({
+        taskId: 'task',
+        attemptId: 'another-attempt',
+        sourceHandle: results[0]!.sources[0]!.sourceHandle,
+      }),
+    ).toThrow(LibraryError);
+    expect(
+      library.read({
+        taskId: 'task',
+        attemptId: 'attempt',
+        sourceHandle: results[11]!.sources[0]!.sourceHandle,
+      }).status,
+    ).toBe('read');
+  });
+
+  it('invalidates cached search candidates when project library content changes', async () => {
+    const { content, library } = await setup();
+    const document = content.saveDocument({
+      kind: 'outline',
+      title: '灯塔设定',
+      contentMarkdown: '林澈在雾港守望灯塔。',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'attempt', query: '灯塔' }).resultCount,
+    ).toBe(1);
+    content.saveDocument({
+      documentId: document.id,
+      expectedDocumentRowVersion: document.rowVersion,
+      kind: 'outline',
+      title: '山城设定',
+      contentMarkdown: '林澈在山城生活。',
+    });
+    expect(
+      library.search({ taskId: 'task', attemptId: 'attempt', query: '灯塔' }).resultCount,
+    ).toBe(0);
   });
 
   it('explains an empty document filter and reads the actual novel-reference without a novel profile', async () => {
@@ -387,12 +454,23 @@ describe('LibrarySearchService', () => {
       expectedDocumentRowVersion: reviewed.rowVersion,
       expectedPublishedVersionId: reviewed.publishedVersionId,
     });
+    const publishedHit = library.search({
+      taskId: 't',
+      attemptId: 'b',
+      query: '雾港提纲',
+      status: 'published',
+    });
+    expect(publishedHit.sources[0]?.status).toBe('published');
+    const unpublished = workflow.unpublish({
+      documentId: document.id,
+      expectedDocumentRowVersion: workflow.getDocument(document.id).rowVersion,
+    });
     content.saveDocument({
       documentId: document.id,
       kind: 'outline',
       title: '项目大纲',
       contentMarkdown: '第二版灯塔提纲',
-      expectedDocumentRowVersion: workflow.getDocument(document.id).rowVersion,
+      expectedDocumentRowVersion: unpublished.rowVersion,
     });
     const draftHit = library.search({
       taskId: 't',
@@ -400,14 +478,7 @@ describe('LibrarySearchService', () => {
       query: '灯塔提纲',
       status: 'draft',
     });
-    const publishedHit = library.search({
-      taskId: 't',
-      attemptId: 'b',
-      query: '雾港提纲',
-      status: 'published',
-    });
     expect(draftHit.sources[0]?.status).toBe('draft');
-    expect(publishedHit.sources[0]?.status).toBe('published');
   });
 
   it('truncates library.read to maxChars', async () => {

@@ -98,6 +98,7 @@ export type DetachedPanelAction =
   | { panelId: 'document'; type: 'document-restore'; versionId: string }
   | { panelId: 'document'; type: 'document-request-changes' }
   | { panelId: 'document'; type: 'document-publish' }
+  | { panelId: 'document'; type: 'document-unpublish' }
   | { panelId: 'conversation'; type: 'conversation-select'; conversationId: string }
   | { panelId: 'conversation'; type: 'conversation-create' }
   | { panelId: 'conversation'; type: 'conversation-retry'; messageId: string }

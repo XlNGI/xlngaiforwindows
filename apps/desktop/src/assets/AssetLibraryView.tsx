@@ -5,6 +5,8 @@ import {
   ChevronDown,
   ExternalLink,
   FolderOpen,
+  Circle,
+  CircleCheck,
   Image,
   Images,
   Pencil,
@@ -18,6 +20,7 @@ import {
   CheckSquare,
   Square,
   Video,
+  Clapperboard,
   X,
 } from 'lucide-react';
 import type {
@@ -26,9 +29,12 @@ import type {
   AssetMediaSourceInfo,
   AssetSourceInfo,
   AssetTagInfo,
+  RoughCutExportJob,
 } from '@ai-video/contracts';
 import { projectWorker, workerMediaUrl } from '../worker-scope';
 import { ImagePreview } from '../ImagePreview';
+import { RoughCutExportStatus } from '../rough-cut/RoughCutExportStatus';
+import { dispatchAssetPointerDrag, serializeAssetDrag } from './asset-pointer-drag';
 
 type MediaFilter = 'all' | 'image' | 'video';
 const PAGE_SIZE = 60;
@@ -41,6 +47,7 @@ interface AssetLibraryViewProps {
   openTrashRequest?: number;
   taskCompletionRevision?: number;
   onOpenSource?: (source: AssetSourceInfo) => void;
+  onAddToRoughCut?: (assetIds: string[]) => void;
 }
 
 function displayName(asset: AssetInfo) {
@@ -64,6 +71,21 @@ function normalizeTagName(value: string) {
   return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 }
 
+function hasSelectionModifier(event: {
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}) {
+  return event.altKey || event.ctrlKey || event.metaKey || event.shiftKey;
+}
+
+function isVideoControlStrip(target: EventTarget, clientY: number) {
+  if (!(target instanceof HTMLVideoElement) || !target.controls) return false;
+  const rect = target.getBoundingClientRect();
+  return rect.height > 0 && clientY >= rect.bottom - Math.min(64, rect.height * 0.6);
+}
+
 export function AssetLibraryView({
   writable,
   selectedAssetId,
@@ -71,9 +93,19 @@ export function AssetLibraryView({
   openTrashRequest = 0,
   taskCompletionRevision = 0,
   onOpenSource,
+  onAddToRoughCut,
 }: AssetLibraryViewProps) {
   const callWorker = projectWorker();
+  const [activeVideoControlsId, setActiveVideoControlsId] = useState<string>();
+  const [alwaysShowVideoControls] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(hover: none)').matches,
+  );
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportJob, setExportJob] = useState<RoughCutExportJob>();
   const [showTrash, setShowTrash] = useState(false);
   const [keyword, setKeyword] = useState('');
   const [createdFrom, setCreatedFrom] = useState('');
@@ -98,6 +130,7 @@ export function AssetLibraryView({
   const [groupEditor, setGroupEditor] = useState<Partial<AssetGroupInfo>>();
   const [groupDropActive, setGroupDropActive] = useState(false);
   const [pointerDraggingIds, setPointerDraggingIds] = useState<string[]>([]);
+  const [dragPoint, setDragPoint] = useState<{ x: number; y: number }>();
   const [bulkTagId, setBulkTagId] = useState('');
   const selectionAnchor = useRef<string | undefined>(undefined);
   const groupMembersRef = useRef<HTMLFieldSetElement>(null);
@@ -108,6 +141,7 @@ export function AssetLibraryView({
         startX: number;
         startY: number;
         active: boolean;
+        serialized: string;
       }
     | undefined
   >(undefined);
@@ -274,22 +308,11 @@ export function AssetLibraryView({
       event.preventDefault();
       return;
     }
-    const ordered = [...items].sort(
-      (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
-    );
-    const payload = {
-      version: 1,
-      projectId: ordered[0]!.projectId,
-      sourceType,
-      sourceId,
-      snapshotAt: new Date().toISOString(),
-      assets: ordered.map(({ id, kind: assetKind, createdAt }) => ({
-        id,
-        kind: assetKind,
-        createdAt,
-      })),
-    };
-    const serialized = JSON.stringify(payload);
+    if (pointerDragRef.current) {
+      event.preventDefault();
+      return;
+    }
+    const serialized = serializeAssetDrag(items, sourceType, sourceId);
     event.dataTransfer.setData('text/plain', serialized);
     try {
       event.dataTransfer.setData(DRAG_MIME, serialized);
@@ -311,20 +334,55 @@ export function AssetLibraryView({
   };
 
   const resetPointerDrag = () => {
+    if (pointerDragRef.current?.active) suppressCardClickRef.current = true;
+    dispatchAssetPointerDrag({ phase: 'cancel', serialized: '', x: 0, y: 0 });
     pointerDragRef.current = undefined;
     setPointerDraggingIds([]);
+    setDragPoint(undefined);
     setGroupDropActive(false);
   };
 
-  const beginPointerGroupDrag = (event: React.PointerEvent<HTMLDivElement>, items: AssetInfo[]) => {
-    if (!groupEditor || event.button !== 0) return;
-    if ((event.target as Element).closest('button, input, select, textarea, video')) return;
+  const beginPointerGroupDrag = (
+    event: React.PointerEvent<HTMLDivElement>,
+    items: AssetInfo[],
+    sourceType?: string,
+    sourceId?: string,
+  ) => {
+    suppressCardClickRef.current = false;
+    if (event.button !== 0 || items.some((item) => item.deletedAt)) return;
+    if (
+      (event.target as Element).closest('button, input, select, textarea') &&
+      !(sourceType === 'asset-group' && (event.target as Element).closest('.asset-filter-choice'))
+    )
+      return;
+    // Keep the native play/seek/volume strip clickable; the picture above it drags.
+    if (isVideoControlStrip(event.target, event.clientY)) return;
+    if (hasSelectionModifier(event)) {
+      // Modified picture clicks select instead of playing or starting a drag.
+      if (event.target instanceof HTMLVideoElement) event.preventDefault();
+      return;
+    }
+    if (!items.length) return;
+    const serialized = serializeAssetDrag(
+      items,
+      sourceType ?? (items.length > 1 ? 'selection' : 'asset'),
+      sourceId,
+    );
+    const accepted = dispatchAssetPointerDrag({
+      phase: 'probe',
+      serialized,
+      x: event.clientX,
+      y: event.clientY,
+    });
+    if (!groupEditor && !accepted) return;
+    event.preventDefault();
     pointerDragRef.current = {
       pointerId: event.pointerId,
       assetIds: items.map((item) => item.id),
       startX: event.clientX,
       startY: event.clientY,
       active: false,
+      serialized,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
@@ -339,6 +397,13 @@ export function AssetLibraryView({
     if (!drag.active) return;
     event.preventDefault();
     setGroupDropActive(pointInGroupMembers(event.clientX, event.clientY));
+    setDragPoint({ x: event.clientX, y: event.clientY });
+    dispatchAssetPointerDrag({
+      phase: 'move',
+      serialized: drag.serialized,
+      x: event.clientX,
+      y: event.clientY,
+    });
   };
 
   const finishPointerGroupDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -346,6 +411,9 @@ export function AssetLibraryView({
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (drag.active) {
       suppressCardClickRef.current = true;
+      window.setTimeout(() => {
+        suppressCardClickRef.current = false;
+      }, 0);
       if (pointInGroupMembers(event.clientX, event.clientY)) {
         setGroupEditor((current) =>
           current
@@ -356,33 +424,65 @@ export function AssetLibraryView({
             : current,
         );
       }
+      if (!pointInGroupMembers(event.clientX, event.clientY))
+        dispatchAssetPointerDrag({
+          phase: 'drop',
+          serialized: drag.serialized,
+          x: event.clientX,
+          y: event.clientY,
+        });
       event.preventDefault();
     }
     resetPointerDrag();
   };
 
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') resetPointerDrag();
+    };
+    document.addEventListener('keydown', cancel);
+    window.addEventListener('blur', resetPointerDrag);
+    return () => {
+      document.removeEventListener('keydown', cancel);
+      window.removeEventListener('blur', resetPointerDrag);
+      dispatchAssetPointerDrag({ phase: 'cancel', serialized: '', x: 0, y: 0 });
+    };
+  }, []);
+
   const selectAsset = (event: React.MouseEvent, asset: AssetInfo) => {
-    if (event.shiftKey && selectionAnchor.current) {
-      const start = assets.findIndex((item) => item.id === selectionAnchor.current);
+    event.preventDefault();
+    const additive = event.altKey || event.ctrlKey || event.metaKey;
+    const anchor = assets.some((item) => item.id === selectionAnchor.current)
+      ? selectionAnchor.current
+      : selectedIds.at(-1);
+    if (event.shiftKey && anchor) {
+      const start = assets.findIndex((item) => item.id === anchor);
       const end = assets.findIndex((item) => item.id === asset.id);
       if (start >= 0 && end >= 0) {
+        selectionAnchor.current = anchor;
         const range = assets
           .slice(Math.min(start, end), Math.max(start, end) + 1)
           .map((item) => item.id);
-        setSelectedIds(
-          event.ctrlKey || event.metaKey ? [...new Set([...selectedIds, ...range])] : range,
-        );
+        setSelectedIds((current) => (additive ? [...new Set([...current, ...range])] : range));
         return;
       }
     }
     selectionAnchor.current = asset.id;
     setSelectedIds((current) =>
-      event.ctrlKey || event.metaKey
+      additive
         ? current.includes(asset.id)
           ? current.filter((id) => id !== asset.id)
           : [...current, asset.id]
         : [asset.id],
     );
+  };
+
+  const selectCardAsset = (event: React.MouseEvent, asset: AssetInfo) => {
+    if (suppressCardClickRef.current) {
+      suppressCardClickRef.current = false;
+      return;
+    }
+    selectAsset(event, asset);
   };
 
   const reloadCurrent = async () => {
@@ -497,7 +597,9 @@ export function AssetLibraryView({
   };
 
   return (
-    <div className="asset-library-shell asset-library-opt-theme">
+    <div
+      className={`asset-library-shell asset-library-opt-theme${selectedIds.length > 1 ? ' has-multiple-selection' : ''}`}
+    >
       <section className="asset-library-main">
         <div className="asset-filter-bar opt-subbar">
           <div className="opt-filter-leading">
@@ -589,6 +691,18 @@ export function AssetLibraryView({
                         className="asset-filter-option"
                         key={group.id}
                         draggable={Boolean(groupAssets[group.id]?.length)}
+                        onPointerDownCapture={(event) =>
+                          beginPointerGroupDrag(
+                            event,
+                            groupAssets[group.id] ?? [],
+                            'asset-group',
+                            group.id,
+                          )
+                        }
+                        onPointerMove={updatePointerGroupDrag}
+                        onPointerUp={finishPointerGroupDrag}
+                        onPointerCancel={resetPointerDrag}
+                        onLostPointerCapture={resetPointerDrag}
                         onDragStart={(event) =>
                           beginDrag(event, groupAssets[group.id] ?? [], 'asset-group', group.id)
                         }
@@ -600,7 +714,9 @@ export function AssetLibraryView({
                               ? 'asset-filter-choice active'
                               : 'asset-filter-choice'
                           }
-                          onClick={() => selectGroup(group)}
+                          onClick={() => {
+                            if (!suppressCardClickRef.current) selectGroup(group);
+                          }}
                         >
                           <span>{group.name}</span>
                           <small>{group.assetCount ?? 0}</small>
@@ -802,6 +918,59 @@ export function AssetLibraryView({
           </div>
         </div>
 
+        {!showTrash && (
+          <div className="asset-rough-cut-actions">
+            {onAddToRoughCut && (
+              <button
+                className="button primary"
+                type="button"
+                disabled={
+                  !writable ||
+                  !selectedAssets.length ||
+                  selectedAssets.some((asset) => !asset.kind.includes('video'))
+                }
+                title="将选中的视频按故事顺序加入粗剪"
+                onClick={() => onAddToRoughCut(selectedAssets.map((asset) => asset.id))}
+              >
+                <Clapperboard size={14} />
+                加入粗剪
+              </button>
+            )}
+            <button
+              className="button subtle"
+              type="button"
+              disabled={
+                !writable ||
+                exportBusy ||
+                exportJob?.status === 'running' ||
+                !selectedAssets.length ||
+                selectedAssets.some((asset) => !asset.kind.includes('video'))
+              }
+              title="导出 Final Cut Pro 7 XML 与视频素材，供专业剪辑软件导入"
+              onClick={() => {
+                setExportBusy(true);
+                void callWorker('roughCut.export.assets', {
+                  assetIds: selectedAssets.map((asset) => asset.id),
+                })
+                  .then(setExportJob)
+                  .catch((error) => setMessage(String(error)))
+                  .finally(() => setExportBusy(false));
+              }}
+            >
+              <ExternalLink size={14} />
+              {exportBusy ? '正在准备…' : '导出到剪辑软件'}
+            </button>
+          </div>
+        )}
+        {exportJob && (
+          <RoughCutExportStatus
+            key={exportJob.id}
+            initial={exportJob}
+            onUpdate={setExportJob}
+            onDismiss={() => setExportJob(undefined)}
+          />
+        )}
+
         {groupEditor && (
           <div className="asset-editor-strip">
             <form
@@ -987,7 +1156,7 @@ export function AssetLibraryView({
         )}
 
         <div className="asset-library-content">
-          <div className="asset-grid" role="listbox" aria-label="素材">
+          <div className="asset-grid" role="listbox" aria-label="素材" aria-multiselectable="true">
             {assets.map((asset, index) => {
               const isSelected = selectedIds.includes(asset.id);
               const dragItems = isSelected && selectedAssets.length > 1 ? selectedAssets : [asset];
@@ -1006,18 +1175,48 @@ export function AssetLibraryView({
                   }
                   key={asset.id}
                   className={`${isSelected ? 'asset-card selected' : 'asset-card'}${groupEditor ? ' group-drag-enabled' : ''}${pointerDraggingIds.includes(asset.id) ? ' is-pointer-dragging' : ''}`}
-                  onPointerDown={(event) => beginPointerGroupDrag(event, dragItems)}
+                  onPointerDownCapture={(event) => beginPointerGroupDrag(event, dragItems)}
                   onPointerMove={updatePointerGroupDrag}
                   onPointerUp={finishPointerGroupDrag}
                   onPointerCancel={resetPointerDrag}
-                  onClick={(event) => {
-                    if (suppressCardClickRef.current) {
-                      suppressCardClickRef.current = false;
-                      return;
-                    }
-                    selectAsset(event, asset);
+                  onLostPointerCapture={resetPointerDrag}
+                  onMouseEnter={() => {
+                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
                   }}
+                  onMouseLeave={() => {
+                    setActiveVideoControlsId((current) =>
+                      current === asset.id ? undefined : current,
+                    );
+                  }}
+                  onFocusCapture={() => {
+                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
+                  }}
+                  onBlurCapture={(event) => {
+                    if (
+                      event.relatedTarget instanceof Node &&
+                      event.currentTarget.contains(event.relatedTarget)
+                    )
+                      return;
+                    setActiveVideoControlsId((current) =>
+                      current === asset.id ? undefined : current,
+                    );
+                  }}
+                  onTouchStart={() => {
+                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
+                  }}
+                  onClickCapture={(event) => {
+                    if (
+                      event.target instanceof HTMLVideoElement &&
+                      !isVideoControlStrip(event.target, event.clientY)
+                    ) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      selectCardAsset(event, asset);
+                    }
+                  }}
+                  onClick={(event) => selectCardAsset(event, asset)}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
                       selectAsset(event as unknown as React.MouseEvent, asset);
@@ -1029,8 +1228,15 @@ export function AssetLibraryView({
                       type="button"
                       className="asset-card-select-toggle opt-card-check"
                       aria-label={isSelected ? '取消选择' : '选择'}
+                      aria-pressed={isSelected}
+                      title={isSelected ? '取消选择此素材' : '选择此素材，可多选后一起拖入粗剪'}
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (e.shiftKey) {
+                          selectAsset(e, asset);
+                          return;
+                        }
+                        selectionAnchor.current = asset.id;
                         setSelectedIds((curr) =>
                           curr.includes(asset.id)
                             ? curr.filter((id) => id !== asset.id)
@@ -1038,7 +1244,11 @@ export function AssetLibraryView({
                         );
                       }}
                     >
-                      {isSelected ? <CheckSquare size={13} /> : <Square size={13} />}
+                      {isSelected ? (
+                        <CircleCheck size={17} strokeWidth={1.7} />
+                      ) : (
+                        <Circle size={17} strokeWidth={1.5} />
+                      )}
                     </button>
                     <span className="asset-card-type-badge opt-type-pill">
                       {asset.kind.includes('video') ? (
@@ -1055,13 +1265,25 @@ export function AssetLibraryView({
                         draggable={false}
                       />
                     ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
-                      <video
-                        src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
-                        controls
-                        draggable={false}
-                        preload="metadata"
-                        onClick={(event) => event.stopPropagation()}
-                      />
+                      <>
+                        {!asset.deletedAt && <span className="asset-video-drag-surface" />}
+                        <video
+                          src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
+                          controls={alwaysShowVideoControls || activeVideoControlsId === asset.id}
+                          draggable={false}
+                          preload="metadata"
+                          onLoadedMetadata={(event) => {
+                            const video = event.currentTarget;
+                            if (
+                              video.duration > 0 &&
+                              video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+                            ) {
+                              video.currentTime = Math.min(1 / 30, video.duration / 2);
+                            }
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                        />
+                      </>
                     ) : asset.kind.includes('video') ? (
                       <Video size={30} />
                     ) : (
@@ -1328,6 +1550,16 @@ export function AssetLibraryView({
             )}
           </aside>
         </div>
+        {dragPoint && pointerDraggingIds.length > 0 && (
+          <div
+            className="asset-pointer-drag-preview"
+            role="status"
+            style={{ left: dragPoint.x + 14, top: dragPoint.y + 14 }}
+          >
+            <Clapperboard size={16} />
+            {pointerDraggingIds.length} 项素材 · {groupEditor ? '拖入素材组' : '拖到目标位置添加'}
+          </div>
+        )}
         {message && (
           <div className="inline-status" role="status">
             {message}

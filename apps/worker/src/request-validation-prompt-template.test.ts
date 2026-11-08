@@ -16,12 +16,18 @@ describe('conversation prompt template request validation', () => {
     ).toEqual({ conversationId: 'conversation' });
   });
 
-  it('rejects an oversized or non-integer version', () => {
+  it('accepts long templates and rejects invalid content types or non-integer versions', () => {
+    const params = {
+      conversationId: 'conversation',
+      content: 'x'.repeat(20_001),
+      expectedRowVersion: 0,
+    };
+    expect(validateSessionRequestParams('conversation.promptTemplate.save', params)).toBe(params);
+    expect(params.content).toBe('x'.repeat(20_001));
     expect(() =>
       validateSessionRequestParams('conversation.promptTemplate.save', {
-        conversationId: 'conversation',
-        content: 'x'.repeat(20_001),
-        expectedRowVersion: 0,
+        ...params,
+        content: 42,
       }),
     ).toThrow(RequestValidationError);
     expect(() =>

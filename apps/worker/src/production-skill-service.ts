@@ -10,7 +10,7 @@ export function readProductionSkill(args: Record<string, unknown>) {
     throw new Error('Unknown production skill.');
   return {
     skillId: args.skillId,
-    revision: 1,
+    revision: args.skillId === 'script-to-media' ? 4 : 1,
     ...PRODUCTION_SKILLS[args.skillId as ProductionSkillId],
   };
 }

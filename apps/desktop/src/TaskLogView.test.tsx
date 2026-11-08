@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentTaskDetail,
@@ -263,7 +263,8 @@ describe('TaskLogView', () => {
       expect(callWorker).toHaveBeenCalledWith('agent.task.get', { taskId: 'task-1' }),
     );
     expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
-    expect(screen.getAllByText('等待审核 (waiting_review)')).toHaveLength(2);
+    expect(within(taskRow).getByText('等待审核')).toBeInTheDocument();
+    expect(screen.getByText('等待审核 (waiting_review)')).toBeInTheDocument();
     expect(screen.getByText('document.draft.created')).toBeInTheDocument();
     expect(screen.getByText('已创建可审阅草稿。')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '研究来源' })).toBeInTheDocument();
@@ -325,7 +326,10 @@ describe('TaskLogView', () => {
     render(<TaskLogView projectId="project-1" />);
     fireEvent.click(await screen.findByRole('button', { name: /文本生成图片/ }));
     await screen.findByRole('heading', { name: '请求参数摘要' });
-    expect(screen.getAllByText('提交结果未知 (submission_unknown)')).toHaveLength(2);
+    expect(
+      within(screen.getByRole('button', { name: /文本生成图片/ })).getByText('提交结果未知'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('提交结果未知 (submission_unknown)')).toBeInTheDocument();
     expect(screen.queryByText('执行中 (running)')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('不会自动重试');
     expect(screen.getByRole('alert')).toHaveTextContent('Provider 后台核对');
@@ -438,19 +442,27 @@ describe('TaskLogView', () => {
     confirm.mockRestore();
   });
 
-  it('closes the selected detail panel without reloading the task list', async () => {
-    render(<TaskLogView projectId="project-1" />);
-    fireEvent.click(await screen.findByRole('button', { name: /项目大纲草稿/ }));
-    expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
+  it.each(['关闭任务详情', '返回列表', 'Escape'])(
+    'returns to the selected task with %s without reloading the list',
+    async (action) => {
+      render(<TaskLogView projectId="project-1" />);
+      const taskRow = await screen.findByRole('button', { name: /项目大纲草稿/ });
+      fireEvent.click(taskRow);
+      expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '关闭任务详情' }));
+      if (action === 'Escape') {
+        fireEvent.keyDown(screen.getByRole('heading', { name: '项目大纲草稿' }), { key: 'Escape' });
+      } else {
+        fireEvent.click(screen.getByRole('button', { name: action }));
+      }
 
-    expect(screen.queryByRole('heading', { name: '事件时间线' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /项目大纲草稿/ })).toBeInTheDocument();
-    expect(
-      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'task.log.list'),
-    ).toHaveLength(1);
-  });
+      expect(screen.queryByRole('heading', { name: '事件时间线' })).not.toBeInTheDocument();
+      await waitFor(() => expect(taskRow).toHaveFocus());
+      expect(
+        vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'task.log.list'),
+      ).toHaveLength(1);
+    },
+  );
 
   it('filters by kind and loads the next cursor page', async () => {
     vi.mocked(callWorker).mockImplementation((method, params) => {
@@ -470,7 +482,8 @@ describe('TaskLogView', () => {
     render(<TaskLogView projectId="project-1" />);
 
     expect(await screen.findByRole('button', { name: /项目大纲草稿/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
+    const list = screen.getByLabelText('任务日志列表');
+    fireEvent.click(within(list).getByRole('button', { name: '加载更多' }));
     expect(await screen.findByRole('button', { name: /文本生成图片/ })).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('combobox', { name: '任务类型筛选' }), {

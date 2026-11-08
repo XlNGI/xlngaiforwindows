@@ -1,5 +1,6 @@
 import {
   CHARACTER_SHEET_IMAGE_REQUIREMENTS,
+  SCENE_REFERENCE_IMAGE_REQUIREMENTS,
   VIDEO_PROMPT_AUTHORING_REQUIREMENTS,
 } from '@ai-video/contracts';
 
@@ -37,6 +38,9 @@ ${CHARACTER_SHEET_IMAGE_REQUIREMENTS}
 - 生成视频时，将已确认的完整角色设定板作为对应角色的外观参考实际传入模型，并在提示词中说明各分区均为同一人物的不同视角与细节；文字、边框、色卡、面板和重复人物只用于参考，不要求出现在成片中。风格参考约束画法，角色身份分别绑定，避免不同角色共用同一张脸。
 - 区分角色设定板参考与视频首帧用途。依据所选模型实际支持的参考图参数传入，保留用户选择的完整设定板；需要首帧时另行按分镜准备，不自动把整张设定板当作需要运动的首帧。模型能力不足时说明具体限制。
 
+${SCENE_REFERENCE_IMAGE_REQUIREMENTS}
+- 每个场景默认生成一张主图为全景、次图为关键特写的复合参考图；同一场景的全景和特写合在一个画布及一次生图请求中。默认 n=1，不自动将复合参考图用作镜头首帧。
+
 # 临时道具独立生成
 - 角色、场景与道具按内容类型分别保存：人物归角色，地点与环境归场景，独立物件归道具；剧情不需要道具时，道具列表可以为空，不为凑齐类型创建道具，不把人物、场景板或环境说明存成道具。
 - 剧情或分镜需要、且项目中没有可复用的已确认道具资料／素材时，将临时道具作为独立道具处理。只要求创作或提示词时，为每件道具分别提供独立的道具图片提示词，不自动发起图片生成；本次请求明确包含出图时，再将每件道具分别生成独立图片，不与角色、场景或其他道具合图。
@@ -55,7 +59,7 @@ ${CHARACTER_SHEET_IMAGE_REQUIREMENTS}
 - 只列本镜出镜人物及相关参考素材，包括背景、远景、无台词及收尾短暂入画的人物；提示词与 IR 的 references.characterDocumentIds 表达相同的实际出镜范围。仅被提及或画外存在的人物不因此成为画面参考，剧情明确的画外说话者单独标明，不把全场人物和无关角色参考图带入本镜。
 - 站位用画面前中后景、左右、身体朝向、视线目标及与门口／工作台／崖边的关系说明；移动写清起点、路线和终点，保持通路与轴线合理。
 - 景别、机位角度、构图、焦段或透视、景深、焦点对象；运镜方向、速度与起止位置。可见细节须与角度、遮挡和景深相容，不要求纯背影展示被遮住的面部，或无焦点变化时同时清晰展示浅景深前后景。
-- 按镜头相对时间拆分动作节拍，写清准备、动作、对象、对方反应与停顿；情绪落实为可见动作，多人互动说明先后顺序，不用抽象形容词代替过程。
+- 按镜头相对时间写清镜内动作节拍，包括准备、动作、对象、对方反应与停顿；动作节拍与时间标记不等于切镜，不逐动作创建分镜。情绪落实为可见动作，多人互动说明先后顺序，不用抽象形容词代替过程。
 - 已确认的身体特征须落实到动作：持杖与持物的手符合断臂侧别；视障者可探杖确认门槛、听声定向，在熟悉场所也可熟练行走。失明不等于跛行，不擅自增加伤腿、踉跄或残缺，已确认的跛足须保持一致。
 - 光线、色彩、材质与统一风格；对白逐句写明说话者、原文、语气、对应动作节拍和听者反应，已有原文不改写、不增编。上一镜已说完的话不在本镜重说；没有新台词时不为“说完话后离去”补台词，拒绝可通过动作延续。
 - 明确区分对白、旁白、环境声、音效与音乐；重要声音写出发生时点、节奏及远近变化。
@@ -77,4 +81,19 @@ export function composeConversationPrompt(userPrompt: string, template?: string)
   return constraint
     ? `【本会话要求约束】\n${constraint}\n\n【用户本次请求】\n${userPrompt}`
     : userPrompt;
+}
+
+export function splitComposedConversationPrompt(
+  prompt: string,
+): { constraints: string; request: string } | undefined {
+  const normalized = prompt.replace(/\r\n/g, '\n');
+  const prefix = '【本会话要求约束】\n';
+  const separator = '\n\n【用户本次请求】\n';
+  if (!normalized.startsWith(prefix)) return undefined;
+  const boundary = normalized.indexOf(separator, prefix.length);
+  if (boundary < 0) return undefined;
+  return {
+    constraints: normalized.slice(prefix.length, boundary),
+    request: normalized.slice(boundary + separator.length),
+  };
 }

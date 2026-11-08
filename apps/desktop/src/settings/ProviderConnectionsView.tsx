@@ -341,11 +341,12 @@ export function ProviderConnectionsView({
                   <span className="provider-logo">{profile.name.slice(0, 2)}</span>
                   <span>
                     <strong>{profile.name}</strong>
-                    <small>
-                      {duplicateNames.get(profile.name)! > 1 ? `${profile.id.slice(-6)} · ` : ''}
-                      {profile.migrationSource ? '旧版迁移 · ' : ''}
-                      {profile.protocol}
-                    </small>
+                    {(duplicateNames.get(profile.name)! > 1 || profile.migrationSource) && (
+                      <small>
+                        {duplicateNames.get(profile.name)! > 1 ? `${profile.id.slice(-6)} · ` : ''}
+                        {profile.migrationSource ? '旧版迁移' : ''}
+                      </small>
+                    )}
                   </span>
                   <span className={`connection-status status-${profile.connectionStatus}`}>
                     {statusLabels[profile.connectionStatus]}
@@ -421,14 +422,19 @@ export function ProviderConnectionsView({
                   (model) =>
                     !model.unavailableAt &&
                     model.enabled !== enabled &&
-                    (!enabled || Object.values(model.capabilities).some(Boolean)),
+                    (!enabled ||
+                      Object.entries(model.capabilities).some(
+                        ([key, value]) => key !== 'contextLimits' && value === true,
+                      )),
                 );
                 const skipped = enabled
                   ? models.filter(
                       (model) =>
                         !model.unavailableAt &&
                         !model.enabled &&
-                        !Object.values(model.capabilities).some(Boolean),
+                        !Object.entries(model.capabilities).some(
+                          ([key, value]) => key !== 'contextLimits' && value === true,
+                        ),
                     ).length
                   : 0;
                 const updated = await Promise.all(

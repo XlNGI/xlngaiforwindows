@@ -1,8 +1,8 @@
 # Agent 项目文档生成、审核与任务日志实施计划
 
-版本：1.2  
-日期：2026-08-19  
-状态：实施中（v14 核心闭环和 UniCompAPI 桌面 Native 两轮工具验收已完成；P3.2 Worker 主动研究、Schema v18 配额治理、Schema v19 缓存索引/引用关联、来源 UI、用户可见研究模式、Fake-IP DNS 兼容、“UniCompAPI + 真实研究 + 自动打开草稿”桌面链路和 Native 研究网络桥基础实现已完成；Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已完成；崩溃后 in-flight 恢复、真实研究冒烟和安装包链路待完成）  
+版本：1.4  
+日期：2026-11-01  
+状态：实施中（v14 核心闭环和 UniCompAPI 桌面 Native 两轮工具验收已完成；P3.2 Worker 主动研究、Schema v18 配额治理、Schema v19 缓存索引/引用关联、来源 UI、用户可见研究模式、Fake-IP DNS 兼容、“UniCompAPI + 真实研究 + 自动打开草稿”桌面链路和 Native 研究网络桥基础实现已完成；Schema v72 发布后文档级只读和用户取消发布恢复草稿已完成；Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已完成；崩溃后 in-flight 恢复、真实研究冒烟和安装包链路待完成）  
 适用范围：Desktop、Worker、Contracts、Domain、Persistence、Context、LLM Provider
 
 > 本文档是 Agent 项目资料生成工作流的实施依据和执行记录。已完成项必须附验证证据；未完成项保留明确边界，不得以 UI 已接入代替后端能力。
@@ -11,7 +11,9 @@
 
 2026-10-19 确认：文档生成后直接保存为可编辑草稿，无需用户确认。场次、镜头和助手生成的角色／场景绑定通过真实 ID、CAS 及事务校验后立即写入目录；用户可随时修改提示词和绑定。旧版尚待批准的内容在可写页面自动保存，版本冲突时保留现有内容并提示重新生成。文档发布仍由用户后期显式操作；历史记录中的场次审批步骤由本条取代。
 
-验证完成：全仓共 1,609 项通过（Worker 827、Desktop 504、Persistence 75、Generation Adapters 139、LLM 32、Contracts 24、Context 8）；最终 Pi 系统提示词回归 13 项通过。覆盖两种会话协议、场次与镜头自动保存、绑定修订、分段生成和重复完成、草稿重开与后期编辑、旧方案自动保存、只读及版本冲突回滚。typecheck、lint、format:check、build 和 git diff --check 通过。打包 Worker 离线验证通过，两协议共 8 种入口组合自动保存，providerRequests=0；未启动安装程序或修改用户项目。
+2026-11-01 确认并实施：发布是文档级权威状态。发布后，文档正文、标题、作用域、当前版本指针、版本状态、审核、发布历史、绑定、研究来源关联和小说章节关联均由数据库写保护；任何事务都不能通过业务服务或直接 SQL 修改已发布文档。Agent 生成、修订、恢复、归档和结构化提案只能作用于草稿；Agent 不能发布或取消发布。只有用户在主窗口或独立文档窗口点击“取消发布”才能解除权威状态；Worker 在一个事务中保留原发布版本和 publication 历史，复制其内容创建新的用户草稿，清空 `published_version_id`，并追加 `unpublished` 审计。取消发布不修改原正式版本，后续编辑必须基于新草稿。
+
+本次发布只读实施验证：Persistence 21 个测试文件/87 项、Worker 79 个测试文件/1,082 项、Desktop 74 个测试文件/668 项通过；`pnpm typecheck`、`pnpm build`、`git diff --check` 通过。覆盖发布后文档、版本、审核、发布历史、绑定、研究来源和小说章节关联的只读保护，用户取消发布复制新草稿，以及 Agent 草稿 CRUD 边界。全仓 `pnpm format:check` 因 11 个既有文件未格式化未通过，`pnpm lint` 因 13 个既有模块错误未通过；文档工作流相关定向检查通过。打包 Worker 离线验证通过；未启动安装程序或修改用户项目。
 
 - [x] 自动保存实施完成：生成内容通过 Worker 校验后立即保存为可编辑草稿；移除场次审批面板；旧版待确认内容自动保存；保留后期修改、真实 ID、CAS、事务回滚和审计。
 
@@ -26,7 +28,7 @@
   - [~] P3.1 Provider 工具路由兼容性（官方 OpenAI Responses 与 UniCompAPI Chat Completions 精确路由的模型能力/transport 双重门禁、工具循环适配、真实协议冒烟和桌面 Native Agent 草稿链路已完成；取消/重启恢复、安装包链路及其他第三方适配器仍待完成）
 - [~] P3.2 Agent 主动外部研究（`researchMode`、Bing HTML Research Adapter、受控 `research.search/fetch`、并行只读工具循环、项目本地正文缓存、Schema v17 来源事实、Schema v18 工具配额、Schema v19 缓存索引/TTL/容量治理/采用状态/草稿引用关联、来源 UI、用户可见模式选择、UniCompAPI 桌面真实研究起草链路和 Native 研究网络桥基础实现已落地；Worker 无桥时 fail-closed，并有 Native 令牌/公网 URL/响应上限回归；Worker 到 Native 的请求 ID/取消注册表/WinHTTP 分段取消已落地；崩溃后 in-flight 恢复、真实研究冒烟和安装包链路待完成）
 - [~] P4 会话触发文档草稿与编辑器审核闭环（显式 Agent 创建、终态刷新和新草稿自动打开已完成；普通聊天已支持保守的创建/读取/更新/归档/恢复意图识别、唯一目标绑定和无目标阻断；更完整的持久化 pending intent、其他文档入口和端到端 Provider 验收待完成）
-- [~] P5 审核、发布、上下文治理和冲突处理（核心闭环和文档工作流审计完成，差异视图和动态模型预算待实现）
+- [~] P5 审核、发布、上下文治理和冲突处理（发布后文档级数据库只读、用户取消发布恢复草稿、Agent 草稿边界和跨入口错误语义已完成；差异视图和动态模型预算待实现）
 - [x] P6 统一任务日志页面与来源定位（聚合列表、Agent 详情、事件时间线、文档产物、Provider step 详情、筛选、游标分页、自动刷新、来源会话跳转和图片/视频完整详情已完成；2026-08-19 验证：Contracts build、Worker/Desktop typecheck、Worker 194 tests、Desktop 108 tests 通过）
 - [~] P7 场次/镜头结构化提案扩展（Worker change set/CAS/事务应用、结构化差异 UI 和关联文档原子变更已完成；真实 Windows 人工验收和安装包链路待完成）
 - [~] P8 性能、安全、迁移和发布门禁（自动化质量门禁通过，Windows 多窗口实机和恢复演练待完成）
@@ -68,6 +70,7 @@
 |---|---|
 | 文档保存介质 | 文档、草稿、版本、审核记录和任务数据保存在项目根目录的 `project.sqlite`；不以独立 `.md` 文件作为运行时权威源 |
 | 文档生命周期 | 所有新建、导入、手工编辑和 Agent 生成的文档都直接保存为可编辑草稿，无需确认；后期可修改并显式发布；只有发布版本进入默认 LLM 权威上下文 |
+| 发布后的可变性 | 发布是文档级权威状态；发布后整篇文档和关联工作流事实只读，只有用户界面取消发布才能回到草稿；取消发布保留原版本与发布历史并复制出新草稿 |
 | 首期产物基数 | 创建/更新类 Agent 任务只允许一个主要文档产物；查询、归档和恢复任务使用操作结果，不伪造文档产物；多文档请求拆分为多个有父子/批次关联的任务 |
 | Agent 权限 | Agent 可在显式用户意图、唯一目标和可信执行信封约束下执行有界 `list/read/create/update/archive/restore`；永远不能提交审核、发布或 purge |
 | 用户权限 | 可写项目用户拥有受控文档 CRUD，可提交审核、要求修改、拒绝、自审发布、归档、恢复归档；purge 必须再次显式确认 |
@@ -236,6 +239,7 @@ ContextService 默认读取该版本
 22. 取消与工具写入以同一数据库事务中的任务 `row_version` CAS 为线性化点；取消先提交则工具零写入，工具先提交则保留已提交事实和草稿。
 23. 正文只执行 UTF-8、控制字符和长度校验；不得使用会改写创作内容的 NFKC 等兼容性规范化。标题和标识符最多执行一次 NFC 规范化，并在规范化后计算 hash。
 24. 任务、generation、attempt、Provider step、工具调用和任务事件在项目数据库生命周期内只允许逻辑归档，不允许普通业务接口硬删除审计证据。
+25. `documents.published_version_id` 非空时，文档及其审核、发布、绑定、来源关联和章节关联不能被任何事务修改；只有用户取消发布事务可创建同内容草稿并清空权威指针。
 
 ## 9. 端到端业务流程
 
@@ -319,6 +323,8 @@ Desktop 收到草稿产物后自动打开文档编辑器：
 9. 仅当存在来源任务时校验该任务只有一个主要产物且其当前 `document_version_id` 等于候选版本，并在同一 CAS 事务将 artifact `disposition=published`，再将任务标记为 `completed + outcome=published`；手工草稿不创建伪任务、不更新任务状态，但仍必须写审核、publication 和审计事实。
 
 任何一步失败必须全部回滚，不能留下已批准但未发布、已发布但任务未完成或权威指针已变化但审计缺失的中间状态。发布后下一次 LLM 上下文编译才会读取该版本；失败时草稿保留并进入冲突处理界面。
+
+发布完成后，主窗口和独立文档窗口使用只读编辑器，只显示“取消发布”。取消发布只能由用户界面调用 `document.unpublish`，Worker 在同一事务中校验当前发布版本和文档行版本，写入用户 `unpublished` 审计，复制发布正文和结构化内容为新的 `draft` 版本，将 `current_version_id` 指向新版本并清空 `published_version_id`。发布记录、旧正式版本及其历史引用保持不变；Agent 或其他业务入口收到已发布目标时返回 `DOCUMENT_PUBLISHED_READ_ONLY`，不得隐式取消发布。
 
 ### 9.6 拒绝、修改和重试
 
@@ -1789,6 +1795,7 @@ P3.2 还必须记录具体 Research Adapter、endpoint/profile、凭据来源（
 
 | 日期 | 阶段 | 结果 | 验证证据 | 备注 |
 |---|---|---|---|---|
+| 2026-11-01 | P5 发布后文档级只读与用户取消发布 | Schema v72 新增发布状态保护触发器；发布后文档正文、标题、作用域、版本指针、版本状态、审核、发布历史、绑定、研究来源关联和小说章节关联均拒绝事务修改。`document.unpublish` 仅由用户界面调用，在同一事务中保留原正式版本和发布历史，复制内容创建新草稿、清空 `published_version_id` 并追加 `unpublished` 审计；Agent 工具移除 publish，只允许对草稿执行增删改查、归档和恢复 | Persistence 21 个测试文件/87 项、Worker 79 个测试文件/1,082 项、Desktop 74 个测试文件/668 项通过；`pnpm typecheck`、`pnpm build`、`git diff --check` 通过；计划 Markdown 与 DOCX 已同步，DOCX ZIP/XML 结构校验通过 | `pnpm format:check` 仍有 11 个既有文件未格式化，`pnpm lint` 仍有 13 个既有模块错误；`render_docx.py` 因环境缺少 LibreOffice `soffice.exe` 无法生成页面 PNG，DOCX 视觉验收待可用渲染器 |
 | 2026-08-19 | P3.2 用户可见研究模式与桌面窗口同步 | ChatPanel 增加 `auto/project_only/network_disabled` 选择器，当前选择按本地 LLM 选择偏好保存；Agent 草稿请求使用用户选择，主窗口与独立会话窗口通过快照/动作协议同步，运行中的 generation 禁止切换模式 | `pnpm.cmd --filter @ai-video/contracts build`、`pnpm.cmd --filter @ai-video/desktop typecheck`、Desktop ChatPanel/DetachedPanel 聚焦测试（3 个文件/7 项）通过；Desktop 全量测试 18 个文件/101 项通过 | Native 网络桥和取消/重启完整实机语义仍未完成；模式选择只影响显式 Agent 草稿任务，普通问答保持无副作用 |
 | 2026-08-19 | P3.2 研究来源 UI 与任务详情关联 | `agent.task.get` 按项目/任务返回来源元数据和缓存状态；Desktop 任务详情展示引用标签、标题、规范 URL、站点、抓取时间、采用状态、截断和缓存缺失/过期提示；正文、缓存路径、凭据和原始响应不进入公开 DTO | `pnpm.cmd --filter @ai-video/contracts build`、`pnpm.cmd --filter @ai-video/worker test`（21 个文件/172 项）、`pnpm.cmd --filter @ai-video/worker typecheck`、`pnpm.cmd --filter @ai-video/desktop exec vitest run src/TaskLogView.test.tsx`（8 项）、`pnpm.cmd --filter @ai-video/desktop typecheck`、Desktop 全量测试（18 文件/101 项）通过；`git diff --check` 通过 | P3.2 仍待 Native 网络桥、取消/重启恢复完整实机语义和安装包链路；DOCX 渲染仍受环境缺少 LibreOffice 限制 |
 | 2026-08-19 | P3.2 Native 研究网络桥基础切片 | Desktop 为每个 Worker 进程创建一次性 loopback Native bridge 和随机能力令牌；Worker 正式研究客户端只通过桥提交公开 HTTPS GET，无桥时 fail-closed；Native 独立执行主机/DNS/公网地址、HTTPS、重定向禁用、MIME 请求白名单和响应体上限，桥不接收 Provider 凭据 | `pnpm.cmd test`（Worker 194、Desktop 108、Persistence 22 及其余 workspace 通过）、`pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd lint`、`pnpm.cmd format:check`、`git diff --check`、`cargo fmt --check`、Rust 55 项通过；新增 Native 令牌/URL/公网边界/无桥 fail-closed 回归 | P3.2 仍待 Native 请求取消贯穿、Worker 崩溃后 in-flight 研究恢复、通用 DNS rebinding/压缩炸弹/敏感 query 验收、真实研究冒烟和安装包链路；不得据此标记总项完成 |

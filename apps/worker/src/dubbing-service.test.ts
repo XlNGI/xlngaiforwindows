@@ -86,6 +86,16 @@ const settings: Pick<AppSettingsService, 'getProfile' | 'listModels'> = {
   ],
 };
 
+async function setupStandaloneAudio(options: DubbingServiceOptions = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'ai-video-audio-sample-'));
+  const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+  const root = join(directory, 'project');
+  projects.create(root, '独立音频样本');
+  const service = new DubbingService(projects, settings, { runtime, ...options });
+  live.push({ directory, projects, service });
+  return { directory, projects, root, service };
+}
+
 async function setup(options: DubbingServiceOptions = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-dubbing-service-'));
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -542,6 +552,216 @@ describe.runIf(process.platform === 'win32')(
           costAcknowledged: true,
         }).id,
       ).not.toBe(pending.id);
+    });
+
+    it('generates a role video voice reference through the API schema and atomically binds the audio', async () => {
+      const request = vi.fn(async (method: string, params: unknown) => {
+        if (method !== 'provider.dubbing.speech') return { cancelled: true };
+        const p = params as NativeDubbingSpeechParams;
+        const output = join(p.projectRoot, p.outputRelativePath);
+        mkdirSync(dirname(output), { recursive: true });
+        await copyFile(mp3, output);
+        return {
+          relativePath: p.outputRelativePath,
+          mime: 'audio/mpeg',
+          sizeBytes: statSync(output).size,
+        };
+      });
+      const f = await setup({ native: { request } });
+      const prepare = (text = '你好，很高兴认识你。') =>
+        f.service.prepareVoiceReferenceSubmission({
+          characterDocumentId: f.character.id,
+          expectedVoiceVersionId: f.voice.versionId,
+          adapterKey: 'TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1',
+          providerProfileId: speechId,
+          modelId: 'speech-2.8-hd',
+          parameters: {
+            text,
+            voice_setting: { voice_id: 'fixed-voice-one', speed: 1, pitch: 0 },
+          },
+        });
+      await expect(
+        f.service.generateVoiceReference({
+          characterDocumentId: f.character.id,
+          expectedVoiceVersionId: f.voice.versionId,
+          expectedRowVersion: 0,
+          text: '你好，很高兴认识你。',
+          costAcknowledged: false,
+        }),
+      ).rejects.toMatchObject({ code: 'COST_ACK_REQUIRED' });
+      await expect(
+        f.service.generateVoiceReference({
+          characterDocumentId: f.character.id,
+          expectedVoiceVersionId: randomUUID(),
+          expectedRowVersion: 0,
+          text: '你好，很高兴认识你。',
+          costAcknowledged: true,
+        }),
+      ).rejects.toMatchObject({ code: 'VOICE_CHANGED' });
+      expect(() => prepare('')).toThrowError('音频参数未通过 API Schema 校验。');
+      expect(request).not.toHaveBeenCalled();
+
+      const cancelled = prepare();
+      await expect(
+        f.service.confirmVoiceReferenceSubmission({
+          confirmationToken: cancelled.confirmation.confirmationToken,
+          approved: false,
+        }),
+      ).resolves.toEqual({ approved: false });
+      expect(request).not.toHaveBeenCalled();
+
+      const pending = prepare();
+      const result = await f.service.confirmVoiceReferenceSubmission({
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      expect(result.approved).toBe(true);
+      if (!result.approved) throw new Error('Expected the approved reference to be generated.');
+      const saved = result.reference;
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0]?.[1]).toMatchObject({
+        providerProfileId: speechId,
+        model: 'speech-2.8-hd',
+        voiceId: 'fixed-voice-one',
+        text: '你好，很高兴认识你。',
+        speed: 1,
+        pitch: 0,
+      });
+      expect(saved).toMatchObject({
+        projectId: f.projects.current()!.id,
+        characterDocumentId: f.character.id,
+        revision: 1,
+        rowVersion: 1,
+        audioName: '视频声音参考 · 你好，很高兴认识你。',
+      });
+      expect(f.service.audio(saved.audioId)).toMatchObject({
+        kind: 'reference',
+        mime: 'audio/mpeg',
+      });
+      expect(existsSync(f.service.audioSource(saved.audioId).path)).toBe(true);
+    });
+
+    it('generates an independent reusable audio sample without requiring a character voice', async () => {
+      const request = vi.fn(async (method: string, params: unknown) => {
+        if (method !== 'provider.dubbing.speech') return { cancelled: true };
+        const p = params as NativeDubbingSpeechParams;
+        const output = join(p.projectRoot, p.outputRelativePath);
+        mkdirSync(dirname(output), { recursive: true });
+        await copyFile(mp3, output);
+        return {
+          relativePath: p.outputRelativePath,
+          mime: 'audio/mpeg',
+          sizeBytes: statSync(output).size,
+        };
+      });
+      const f = await setupStandaloneAudio({ native: { request } });
+      expect(f.service.listVoices()).toEqual([]);
+      const params = {
+        adapterKey: 'TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1',
+        providerProfileId: speechId,
+        modelId: 'speech-2.8-hd',
+        parameters: {
+          text: '请在雨后的清晨开始新的旅程。',
+          voice_setting: { voice_id: 'sample-voice', speed: 1.1, pitch: 2 },
+        },
+      };
+
+      expect(() =>
+        f.service.prepareAudioSampleSubmission({
+          ...params,
+          parameters: { ...params.parameters, text: '' },
+        }),
+      ).toThrowError('音频参数未通过 API Schema 校验。');
+      expect(request).not.toHaveBeenCalled();
+
+      const cancelled = f.service.prepareAudioSampleSubmission(params);
+      await expect(
+        f.service.confirmAudioSampleSubmission({
+          confirmationToken: cancelled.confirmation.confirmationToken,
+          approved: false,
+        }),
+      ).resolves.toEqual({ approved: false });
+      expect(request).not.toHaveBeenCalled();
+
+      const pending = f.service.prepareAudioSampleSubmission(params);
+      const result = await f.service.confirmAudioSampleSubmission({
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      expect(result.approved).toBe(true);
+      if (!result.approved) throw new Error('Expected the audio sample to be generated.');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0]?.[1]).toMatchObject({
+        providerProfileId: speechId,
+        model: 'speech-2.8-hd',
+        voiceId: 'sample-voice',
+        text: '请在雨后的清晨开始新的旅程。',
+        speed: 1.1,
+        pitch: 2,
+      });
+      expect(result.audio).toMatchObject({
+        projectId: f.projects.current()!.id,
+        kind: 'reference',
+        name: '音频样本 · 请在雨后的清晨开始新的旅程。',
+        mime: 'audio/mpeg',
+      });
+      expect(f.service.listAudio({ kind: 'reference' })).toContainEqual(result.audio);
+      expect(existsSync(f.service.audioSource(result.audio.id).path)).toBe(true);
+      await expect(
+        f.service.confirmAudioSampleSubmission({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toMatchObject({ code: 'CONFIRMATION_EXPIRED' });
+      expect(request).toHaveBeenCalledTimes(1);
+      f.projects.close();
+      f.projects.open(f.root);
+      expect(f.service.listAudio({ kind: 'reference' })).toEqual([result.audio]);
+      expect(existsSync(f.service.audioSource(result.audio.id).path)).toBe(true);
+    });
+
+    it('cancels standalone audio work and discards late results after a project switch', async () => {
+      let resolveSpeech: ((value: unknown) => void) | undefined;
+      const request = vi.fn((method: string) =>
+        method === 'provider.dubbing.speech'
+          ? new Promise<unknown>((resolveResult) => {
+              resolveSpeech = resolveResult;
+            })
+          : Promise.resolve({ cancelled: true }),
+      );
+      const f = await setupStandaloneAudio({ native: { request } });
+      const prepared = f.service.prepareAudioSampleSubmission({
+        adapterKey: 'TEXT_TO_AUDIO:minimax-speech:speech-2.8-hd:v1',
+        providerProfileId: speechId,
+        modelId: 'speech-2.8-hd',
+        parameters: {
+          text: '独立试听样本。',
+          voice_setting: { voice_id: 'sample-voice', speed: 1, pitch: 0 },
+        },
+      });
+      const completion = f.service
+        .confirmAudioSampleSubmission({
+          confirmationToken: prepared.confirmation.confirmationToken,
+          approved: true,
+        })
+        .catch((error: unknown) => error);
+      await expect.poll(() => Boolean(resolveSpeech)).toBe(true);
+      const stopping = f.service.cancelAll();
+      await expect
+        .poll(() => request.mock.calls.some(([method]) => method === 'provider.dubbing.cancel'))
+        .toBe(true);
+      f.projects.close();
+      f.projects.create(join(f.directory, 'second'), '第二项目');
+      resolveSpeech!({ relativePath: 'invalid', mime: 'audio/mpeg', sizeBytes: 0 });
+      await stopping;
+      expect(await completion).toMatchObject({ code: 'SUBMISSION_UNKNOWN' });
+      expect(f.service.listAudio()).toEqual([]);
+      f.projects.close();
+      f.projects.open(f.root);
+      expect(f.service.listAudio()).toEqual([]);
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.speech'),
+      ).toHaveLength(1);
     });
 
     it('keeps interrupted TTS submission unknown and refuses automatic paid retry', async () => {

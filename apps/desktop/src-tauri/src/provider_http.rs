@@ -197,15 +197,42 @@ pub(crate) fn assert_provider_output_host(host: &str) -> Result<(), String> {
     validate_provider_output_addresses(host, &addresses)
 }
 
+/// Custom Provider API domains may resolve to a local proxy's RFC 2544 fake-IP range.
+/// Other private, reserved, or literal-IP destinations remain blocked.
+pub(crate) fn assert_provider_api_host(host: &str) -> Result<(), String> {
+    let addresses = (host, 443)
+        .to_socket_addrs()
+        .map_err(|_| format!("Provider API hostname {host} could not be resolved"))?
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    validate_provider_api_addresses(host, &addresses)
+}
+
 fn validate_provider_output_addresses(host: &str, addresses: &[IpAddr]) -> Result<(), String> {
-    // An exception for named Provider output domains only. Direct requests to
-    // benchmark IPs, localhost, LAN addresses, or mixed unsafe answers stay blocked.
-    let named_domain = host.parse::<IpAddr>().is_err()
-        && host.contains('.')
-        && !host.split('.').any(str::is_empty)
-        && ![".local", ".localhost", ".lan", ".internal", ".home.arpa"]
+    validate_provider_addresses(host, addresses, "Provider output")
+}
+
+fn validate_provider_api_addresses(host: &str, addresses: &[IpAddr]) -> Result<(), String> {
+    if !is_named_provider_domain(host) {
+        let resolved = addresses
             .iter()
-            .any(|suffix| host.to_ascii_lowercase().ends_with(suffix));
+            .take(8)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Provider API host {host} must be a public named domain ({resolved})"
+        ));
+    }
+    validate_provider_addresses(host, addresses, "Provider API")
+}
+
+fn validate_provider_addresses(
+    host: &str,
+    addresses: &[IpAddr],
+    subject: &str,
+) -> Result<(), String> {
+    let named_domain = is_named_provider_domain(host);
     if !addresses.is_empty()
         && addresses.iter().all(|address| {
             is_public_address(address) || (named_domain && is_proxy_fake_ip(address))
@@ -220,8 +247,20 @@ fn validate_provider_output_addresses(host: &str, addresses: &[IpAddr]) -> Resul
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(
-        "Provider output host {host} is outside the supported network boundary ({resolved})"
+        "{subject} host {host} is outside the supported network boundary ({resolved})"
     ))
+}
+
+fn is_named_provider_domain(host: &str) -> bool {
+    host.parse::<IpAddr>().is_err()
+        && host.contains('.')
+        && !host.split('.').any(str::is_empty)
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        && ![".local", ".localhost", ".lan", ".internal", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.to_ascii_lowercase().ends_with(suffix))
 }
 
 fn is_proxy_fake_ip(address: &IpAddr) -> bool {
@@ -320,7 +359,34 @@ fn request_bytes_with_receive_timeout<F>(
 where
     F: FnOnce(&str) -> Result<request_guard::Permit, request_guard::AdmissionError>,
 {
+    request_bytes_with_content_type_and_receive_timeout(
+        request,
+        "application/json",
+        receive_timeout,
+        acquire,
+    )
+}
+
+fn request_bytes_with_content_type_and_receive_timeout<F>(
+    request: JsonHttpRequest<'_>,
+    content_type: &str,
+    receive_timeout: Duration,
+    acquire: F,
+) -> Result<RawHttpResponse, JsonHttpError>
+where
+    F: FnOnce(&str) -> Result<request_guard::Permit, request_guard::AdmissionError>,
+{
     validate_request(&request)?;
+    if content_type.is_empty()
+        || !content_type.is_ascii()
+        || content_type.contains(['\r', '\n'])
+        || content_type.len() > 128
+    {
+        return Err(JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Provider content type is invalid",
+        ));
+    }
     let receive_timeout_ms = i32::try_from(receive_timeout.as_millis())
         .ok()
         .filter(|value| (1..=600_000).contains(value))
@@ -333,13 +399,14 @@ where
     let origin = request_guard::origin_key(request.secure, request.host, request.port);
     let permit = acquire(&origin)
         .map_err(|error| JsonHttpError::new(JsonHttpErrorKind::Admission, error.to_string()))?;
-    let result = request_bytes_admitted(request, receive_timeout_ms);
+    let result = request_bytes_admitted(request, content_type, receive_timeout_ms);
     permit.finish(request_outcome(&result));
     result
 }
 
 fn request_bytes_admitted(
     request: JsonHttpRequest<'_>,
+    content_type: &str,
     receive_timeout_ms: i32,
 ) -> Result<RawHttpResponse, JsonHttpError> {
     let agent = wide("unicomp/0.1");
@@ -410,89 +477,92 @@ fn request_bytes_admitted(
     headers.extend(request.secret.encode_utf16());
     headers.extend("\r\n".encode_utf16());
     if request.body.is_some() {
-        headers.extend("Content-Type: application/json\r\n".encode_utf16());
+        headers.extend(format!("Content-Type: {content_type}\r\n").encode_utf16());
     }
-    let sent = unsafe {
-        WinHttpSendRequest(
-            native_request.0,
-            headers.as_ptr(),
-            headers.len() as u32,
-            request
-                .body
-                .map(|value| value.as_ptr().cast())
-                .unwrap_or(std::ptr::null()),
-            request.body.map_or(0, |value| value.len() as u32),
-            request.body.map_or(0, |value| value.len() as u32),
-            0,
-        )
-    };
-    headers.fill(0);
-    if sent == 0 {
-        return Err(winhttp_error("Provider request could not be sent"));
-    }
-    if unsafe { WinHttpReceiveResponse(native_request.0, std::ptr::null_mut()) } == 0 {
-        return Err(winhttp_error("Provider response could not be received"));
-    }
-
-    let mut status = 0_u32;
-    let mut status_size = std::mem::size_of::<u32>() as u32;
-    let mut header_index = 0_u32;
-    if unsafe {
-        WinHttpQueryHeaders(
-            native_request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            std::ptr::null(),
-            (&mut status as *mut u32).cast(),
-            &mut status_size,
-            &mut header_index,
-        )
-    } == 0
-    {
-        return Err(winhttp_error("Provider status could not be read"));
-    }
-
-    let retry_after = query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER);
-    let mut response = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 8192];
-        let mut read = 0_u32;
-        if unsafe {
-            WinHttpReadData(
+    let result = (|| {
+        let sent = unsafe {
+            WinHttpSendRequest(
                 native_request.0,
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
-                &mut read,
+                headers.as_ptr(),
+                headers.len() as u32,
+                request
+                    .body
+                    .map(|value| value.as_ptr().cast())
+                    .unwrap_or(std::ptr::null()),
+                request.body.map_or(0, |value| value.len() as u32),
+                request.body.map_or(0, |value| value.len() as u32),
+                0,
+            )
+        };
+        headers.fill(0);
+        if sent == 0 {
+            return Err(winhttp_error("Provider request could not be sent"));
+        }
+        if unsafe { WinHttpReceiveResponse(native_request.0, std::ptr::null_mut()) } == 0 {
+            return Err(winhttp_error("Provider response could not be received"));
+        }
+
+        let mut status = 0_u32;
+        let mut status_size = std::mem::size_of::<u32>() as u32;
+        let mut header_index = 0_u32;
+        if unsafe {
+            WinHttpQueryHeaders(
+                native_request.0,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status as *mut u32).cast(),
+                &mut status_size,
+                &mut header_index,
             )
         } == 0
         {
-            return Err(response_error(
-                winhttp_error("Provider response body could not be read"),
-                status,
-                retry_after.as_deref(),
-            ));
+            return Err(winhttp_error("Provider status could not be read"));
         }
-        if read == 0 {
-            break;
+
+        let retry_after = query_optional_header(native_request.0, WINHTTP_QUERY_RETRY_AFTER);
+        let mut response = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 8192];
+            let mut read = 0_u32;
+            if unsafe {
+                WinHttpReadData(
+                    native_request.0,
+                    chunk.as_mut_ptr().cast(),
+                    chunk.len() as u32,
+                    &mut read,
+                )
+            } == 0
+            {
+                return Err(response_error(
+                    winhttp_error("Provider response body could not be read"),
+                    status,
+                    retry_after.as_deref(),
+                ));
+            }
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read as usize]);
+            if response.len() > request.response_body_limit {
+                return Err(response_error(
+                    JsonHttpError::new(
+                        JsonHttpErrorKind::ResponseTooLarge,
+                        "Provider response exceeds the native transport limit",
+                    ),
+                    status,
+                    retry_after.as_deref(),
+                ));
+            }
         }
-        response.extend_from_slice(&chunk[..read as usize]);
-        if response.len() > request.response_body_limit {
-            return Err(response_error(
-                JsonHttpError::new(
-                    JsonHttpErrorKind::ResponseTooLarge,
-                    "Provider response exceeds the native transport limit",
-                ),
-                status,
-                retry_after.as_deref(),
-            ));
-        }
-    }
-    Ok(RawHttpResponse {
-        status,
-        body: response,
-        content_type: query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE),
-        location: query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION),
-        retry_after,
-    })
+        Ok(RawHttpResponse {
+            status,
+            body: response,
+            content_type: query_optional_header(native_request.0, WINHTTP_QUERY_CONTENT_TYPE),
+            location: query_optional_header(native_request.0, WINHTTP_QUERY_LOCATION),
+            retry_after,
+        })
+    })();
+    result.map_err(JsonHttpError::with_request_sent)
 }
 
 pub(crate) fn request_public_bytes(
@@ -1366,7 +1436,7 @@ pub(crate) fn query_optional_header(
 pub(crate) fn request_json(
     request: JsonHttpRequest<'_>,
 ) -> Result<JsonHttpResponse, JsonHttpError> {
-    parse_json_response(request_bytes(request)?)
+    parse_json_response(request_bytes(request)?).map_err(JsonHttpError::with_request_sent)
 }
 
 pub(crate) fn request_json_with_receive_timeout(
@@ -1378,6 +1448,33 @@ pub(crate) fn request_json_with_receive_timeout(
         receive_timeout,
         |origin| request_guard::acquire(origin, || false),
     )?)
+    .map_err(JsonHttpError::with_request_sent)
+}
+
+pub(crate) fn request_multipart_json_with_receive_timeout(
+    request: JsonHttpRequest<'_>,
+    receive_timeout: Duration,
+    boundary: &str,
+) -> Result<JsonHttpResponse, JsonHttpError> {
+    if boundary.is_empty()
+        || boundary.len() > 70
+        || !boundary
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(JsonHttpError::new(
+            JsonHttpErrorKind::InvalidRequest,
+            "Provider multipart boundary is invalid",
+        ));
+    }
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    parse_json_response(request_bytes_with_content_type_and_receive_timeout(
+        request,
+        &content_type,
+        receive_timeout,
+        |origin| request_guard::acquire(origin, || false),
+    )?)
+    .map_err(JsonHttpError::with_request_sent)
 }
 
 fn parse_json_response(response: RawHttpResponse) -> Result<JsonHttpResponse, JsonHttpError> {
@@ -1896,6 +1993,84 @@ mod tests {
         assert_eq!(response.body["data"][0]["id"], "mock-model");
     }
 
+    #[test]
+    fn sends_multipart_video_requests_with_the_requested_boundary() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider should bind");
+        let port = listener.local_addr().expect("mock address").port();
+        let body = b"--fixture-boundary\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na scene\r\n--fixture-boundary--\r\n";
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock request should connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("mock timeout should be configured");
+            let mut bytes = Vec::new();
+            let body_start = loop {
+                if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let mut chunk = [0_u8; 4096];
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("mock request should be readable");
+                assert!(read > 0);
+                bytes.extend_from_slice(&chunk[..read]);
+            };
+            let headers = String::from_utf8_lossy(&bytes[..body_start]);
+            assert!(headers.starts_with("POST /v1/videos HTTP/1.1"));
+            assert!(headers.contains("Authorization: Bearer local-test-key"));
+            assert!(
+                headers.contains("Content-Type: multipart/form-data; boundary=fixture-boundary")
+            );
+            let content_length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse().ok())
+                })
+                .expect("multipart request should set its length");
+            while bytes.len() < body_start + content_length {
+                let mut chunk = [0_u8; 4096];
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("request body should be readable");
+                assert!(read > 0);
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            let received_body = &bytes[body_start..body_start + content_length];
+            assert_eq!(received_body, body);
+            let response = r#"{"id":"video-task"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .expect("mock response should be written");
+        });
+
+        let response = super::request_multipart_json_with_receive_timeout(
+            JsonHttpRequest {
+                host: "127.0.0.1",
+                port,
+                secure: false,
+                method: "POST",
+                path: "/v1/videos",
+                authorization_scheme: "Bearer",
+                accept: "application/json",
+                secret: "local-test-key",
+                body: Some(body),
+                request_body_limit: 1024,
+                response_body_limit: 1024,
+            },
+            Duration::from_secs(5),
+            "fixture-boundary",
+        )
+        .expect("multipart provider request should succeed");
+        server.join().expect("mock provider should finish");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["id"], "video-task");
+    }
+
     fn assert_slow_submission_response(path: &'static str, response_body: &'static str) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock image provider should bind");
         let port = listener.local_addr().unwrap().port();
@@ -2139,6 +2314,39 @@ mod tests {
             &["8.8.8.8".parse().unwrap()]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn configured_provider_api_domains_support_fake_ip_but_reject_private_and_literal_hosts() {
+        let fake = "198.18.0.95".parse::<IpAddr>().unwrap();
+        assert!(super::validate_provider_api_addresses("api.ergouzi.life", &[fake]).is_ok());
+        assert!(super::validate_provider_api_addresses(
+            "api.ergouzi.life",
+            &["8.8.8.8".parse().unwrap()]
+        )
+        .is_ok());
+
+        for (host, address) in [
+            ("api.ergouzi.life", "127.0.0.1"),
+            ("api.ergouzi.life", "192.168.1.1"),
+            ("api.ergouzi.life", "10.0.0.1"),
+            ("api.ergouzi.life", "169.254.1.1"),
+            ("localhost", "198.18.0.95"),
+            ("api.local", "198.18.0.95"),
+            ("198.18.0.95", "198.18.0.95"),
+            ("8.8.8.8", "8.8.8.8"),
+        ] {
+            assert!(
+                super::validate_provider_api_addresses(host, &[address.parse().unwrap()]).is_err(),
+                "{host} -> {address}"
+            );
+        }
+        assert!(super::validate_provider_api_addresses(
+            "api.ergouzi.life",
+            &[fake, "192.168.1.1".parse().unwrap()]
+        )
+        .is_err());
+        assert!(super::validate_provider_api_addresses("api.ergouzi.life", &[]).is_err());
     }
 
     #[test]

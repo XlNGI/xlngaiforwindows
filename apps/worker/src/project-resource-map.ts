@@ -8,9 +8,25 @@ import type {
 import type { OpenProject } from '@ai-video/domain';
 
 type Workspace = ProjectStructureResource['locator']['workspace'];
+export interface ResourceMapPageOptions {
+  workspace?: string;
+  kind?: string;
+  parentId?: string;
+  query?: string;
+  offset?: number;
+  limit?: number;
+  expectedRevision?: string;
+}
+interface ResourceMapResult extends ProjectStructureResult {
+  offset?: number;
+  limit?: number;
+  totalResources?: number;
+  nextOffset?: number;
+  counts?: Record<string, number>;
+}
 const WORKSPACES: Array<[Workspace, string]> = [
   ['novel', '小说（章节、小说大纲与设定资料）'],
-  ['documents', '剧本（短剧大纲、计划与笔记）'],
+  ['documents', '剧本（短剧大纲、计划、约束与笔记）'],
   ['characters', '角色、场景与道具（制作资料）'],
   ['shots', '场次与镜头'],
   ['assets', '素材库'],
@@ -124,7 +140,8 @@ export function compileProjectResourceMap(
   database: Database.Database,
   project: OpenProject,
   includeArchived = false,
-): ProjectStructureResult {
+  page?: ResourceMapPageOptions,
+): ResourceMapResult {
   const readDocumentIds = (value: string | null | undefined): string[] | undefined => {
     if (!value) return undefined;
     try {
@@ -141,11 +158,11 @@ export function compileProjectResourceMap(
   const resources = WORKSPACES.map(([workspace]) => workspaceResource(workspace));
   const rows = database
     .prepare(
-      `${DOCUMENT_QUERY} ${includeArchived ? '' : "AND d.lifecycle_status = 'active' AND (b.status IS NULL OR b.status != 'archived') AND (c.lifecycle_status IS NULL OR c.lifecycle_status != 'archived')"} ORDER BY d.updated_at DESC, d.id LIMIT 101`,
+      `${DOCUMENT_QUERY} ${includeArchived ? '' : "AND d.lifecycle_status = 'active' AND (b.status IS NULL OR b.status != 'archived') AND (c.lifecycle_status IS NULL OR c.lifecycle_status != 'archived') AND NOT EXISTS (SELECT 1 FROM shots JOIN scenes ON scenes.id=shots.scene_id WHERE shots.document_id=d.id AND (shots.archived_at IS NOT NULL OR scenes.archived_at IS NOT NULL))"} ORDER BY d.updated_at DESC, d.id ${page ? '' : 'LIMIT 101'}`,
     )
     .all(project.id) as DocumentRow[];
   let truncated = rows.length > 100;
-  const documents = rows.slice(0, 100).map(documentResource);
+  const documents = (page ? rows : rows.slice(0, 100)).map(documentResource);
   resources.push(...documents);
   const entityQueries: Array<[ProjectStructureResource['kind'], Workspace, string]> = [
     [
@@ -157,17 +174,19 @@ export function compileProjectResourceMap(
       'scene',
       'shots',
       `SELECT id, title, scene_document_id AS sceneDocumentId, row_version AS rowVersion,
+        CASE WHEN archived_at IS NULL THEN 'active' ELSE 'archived' END AS lifecycleStatus,
         json_extract(authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
-       FROM scenes WHERE project_id = ? ORDER BY position, id`,
+       FROM scenes WHERE project_id = ? ${includeArchived ? '' : 'AND archived_at IS NULL'} ORDER BY position, id`,
     ],
     [
       'shot',
       'shots',
       `SELECT shots.id, shots.title, shots.scene_id AS sceneId,
+        CASE WHEN shots.archived_at IS NULL AND scenes.archived_at IS NULL THEN 'active' ELSE 'archived' END AS lifecycleStatus,
         scenes.scene_document_id AS sceneDocumentId, shots.row_version AS rowVersion,
         json_extract(scenes.authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
        FROM shots JOIN scenes ON scenes.id = shots.scene_id
-       WHERE scenes.project_id = ? ORDER BY scenes.position, shots.position, shots.id`,
+       WHERE scenes.project_id = ? ${includeArchived ? '' : 'AND scenes.archived_at IS NULL AND shots.archived_at IS NULL'} ORDER BY scenes.position, shots.position, shots.id`,
     ],
     [
       'asset',
@@ -181,22 +200,26 @@ export function compileProjectResourceMap(
     ],
   ];
   for (const [kind, workspace, query] of entityQueries) {
-    const entries = database.prepare(`${query} LIMIT 21`).all(project.id) as Array<{
+    const entries = database
+      .prepare(`${query} ${page ? '' : 'LIMIT 21'}`)
+      .all(project.id) as Array<{
       id: string;
       title: string;
       rowVersion?: number;
       sceneId?: string;
       sceneDocumentId?: string;
       sceneDocumentIdsJson?: string | null;
+      lifecycleStatus?: 'active' | 'archived';
     }>;
     truncated ||= entries.length > 20;
     resources.push(
-      ...entries.slice(0, 20).map((entry): ProjectStructureResource => {
+      ...(page ? entries : entries.slice(0, 20)).map((entry): ProjectStructureResource => {
         const id = `${kind}:${entry.id}`;
         return {
           id,
           kind,
           title: entry.title,
+          ...(entry.lifecycleStatus ? { lifecycleStatus: entry.lifecycleStatus } : {}),
           parentId: entry.sceneId ? `scene:${entry.sceneId}` : `workspace:${workspace}`,
           ...(entry.rowVersion !== undefined ? { rowVersion: entry.rowVersion } : {}),
           ...(readDocumentIds(entry.sceneDocumentIdsJson)
@@ -218,7 +241,7 @@ export function compileProjectResourceMap(
   }
   // Bound headings globally as well as sources so the map fits the tool result budget.
   for (const document of documents) {
-    if (resources.length >= 120) {
+    if (!page && resources.length >= 120) {
       truncated = true;
       break;
     }
@@ -226,11 +249,20 @@ export function compileProjectResourceMap(
     const nodes = database
       .prepare(
         `SELECT id, document_id, version_id, node_kind, title, path_json FROM project_structure_nodes
-      WHERE project_id = ? AND document_id = ? AND version_id = ? ORDER BY ordinal LIMIT ?`,
+      WHERE project_id = ? AND document_id = ? AND version_id = ? ORDER BY ordinal, id ${page ? '' : 'LIMIT ?'}`,
       )
-      .all(project.id, document.documentId, document.versionId ?? null, remaining + 1) as NodeRow[];
+      .all(
+        ...[
+          project.id,
+          document.documentId,
+          document.versionId ?? null,
+          ...(!page ? [remaining + 1] : []),
+        ],
+      ) as NodeRow[];
     truncated ||= nodes.length > remaining;
-    resources.push(...nodes.slice(0, remaining).map((node) => nodeResource(node, document)));
+    resources.push(
+      ...(page ? nodes : nodes.slice(0, remaining)).map((node) => nodeResource(node, document)),
+    );
   }
   const digest = createHash('sha256').update(project.id);
   // The preview can be truncated; revision checking must still cover omitted resources.
@@ -240,6 +272,49 @@ export function compileProjectResourceMap(
     for (const row of database.prepare(query).iterate(project.id))
       digest.update(JSON.stringify(row));
   const revision = digest.digest('hex');
+  if (page) {
+    const offset = page.offset ?? 0;
+    const limit = page.limit ?? 20;
+    if (offset > 0 && !page.expectedRevision)
+      throw new Error('expectedRevision is required to continue a project resource page.');
+    if (page.expectedRevision && page.expectedRevision !== revision)
+      throw new Error('Project resource revision changed; restart the query from offset=0.');
+    const query = page.query?.toLocaleLowerCase('zh-CN');
+    const matches = resources.filter(
+      (resource) =>
+        (!page.workspace || resource.locator.workspace === page.workspace) &&
+        (!page.kind || resource.kind === page.kind) &&
+        (!page.parentId || resource.parentId === page.parentId) &&
+        (!query || resource.title.toLocaleLowerCase('zh-CN').includes(query)),
+    );
+    const selected: ProjectStructureResource[] = [];
+    let bytes = 2;
+    for (const resource of matches.slice(offset, offset + limit)) {
+      const entryBytes =
+        Buffer.byteLength(JSON.stringify(resource), 'utf8') + (selected.length ? 1 : 0);
+      if (bytes + entryBytes > 8000 && selected.length) break;
+      // A single unusually large locator must remain intact and reachable.
+      selected.push(resource);
+      bytes += entryBytes;
+    }
+    const nextOffset = offset + selected.length;
+    return {
+      version: 1,
+      projectId: project.id,
+      projectName: project.name,
+      revision,
+      resources: selected,
+      offset,
+      limit,
+      totalResources: matches.length,
+      counts: resources.reduce<Record<string, number>>((counts, resource) => {
+        counts[resource.kind] = (counts[resource.kind] ?? 0) + 1;
+        return counts;
+      }, {}),
+      truncated: nextOffset < matches.length,
+      ...(nextOffset < matches.length ? { nextOffset } : {}),
+    };
+  }
   while (
     resources.length > WORKSPACES.length &&
     Buffer.byteLength(JSON.stringify(resources), 'utf8') > 30_000
@@ -345,7 +420,9 @@ export function resolveWriteResource(
     args.expectedRevision !== undefined &&
     args.expectedRevision !== compileProjectResourceMap(database, project, allowArchived).revision
   )
-    throw new Error('Project resource revision is stale. Retrieve project.structure.get.');
+    throw new Error(
+      'Project resource revision is stale. expectedRevision must equal resourceMap.revision from project.structure.get, never structure.revision. No write occurred. Read current metadata and decide whether the intended operation still applies; do not automatically overwrite changed objects.',
+    );
   for (const [argument, actual] of [
     ['documentId', resource.documentId],
     ['versionId', resource.versionId],

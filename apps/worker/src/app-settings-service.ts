@@ -92,6 +92,7 @@ export class ProviderProfileValidationError extends Error {}
 export class AdapterSchemaValidationError extends Error {}
 
 export interface ResolvedLlmSelection {
+  modelCapabilities?: import('@ai-video/contracts').ModelCapabilities;
   contextWindowTokens?: number;
   inferenceSettings?: import('@ai-video/contracts').LlmInferenceSettings;
   providerProfileId: string;
@@ -644,7 +645,10 @@ export class AppSettingsService {
               ]),
             )
           : official;
-        const capabilitiesJson = JSON.stringify(capabilities);
+        const capabilitiesJson = JSON.stringify({
+          ...capabilities,
+          ...(existing.contextLimits ? { contextLimits: existing.contextLimits } : {}),
+        });
         if (
           (officialBinding && record.parameterTemplateKey) ||
           record.capabilitiesJson !== capabilitiesJson
@@ -673,11 +677,20 @@ export class AppSettingsService {
         if (hasAnyModelCapability(capabilities)) {
           const updated = {
             ...record,
-            capabilitiesJson: JSON.stringify(capabilities),
+            capabilitiesJson: JSON.stringify({
+              ...capabilities,
+              ...(model.capabilities.contextLimits
+                ? { contextLimits: model.capabilities.contextLimits }
+                : {}),
+            }),
             updatedAt: this.now(),
           };
           repository.save(updated);
-          return { ...model, capabilities, updatedAt: updated.updatedAt };
+          return {
+            ...model,
+            capabilities: JSON.parse(updated.capabilitiesJson) as ProviderModelCapabilities,
+            updatedAt: updated.updatedAt,
+          };
         }
       }
       return model;
@@ -694,6 +707,8 @@ export class AppSettingsService {
       );
     }
     const requestedCapabilities = normalizeModelCapabilities(params.capabilities);
+    if (requestedCapabilities.contextLimits)
+      requestedCapabilities.contextLimits.capabilitySource = 'manual_config';
     const capabilities =
       params.enabled &&
       !hasAnyModelCapability(requestedCapabilities) &&
@@ -742,6 +757,21 @@ export class AppSettingsService {
       throw new Error('Provider model was not found.');
     }
     const requestedCapabilities = normalizeModelCapabilities(params.capabilities);
+    const previousLimits = (JSON.parse(model.capabilitiesJson) as ProviderModelCapabilities)
+      .contextLimits;
+    if (
+      requestedCapabilities.contextLimits &&
+      (
+        [
+          'contextWindow',
+          'maxInputTokens',
+          'maxOutputTokens',
+          'tokenizer',
+          'supportsCompaction',
+        ] as const
+      ).some((key) => requestedCapabilities.contextLimits![key] !== previousLimits?.[key])
+    )
+      requestedCapabilities.contextLimits.capabilitySource = 'manual_config';
     const capabilities =
       params.enabled && !hasAnyModelCapability(requestedCapabilities) && model.contractId
         ? inferContractCapabilities(profile.providerType, model.remoteModelId)
@@ -925,6 +955,19 @@ export class AppSettingsService {
         ? this.getModelContract(model.contractId, model.contractRevision)
         : null;
     const inferenceSettings = resolveDeclaredInferenceSettings(profile.protocol, contract);
+    const modelCapabilities = model.capabilities.contextLimits
+      ? { ...validateContextLimits(model.capabilities.contextLimits), modelId: model.id }
+      : contract &&
+          ['verified', 'enabled'].includes(contract.status) &&
+          contract.capabilities.maxContextTokens
+        ? {
+            modelId: model.id,
+            contextWindow: contract.capabilities.maxContextTokens,
+            maxInputTokens: contract.capabilities.maxInputTokens,
+            maxOutputTokens: contract.capabilities.maxOutputTokens,
+            capabilitySource: 'model_registry' as const,
+          }
+        : conservativeModelCapabilities(model.id);
     return {
       providerProfileId: profile.id,
       providerName: profile.name,
@@ -937,14 +980,9 @@ export class AppSettingsService {
       protocol: profile.protocol,
       baseUrl: profile.baseUrl,
       pricingSnapshot: toPricingSnapshot(repositories.modelPricing.get(profile.id, model.id)),
+      modelCapabilities,
       ...(inferenceSettings ? { inferenceSettings } : {}),
-      contextWindowTokens:
-        contract &&
-        ['verified', 'enabled'].includes(contract.status) &&
-        Number.isSafeInteger(contract.capabilities.maxContextTokens) &&
-        (contract.capabilities.maxContextTokens ?? 0) > 0
-          ? contract.capabilities.maxContextTokens
-          : undefined,
+      contextWindowTokens: modelCapabilities.contextWindow,
     };
   }
 
@@ -1147,22 +1185,24 @@ export class AppSettingsService {
     const seen = new Set(remoteModels.map((model) => model.id));
     for (const remote of remoteModels) {
       const existing = repository.getByRemoteId(profileId, remote.id);
+      const capabilities = existing?.capabilitiesJson
+        ? normalizeSyncedCapabilities(
+            existing.capabilitiesJson,
+            providerType,
+            remote.id,
+            existing.contractId,
+            existing.contractRevision,
+          )
+        : inferContractCapabilities(providerType, remote.id);
+      // A provider refresh must never replace an explicit per-model override.
+      if (remote.contextLimits && capabilities.contextLimits?.capabilitySource !== 'manual_config')
+        capabilities.contextLimits = remote.contextLimits;
       repository.save({
         id: existing?.id ?? randomUUID(),
         providerProfileId: profileId,
         remoteModelId: remote.id,
         displayName: remote.displayName ?? existing?.displayName ?? remote.id,
-        capabilitiesJson: JSON.stringify(
-          existing?.capabilitiesJson
-            ? normalizeSyncedCapabilities(
-                existing.capabilitiesJson,
-                providerType,
-                remote.id,
-                existing.contractId,
-                existing.contractRevision,
-              )
-            : inferContractCapabilities(providerType, remote.id),
-        ),
+        capabilitiesJson: JSON.stringify(capabilities),
         source:
           existing?.source === 'manual' || existing?.source === 'built-in'
             ? existing.source
@@ -1306,6 +1346,14 @@ function normalizeRemoteModels(models: RemoteProviderModelInfo[]): RemoteProvide
     normalized.set(id, {
       id,
       displayName: model.displayName ? normalizeModelName(model.displayName) : undefined,
+      ...(model.contextLimits
+        ? {
+            contextLimits: validateContextLimits({
+              ...model.contextLimits,
+              capabilitySource: 'provider',
+            }),
+          }
+        : {}),
     });
   }
   return [...normalized.values()];
@@ -1353,6 +1401,8 @@ function normalizeModelCapabilities(
   if (Object.values(normalized).some((value) => typeof value !== 'boolean')) {
     throw new ProviderProfileValidationError('Every model capability must be a boolean.');
   }
+  if (capabilities.contextLimits)
+    normalized.contextLimits = validateContextLimits(capabilities.contextLimits);
   return normalized;
 }
 
@@ -1437,6 +1487,7 @@ function assertOfficialMediaConfiguration(
     );
   const official = inferContractCapabilities(providerType, remoteModelId);
   for (const key of Object.keys(capabilities) as (keyof ProviderModelCapabilities)[]) {
+    if (key === 'contextLimits') continue;
     if (capabilities[key] && !official[key])
       throw new ProviderProfileValidationError(
         'Model capabilities cannot exceed the official contract.',
@@ -1582,3 +1633,4 @@ export function toUsageIndexRecord(
     createdAt: attempt.startedAt,
   };
 }
+import { conservativeModelCapabilities, validateContextLimits } from './model-context-policy.js';

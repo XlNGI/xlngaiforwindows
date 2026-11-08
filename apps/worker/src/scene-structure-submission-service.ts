@@ -13,6 +13,10 @@ import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { requireProductionCharacters } from './scene-cast-binding.js';
 import { validateProductionIRReferences } from './project-ir-validation.js';
 import {
+  isScriptToMediaTask,
+  requireScriptToMediaShotReferences,
+} from './production-skill-validation.js';
+import {
   ProductionService,
   summarizeProductionReadiness,
   summarizeProductionNotices,
@@ -70,6 +74,7 @@ export class SceneStructureSubmissionService {
         };
         type Stage = {
           id: string;
+          execution_key: string;
           title: string;
           row_version: number;
           scenes_json: string;
@@ -77,15 +82,46 @@ export class SceneStructureSubmissionService {
         };
         const now = new Date().toISOString();
         let row: Stage | undefined;
-        if (args.operation === 'get' && args.stageId === undefined) {
-          const stages = database
+        const listStages = () => {
+          const pageOffset = args.pageOffset ?? 0;
+          const pageSize = args.pageSize ?? 20;
+          if (
+            !Number.isSafeInteger(pageOffset) ||
+            (pageOffset as number) < 0 ||
+            !Number.isSafeInteger(pageSize) ||
+            (pageSize as number) < 1 ||
+            (pageSize as number) > 100
+          )
+            throw new Error('Stage pageOffset/pageSize is invalid.');
+          const totalStages = (
+            database
+              .prepare(
+                'SELECT COUNT(*) AS value FROM scene_structure_stages WHERE project_id=? AND conversation_id=?',
+              )
+              .get(project.id, identity.conversationId) as { value: number }
+          ).value;
+          const stageRows = database
             .prepare(
-              `SELECT id AS stageId,title,row_version AS rowVersion,change_set_id AS changeSetId
-          FROM scene_structure_stages WHERE project_id=? AND conversation_id=? AND change_set_id IS NULL ORDER BY updated_at DESC LIMIT 20`,
+              `SELECT id AS stageId,execution_key AS executionKey,title,row_version AS rowVersion,change_set_id AS changeSetId,
+                (change_set_id IS NOT NULL) AS complete
+          FROM scene_structure_stages WHERE project_id=? AND conversation_id=? ORDER BY created_at,id LIMIT ? OFFSET ?`,
             )
-            .all(project.id, identity.conversationId);
-          return { status: 'scene_structure_stages', stages, applied: false };
-        }
+            .all(project.id, identity.conversationId, pageSize, pageOffset) as Array<{
+            complete: number;
+            [key: string]: unknown;
+          }>;
+          const stages = stageRows.map((stage) => ({ ...stage, complete: stage.complete !== 0 }));
+          const nextPageOffset = (pageOffset as number) + stages.length;
+          return {
+            status: 'scene_structure_stages',
+            stages,
+            totalStages,
+            pageOffset,
+            ...(nextPageOffset < totalStages ? { nextPageOffset } : {}),
+            applied: false,
+          };
+        };
+        if (args.operation === 'get' && args.stageId === undefined) return listStages();
         if (args.operation === 'begin') {
           if (
             typeof args.executionKey !== 'string' ||
@@ -95,7 +131,7 @@ export class SceneStructureSubmissionService {
             throw new Error('begin requires executionKey, episodeTitle and sceneShotCounts.');
           const counts = args.sceneShotCounts as number[];
           if (counts.reduce((total, count) => total + count + 1, 0) > 100)
-            throw new Error('sceneShotCounts exceeds 100 total scene + shot items.');
+            throw new Error('One stage page supports at most 100 combined scene + shot items.');
           row = database
             .prepare(
               'SELECT * FROM scene_structure_stages WHERE project_id=? AND conversation_id=? AND execution_key=?',
@@ -131,6 +167,7 @@ export class SceneStructureSubmissionService {
               );
             row = {
               id,
+              execution_key: args.executionKey,
               title: args.episodeTitle,
               row_version: 0,
               scenes_json: JSON.stringify(parts),
@@ -144,11 +181,24 @@ export class SceneStructureSubmissionService {
             )
             .get(args.stageId, project.id, identity.conversationId) as Stage | undefined;
         }
-        if (!row) throw new Error('Stage not found in this conversation.');
-        // Reserve only the existing hard limit; larger plans resume in another turn.
-        database
-          .prepare('UPDATE agent_tasks SET tool_call_limit=32 WHERE id=? AND tool_call_limit<32')
-          .run(identity.taskId);
+        if (!row)
+          return {
+            version: 1,
+            status: 'rejected',
+            error: {
+              code: 'AGENT_TOOL_ARGUMENTS_INVALID',
+              message:
+                'Stage not found in this conversation. No write occurred. Select the matching stage from recovery.stages, copy its exact stageId, then get current progress and rowVersion. Do not use the task checkpoint ID as a scene stage ID or recreate saved work.',
+              retryable: true,
+            },
+            recovery: {
+              ...listStages(),
+              read: {
+                toolName: 'scene.structure.stage',
+                arguments: { operation: 'get', resourceId: 'workspace:shots' },
+              },
+            },
+          };
         const parts = JSON.parse(row.scenes_json) as Part[];
         const describe = (savedSceneThisCall = false) => {
           const changes = new ChangeSetService(this.projects);
@@ -194,9 +244,6 @@ export class SceneStructureSubmissionService {
                   ];
             }),
           );
-          const budget = database
-            .prepare('SELECT tool_call_count,tool_call_limit FROM agent_tasks WHERE id=?')
-            .get(identity.taskId) as { tool_call_count: number; tool_call_limit: number };
           const nextSceneIndex = parts.findIndex((part) => !part.saved);
           const selected = typeof args.sceneIndex === 'number' ? parts[args.sceneIndex] : undefined;
           return {
@@ -210,7 +257,10 @@ export class SceneStructureSubmissionService {
                   ? 'scene_structure_partially_saved'
                   : 'scene_structure_staging',
             complete,
+            persistenceInstruction:
+              'setupSaved is a legacy alias for setupStaged: only the scene header is staged. saved=true and sceneId prove a committed scene with its shots. complete covers this stage only; readiness checks structure, not source fidelity, dialogue completeness or the whole task.',
             stageId: row.id,
+            executionKey: row.execution_key,
             stageOperation: args.operation,
             savedSceneThisCall,
             rowVersion: row.row_version,
@@ -226,7 +276,6 @@ export class SceneStructureSubmissionService {
               ? [saved.id]
               : parts.flatMap((part) => (part.saved ? [part.saved.changeSetId] : [])),
             ...(sceneIds.length ? this.readiness(sceneIds) : {}),
-            businessCallsRemaining: budget.tool_call_limit - budget.tool_call_count,
             minimumRemainingWrites: parts.reduce((sum, part) => {
               if (part.saved) return sum;
               const missingShots = part.shots.filter((shot) => !shot).length;
@@ -236,15 +285,23 @@ export class SceneStructureSubmissionService {
             nextSceneIndex: complete ? undefined : nextSceneIndex,
             referenceChanges: referenceChanges.slice(0, 5),
             referenceChangesTruncated: referenceChanges.length > 5,
+            referenceScope: 'shot.authoringIR.references',
+            bindingInstruction:
+              'Each current saved shot owns its document references. Empty staged scene-header metadata is not evidence of missing shot references. Stage data are historical setup, not current shot state. Use production.read on the returned real shotIds, view=authoring, before editing an existing shot with current CAS.',
             ...(selected
               ? {
                   sources: selected.sources ?? [],
-                  bindings: selected.scene
+                  sourcesScope: 'staged-scene-header',
+                  // Only pre-IR stages expose the old scene binding contract.
+                  // Modern shot references must not be reported as empty here.
+                  ...(selected.scene && !selected.scene.authoringIR
                     ? {
-                        sceneDocumentId: selected.scene.sceneDocumentId,
-                        characterDocumentIds: selected.scene.characterDocumentIds,
+                        bindings: {
+                          sceneDocumentId: selected.scene.sceneDocumentId,
+                          characterDocumentIds: selected.scene.characterDocumentIds,
+                        },
                       }
-                    : undefined,
+                    : {}),
                   previousSaved: parts
                     .slice(0, args.sceneIndex as number)
                     .filter((part) => part.saved)
@@ -254,6 +311,8 @@ export class SceneStructureSubmissionService {
             scenes: parts.map((part, index) => ({
               index,
               setupSaved: Boolean(part.scene),
+              setupStaged: Boolean(part.scene),
+              saved: Boolean(part.saved),
               expectedShots: part.count,
               missingShots: part.shots.flatMap((shot, offset) => (shot ? [] : [offset])),
               sceneId: part.saved?.sceneId,
@@ -347,6 +406,13 @@ export class SceneStructureSubmissionService {
                 scenes: [{ ...part.scene, shots: args.shots }],
               }),
             );
+            if (isScriptToMediaTask(database, identity.taskId))
+              for (const stagedScene of staged.scenes)
+                for (const [shotIndex, shot] of stagedScene.shots.entries())
+                  requireScriptToMediaShotReferences(
+                    shot.authoringIR,
+                    `scene ${String(args.sceneIndex)} shot ${offset + shotIndex}`,
+                  );
             validateEpisodeReferences(database, project.id, staged);
             for (const stagedScene of staged.scenes) {
               if (stagedScene.authoringIR)
@@ -495,9 +561,40 @@ export class SceneStructureSubmissionService {
         const structure = parseEpisodeStructureArguments(
           JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
         );
+        if (isScriptToMediaTask(database, identity.taskId))
+          for (const [sceneIndex, scene] of structure.scenes.entries())
+            for (const [shotIndex, shot] of scene.shots.entries())
+              requireScriptToMediaShotReferences(
+                shot.authoringIR,
+                `scene ${sceneIndex} shot ${shotIndex}`,
+              );
+        // Only an explicit binding-only legacy edit uses scene-level bindings.
+        // Modern IR owns its prompt and shot references; compatibility metadata
+        // must not activate the old all-or-nothing binding contract.
+        const legacyBindingEdits = new Set(structure.scenes.filter((scene) => !scene.authoringIR));
         validateEpisodeReferences(database, project.id, structure);
         const items: AgentChangeSetItemDraft[] = [];
         for (const scene of structure.scenes) {
+          // Normalize compatible IDs into the one IR binding path. Explicit
+          // modern IR scopes win; binding-only edits override inherited scopes.
+          if (scene.authoringIR) {
+            const references = scene.authoringIR.references ?? {};
+            const legacyEdit = legacyBindingEdits.has(scene);
+            scene.authoringIR = {
+              ...scene.authoringIR,
+              references: {
+                ...references,
+                ...(scene.characterDocumentIds !== undefined &&
+                (legacyEdit || references.characterDocumentIds === undefined)
+                  ? { characterDocumentIds: scene.characterDocumentIds }
+                  : {}),
+                ...(scene.sceneDocumentId !== undefined &&
+                (legacyEdit || references.sceneDocumentIds === undefined)
+                  ? { sceneDocumentIds: scene.sceneDocumentId ? [scene.sceneDocumentId] : [] }
+                  : {}),
+              },
+            };
+          }
           const parentItemOrdinal = items.length;
           items.push({
             entityType: 'scene',
@@ -506,9 +603,15 @@ export class SceneStructureSubmissionService {
               ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
               : {}),
             title: scene.title,
+            // A setting locator is valid independently of legacy cast/prompt
+            // edits and remains the fallback when IR omits scene references.
             sceneDocumentId: scene.sceneDocumentId,
-            videoPrompt: scene.videoPrompt,
-            characterDocumentIds: scene.characterDocumentIds,
+            ...(legacyBindingEdits.has(scene)
+              ? {
+                  videoPrompt: scene.videoPrompt,
+                  characterDocumentIds: scene.characterDocumentIds,
+                }
+              : {}),
             authoringIR: scene.authoringIR,
           });
           for (const shot of scene.shots)

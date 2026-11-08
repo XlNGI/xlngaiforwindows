@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import {
+  productionShotReferenceIds,
+  productionFrameInputConflict,
   seedProductionInputs,
   validateProductionAuthoringIR,
-  type AdapterParameters,
-  type MediaInputReferenceV1,
   type ProductionAuthoringIR,
   type ProductionCompileParams,
   type ProductionCompileResult,
@@ -15,10 +15,11 @@ import {
   type ProductionIssue,
   type ProductionReadResult,
   type ProductionSegment,
-  type ProductionSource,
   type ProductionTarget,
   type ProductionTimelineEntry,
+  type SceneCharacterBindingInfo,
   type SceneInfo,
+  type SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
 import {
   compileProductionParameters,
@@ -27,6 +28,7 @@ import {
   parseProductionDefaults,
 } from '@ai-video/generation-adapters';
 import { createRepositories, readShotContinuity } from '@ai-video/persistence';
+import { continuityReferenceImageIds, continuitySourceImageIds } from '@ai-video/contracts';
 import { ContentService } from './content-service.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { resolveSceneMedia } from './scene-media-service.js';
@@ -44,7 +46,6 @@ const hash = (value: unknown) =>
       ),
     )
     .digest('hex');
-const targetKey = (target: ProductionTarget) => `${target.kind}:${target.id}`;
 
 export function summarizeProductionReadiness(issues: ProductionIssue[]) {
   return {
@@ -113,6 +114,9 @@ export class ProductionService {
   }
 
   queryVersion(target: ProductionTarget): string {
+    // Version the data this target actually exposes. A shot read does not
+    // contain sibling bodies; their edits must not expire this shot's pages.
+    // Semantic/continuity review has its own explicit dependency graph.
     const read = this.read(target);
     return this.projects.access(false, (db, project) => {
       const content = new ContentService(this.projects);
@@ -124,7 +128,11 @@ export class ProductionService {
                 .listScenes()
                 .find((item) => item.id === this.findShot(content, target.id).sceneId)
             : undefined;
-      const shots = scene ? content.listShots(scene.id) : [];
+      const shots = scene
+        ? content
+            .listShots(scene.id)
+            .filter((shot) => target.kind === 'scene' || shot.id === target.id)
+        : [];
       const ids = new Set<string>();
       const collect = (ir?: ProductionAuthoringIR) => {
         for (const field of [
@@ -166,7 +174,7 @@ export class ProductionService {
         const shot = this.findShot(content, target.id);
         currentText = shot.authoringIR?.prompt ?? '';
         scene = content.listScenes().find((item) => item.id === shot.sceneId);
-        shots = content.listShots(shot.sceneId);
+        shots = [shot];
       } else {
         currentText = content.getDocument(target.id).currentVersion?.contentMarkdown ?? '';
       }
@@ -302,6 +310,7 @@ export class ProductionService {
         shotId: shot.id,
         title: shot.title,
         estimatedDurationSeconds: shot.authoringIR?.timing?.estimatedDurationSeconds,
+        ...(shot.authoringIR?.timing ? { timing: shot.authoringIR.timing } : {}),
         prompt: shot.authoringIR?.prompt ?? '',
       }));
       let cursor = 0;
@@ -355,7 +364,7 @@ export class ProductionService {
       const content = new ContentService(this.projects);
       let materialReferences: Array<{ documentId: string; role: 'scene' | 'prop' }> = [];
       let sceneInputs: ProductionCompileResult['sceneInputs'];
-      let imageBindings: Array<{
+      const imageBindings: Array<{
         id: string;
         role: 'character' | 'scene' | 'prop' | 'other';
         label: string;
@@ -372,27 +381,25 @@ export class ProductionService {
                 .listScenes()
                 .find((item) => item.id === this.findShot(content, target.id).sceneId)!;
         const allShots = content.listShots(scene.id);
-        const selectedShot =
-          target.kind === 'shot' ? allShots.find((item) => item.id === target.id) : undefined;
-        const shotReferences = selectedShot?.referenceBindings;
         const scopedShots =
           target.kind === 'shot'
             ? allShots.filter((shot) => shot.id === target.id)
             : shotIds
               ? allShots.filter((shot) => shotIds.includes(shot.id))
               : allShots;
-        const irs = [scene.authoringIR, ...scopedShots.map((shot) => shot.authoringIR)].filter(
-          (ir): ir is ProductionAuthoringIR => Boolean(ir),
-        );
+        const scopedReferences = scopedShots.map((shot) => ({
+          shot,
+          references: productionShotReferenceIds(shot),
+        }));
         materialReferences = [
           ...new Map(
-            irs
-              .flatMap((ir) => [
-                ...(ir.references?.sceneDocumentIds ?? []).map((documentId) => ({
+            scopedReferences
+              .flatMap(({ references }) => [
+                ...references.sceneDocumentIds.map((documentId) => ({
                   documentId,
                   role: 'scene' as const,
                 })),
-                ...(ir.references?.propDocumentIds ?? []).map((documentId) => ({
+                ...references.propDocumentIds.map((documentId) => ({
                   documentId,
                   role: 'prop' as const,
                 })),
@@ -400,99 +407,121 @@ export class ProductionService {
               .map((reference) => [`${reference.role}:${reference.documentId}`, reference]),
           ).values(),
         ];
-        const scopedIRs = scopedShots.flatMap((shot) =>
-          shot.authoringIR ? [shot.authoringIR] : [],
-        );
-        const hasScopedCast =
-          scopedIRs.length === scopedShots.length &&
-          scopedIRs.every((ir) => ir.references?.characterDocumentIds !== undefined);
-        const characterIds =
-          (target.kind === 'shot' || shotIds) && hasScopedCast
-            ? [...new Set(scopedIRs.flatMap((ir) => ir.references?.characterDocumentIds ?? []))]
-            : [
-                ...new Set([
-                  ...(scene.characterBindings ?? []).map((binding) => binding.characterDocumentId),
-                  ...irs.flatMap((ir) => ir.references?.characterDocumentIds ?? []),
-                ]),
-              ];
-        const cast = characterIds.map(
-          (id) =>
-            (scene.characterBindings ?? []).find(
-              (binding) => binding.characterDocumentId === id,
-            ) ?? { characterDocumentId: id },
-        );
-        let irMaterials = resolveIRMaterialBindings(
-          db,
-          project.id,
-          scene.materialBindings ?? [],
-          ...irs.map((ir) => ({
-            schemaVersion: ir.schemaVersion,
-            kind: 'scene' as const,
-            prompt: ir.prompt,
-            references: {
-              sceneDocumentIds: ir.references?.sceneDocumentIds,
-              propDocumentIds: ir.references?.propDocumentIds,
-            },
-          })),
-        );
-        if (shotReferences?.ignoreSceneBinding)
-          irMaterials = irMaterials.filter((binding) => binding.role !== 'scene');
-        // A shot may override the scene/prop defaults. Structured bindings are
-        // authoritative; legacy arrays remain an ordered compatibility input.
-        const structuredSceneSelections = new Map(
-          (shotReferences?.sceneBindings ?? []).map((binding) => [
-            binding.sourceDocumentId,
-            binding.assetId,
+        const characterIds = [
+          ...new Set([
+            ...(target.kind === 'scene' && shotIds === undefined
+              ? (scene.characterBindings ?? []).map((binding) => binding.characterDocumentId)
+              : []),
+            ...scopedReferences.flatMap(({ references }) => references.characterDocumentIds),
           ]),
-        );
-        const legacySceneSelections = [
-          ...(shotReferences?.sceneAssetIds ?? []),
-          ...(shotReferences?.sceneAssetId ? [shotReferences.sceneAssetId] : []),
         ];
-        if (structuredSceneSelections.size || legacySceneSelections.length) {
-          let legacyIndex = 0;
-          irMaterials = irMaterials.map((binding) => {
-            if (binding.role !== 'scene' || !binding.sourceDocumentId) return binding;
-            const assetId =
-              structuredSceneSelections.get(binding.sourceDocumentId) ??
-              legacySceneSelections[legacyIndex++];
-            return assetId
-              ? { ...binding, assetId, source: 'manual' as const }
-              : binding;
+        const previousCast = new Map(
+          (scene.characterBindings ?? []).map((binding) => [binding.characterDocumentId, binding]),
+        );
+        const cast: SceneCharacterBindingInfo[] = characterIds.map((id) => {
+          const previous = previousCast.get(id);
+          return {
+            characterDocumentId: id,
+            ...(previous?.imageAssetId ? { imageAssetId: previous.imageAssetId } : {}),
+            ...(previous?.voiceReferenceVersionId
+              ? { voiceReferenceVersionId: previous.voiceReferenceVersionId }
+              : {}),
+            ...(previous?.imageDisabled ? { imageDisabled: true } : {}),
+            ...(previous?.voiceDisabled ? { voiceDisabled: true } : {}),
+          };
+        });
+        const bindingIRs: ProductionAuthoringIR[] = scopedReferences.map(
+          ({ shot, references }) => ({
+            schemaVersion: 1,
+            kind: 'shot',
+            prompt: shot.authoringIR?.prompt ?? shot.prompt ?? '',
+            references: {
+              sceneDocumentIds: references.sceneDocumentIds,
+              propDocumentIds: references.propDocumentIds,
+            },
+          }),
+        );
+        const defaultMaterials = resolveIRMaterialBindings(db, project.id, [], ...bindingIRs);
+        const defaultMaterialByDocument = new Map(
+          defaultMaterials
+            .filter((binding) => binding.sourceDocumentId)
+            .map((binding) => [`${binding.role}:${binding.sourceDocumentId}`, binding]),
+        );
+        const selectedMaterials = new Map<string, SceneMaterialBindingInfo>();
+        const addMaterial = (binding: SceneMaterialBindingInfo) => {
+          const key = `${binding.role}:${binding.sourceDocumentId ?? ''}:${binding.assetId}`;
+          if (!selectedMaterials.has(key)) selectedMaterials.set(key, binding);
+        };
+        for (const { shot, references } of scopedReferences) {
+          const shotBindings = shot.referenceBindings;
+          const structuredScenes = new Map(
+            (shotBindings?.sceneBindings ?? []).map((binding) => [
+              binding.sourceDocumentId,
+              binding.assetId,
+            ]),
+          );
+          const legacyScenes =
+            shotBindings?.sceneAssetIds ??
+            (shotBindings?.sceneAssetId ? [shotBindings.sceneAssetId] : []);
+          references.sceneDocumentIds.forEach((documentId, index) => {
+            if (shotBindings?.ignoreSceneBinding) return;
+            const selectedAssetId = structuredScenes.get(documentId) ?? legacyScenes[index];
+            const fallback = defaultMaterialByDocument.get(`scene:${documentId}`);
+            if (selectedAssetId && fallback)
+              addMaterial({ ...fallback, assetId: selectedAssetId, source: 'manual' });
+            else if (selectedAssetId) {
+              const document = db
+                .prepare(
+                  "SELECT title FROM documents WHERE id=? AND project_id=? AND kind='scene' AND lifecycle_status='active'",
+                )
+                .get(documentId, project.id) as { title: string } | undefined;
+              if (document)
+                addMaterial({
+                  id: `scene:${documentId}`,
+                  role: 'scene',
+                  label: document.title,
+                  assetId: selectedAssetId,
+                  sourceDocumentId: documentId,
+                  source: 'manual',
+                });
+            } else if (fallback) addMaterial(fallback);
           });
-          for (const [sourceDocumentId, assetId] of structuredSceneSelections) {
-            if (irMaterials.some((binding) => binding.role === 'scene' && binding.sourceDocumentId === sourceDocumentId))
-              continue;
-            const document = db
-              .prepare("SELECT title FROM documents WHERE id=? AND project_id=? AND kind='scene' AND lifecycle_status='active'")
-              .get(sourceDocumentId, project.id) as { title: string } | undefined;
-            if (document)
-              irMaterials.push({
-                id: `scene:${sourceDocumentId}`,
-                role: 'scene',
-                label: document.title,
-                assetId,
-                sourceDocumentId,
-                source: 'manual',
-              });
+          for (const documentId of references.propDocumentIds) {
+            const fallback = defaultMaterialByDocument.get(`prop:${documentId}`);
+            if (fallback) addMaterial(fallback);
           }
         }
-        imageBindings = irMaterials.filter((binding) => binding.role !== 'character');
-        const structuredCharacterSelections = new Map(
-          (shotReferences?.characterBindings ?? []).map((binding) => [
-            binding.characterDocumentId,
-            binding.assetId,
-          ]),
-        );
-        const legacyCharacterSelections = [
-          ...(shotReferences?.characterAssetIds ?? []),
-          ...(shotReferences?.characterAssetId ? [shotReferences.characterAssetId] : []),
-        ];
-        let legacyCharacterIndex = 0;
+        const irMaterials = [...selectedMaterials.values()];
+        imageBindings.push(...irMaterials);
+        const characterSelections = new Map<string, SceneMaterialBindingInfo>();
+        for (const { shot, references } of scopedReferences) {
+          const shotBindings = shot.referenceBindings;
+          const structuredCharacters = new Map(
+            (shotBindings?.characterBindings ?? []).map((binding) => [
+              binding.characterDocumentId,
+              binding.assetId,
+            ]),
+          );
+          const legacyCharacters =
+            shotBindings?.characterAssetIds ??
+            (shotBindings?.characterAssetId ? [shotBindings.characterAssetId] : []);
+          references.characterDocumentIds.forEach((documentId, index) => {
+            const selectedAssetId = structuredCharacters.get(documentId) ?? legacyCharacters[index];
+            if (selectedAssetId)
+              characterSelections.set(`${documentId}:${selectedAssetId}`, {
+                id: `character:${documentId}:${selectedAssetId}`,
+                role: 'character',
+                label: this.documentTitle(db, project.id, documentId),
+                assetId: selectedAssetId,
+                source: 'manual',
+                sourceDocumentId: documentId,
+              });
+          });
+        }
         const media = resolveSceneMedia(this.projects, {
           characterDocumentIds: cast.map((binding) => binding.characterDocumentId),
           assetIds: [
-            ...cast.flatMap((binding) => (binding.imageAssetId ? [binding.imageAssetId] : [])),
+            ...[...characterSelections.values()].map((binding) => binding.assetId),
             ...irMaterials.map((binding) => binding.assetId),
           ],
           voiceVersionIds: cast.flatMap((binding) =>
@@ -500,25 +529,25 @@ export class ProductionService {
           ),
         });
         for (const binding of cast) {
-          const selectedAssetId =
-            structuredCharacterSelections.get(binding.characterDocumentId) ??
-            legacyCharacterSelections[legacyCharacterIndex++];
-          if (selectedAssetId) binding.imageAssetId = selectedAssetId;
-          const imageId = binding.imageDisabled
-            ? undefined
-            : (binding.imageAssetId ??
-              media.characters.find(
-                (character) => character.characterDocumentId === binding.characterDocumentId,
-              )?.defaultImage?.id);
-          if (imageId)
-            imageBindings.push({
+          const selected = [...characterSelections.values()].filter(
+            (item) => item.sourceDocumentId === binding.characterDocumentId,
+          );
+          const defaultImage = media.characters.find(
+            (character) => character.characterDocumentId === binding.characterDocumentId,
+          )?.defaultImage;
+          if (!selected.length && defaultImage && !binding.imageDisabled)
+            selected.push({
               id: `cast-${binding.characterDocumentId}`,
               role: 'character',
               label: this.documentTitle(db, project.id, binding.characterDocumentId),
-              assetId: imageId,
-              source: binding.imageAssetId ? 'manual' : 'auto',
+              assetId: defaultImage.id,
+              source: 'auto',
               sourceDocumentId: binding.characterDocumentId,
             });
+          for (const selection of selected) {
+            imageBindings.push(selection);
+            if (!binding.imageAssetId) binding.imageAssetId = selection.assetId;
+          }
         }
         const names = Object.fromEntries(
           cast.map((binding) => [
@@ -565,8 +594,15 @@ export class ProductionService {
     const source = this.formSource(params.target, params.shotIds, selected);
     if (params.expectedToken && params.expectedToken !== source.token)
       throw new Error('制作来源已变化，请重新适配。');
-    if (!read.compiledPrompt && ['scene', 'shot'].includes(params.target.kind))
-      return { ...read, parameters: {}, source };
+    if (!read.compiledPrompt && ['scene', 'shot'].includes(params.target.kind)) {
+      const { sceneInputs } = this.resolveSceneInputs(params.target, params.shotIds);
+      return {
+        ...read,
+        parameters: {},
+        source,
+        ...(sceneInputs ? { sceneInputs } : {}),
+      };
+    }
 
     return this.projects.access(false, (db, project) => {
       const issues = [...read.issues];
@@ -577,38 +613,6 @@ export class ProductionService {
           : undefined;
       const continuity = continuityState?.binding;
       const video = adapter.capability.endsWith('_VIDEO');
-      if (continuity && video) {
-        if (!continuity.firstFrameAssetId)
-          issues.push({
-            code: 'CONTINUITY_FRAME_MISSING',
-            message: '请先选择并确认下一视频首帧。',
-          });
-        if (!['IMAGE_TO_VIDEO', 'START_END_TO_VIDEO'].includes(adapter.capability))
-          issues.push({
-            code: 'CONTINUITY_FRAME_MODE',
-            message: '本次衔接需要严格首帧输入，请选择图生视频或首尾帧模式。',
-          });
-        if (
-          params.inputImages &&
-          !selected.some(
-            (image) =>
-              image.assetId === continuity.firstFrameAssetId && image.role === 'first-frame',
-          )
-        )
-          issues.push({
-            code: 'CONTINUITY_FRAME_CHANGED',
-            message: '当前表单首帧与人工确认的衔接首帧不同。',
-          });
-      }
-      if (continuity?.mode === 'reframe' && !video) {
-        if (adapter.capability !== 'REFERENCE_TO_IMAGE')
-          issues.push({ code: 'CONTINUITY_IMAGE_MODE', message: '换机位首帧需要参考生图模式。' });
-        if (!selected.some((image) => image.assetId === continuity.anchorAssetId))
-          issues.push({
-            code: 'CONTINUITY_ANCHOR_MISSING',
-            message: '新首帧制作缺少人工指定的衔接基准图。',
-          });
-      }
       const { sceneInputs, imageBindings } = this.resolveSceneInputs(params.target, params.shotIds);
 
       const ir = read.authoringIR ?? {
@@ -618,7 +622,7 @@ export class ProductionService {
       };
       const compiled = compileProductionParameters(ir, adapter, {
         prompt:
-          !video && continuity?.mode === 'reframe'
+          !video && continuity?.imagePrompt !== undefined
             ? (continuity.imagePrompt ?? read.compiledPrompt ?? ir.prompt)
             : (read.compiledPrompt ?? ir.prompt),
         estimatedDurationSeconds: read.estimatedDurationSeconds,
@@ -662,6 +666,12 @@ export class ProductionService {
             undefined,
             inputs,
           );
+        if (productionFrameInputConflict(adapter, compiled.parameters, selected))
+          issues.push({
+            code: 'INPUT_SELECTION_CONFLICT',
+            message:
+              '已保留全部图片；当前模型不能同时使用这些首帧与参考素材用途，请在表单选择用途或更换模型。',
+          });
       } catch (error) {
         issues.push({
           code: 'INPUT_SELECTION_CONFLICT',
@@ -686,46 +696,6 @@ export class ProductionService {
     });
   }
 
-  assertSource(
-    source: ProductionSource | undefined,
-    target: ProductionTarget,
-    adapterKey?: string,
-    actual?: { parameters: AdapterParameters; inputs?: MediaInputReferenceV1[] },
-  ): void {
-    if (!source) return;
-    if (!source.target || targetKey(source.target) !== targetKey(target))
-      throw new Error('生成表单的目标对象不匹配。');
-    // Final form inputs are frozen and checked by media preparation/submission.
-    // Later prompt or binding edits do not rewrite that already reviewed snapshot.
-    this.read(target);
-    if (
-      !actual &&
-      source.token !== this.formSource(target, source.shotIds, source.inputImages).token
-    )
-      throw new Error('制作来源已变化或未适配，请重新打开制作表单。');
-    if (!actual) return;
-    const references = new Set<string>();
-    const collect = (value: unknown) => {
-      if (typeof value === 'string') {
-        if (/^(project-asset|asset):\/\//u.test(value))
-          references.add(value.replace(/^asset:\/\//u, 'project-asset://'));
-      } else if (Array.isArray(value)) value.forEach(collect);
-      else if (value && typeof value === 'object')
-        for (const [field, item] of Object.entries(value))
-          if (!['text', 'prompt', 'negative_prompt'].includes(field)) collect(item);
-    };
-    for (const [field, value] of Object.entries(actual.parameters))
-      if (!['prompt', 'negative_prompt'].includes(field)) collect(value);
-    for (const input of actual.inputs ?? [])
-      if (input.type === 'asset') references.add(`project-asset://${input.assetId}`);
-    for (const image of source.inputImages ?? [])
-      if (!references.has(`project-asset://${image.assetId}`))
-        throw new Error(
-          `实际提交参数未包含已选${image.role === 'first-frame' ? '首帧' : '衔接画面或制作图片'}：${image.label ?? image.assetId}。`,
-        );
-    void adapterKey;
-  }
-
   private assertTarget(target: ProductionTarget): void {
     if (
       !target ||
@@ -744,7 +714,9 @@ export class ProductionService {
     if (!shot) throw new Error('制作镜头不存在。');
     const scene = content.listScenes().find((item) => item.id === shot.sceneId);
     if (!scene) throw new Error('镜头所属场次不存在。');
-    return content.listShots(scene.id).find((item) => item.id === shotId)!;
+    const activeShot = content.listShots(scene.id).find((item) => item.id === shotId);
+    if (!activeShot) throw new Error('制作镜头已归档或不存在，请先恢复。');
+    return activeShot;
   }
 
   private defaultImages(target: ProductionTarget, video: boolean) {
@@ -752,10 +724,21 @@ export class ProductionService {
     return this.projects.access(false, (db, project) => {
       const binding = readShotContinuity(db, project.id, target.id).binding;
       if (!binding) return [];
-      if (video && binding.firstFrameAssetId)
-        return [{ assetId: binding.firstFrameAssetId, role: 'first-frame' as const }];
+      if (video) {
+        return [
+          ...continuityReferenceImageIds(binding)
+            .filter((id) => id !== binding.firstFrameAssetId)
+            .map((assetId) => ({ assetId, role: 'reference' as const })),
+          ...(binding.firstFrameAssetId
+            ? [{ assetId: binding.firstFrameAssetId, role: 'first-frame' as const }]
+            : []),
+        ];
+      }
       return !video
-        ? binding.frames.map((frame) => ({ assetId: frame.assetId, role: 'reference' as const }))
+        ? continuitySourceImageIds(binding).map((assetId) => ({
+            assetId,
+            role: 'reference' as const,
+          }))
         : [];
     });
   }
