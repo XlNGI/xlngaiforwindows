@@ -45,6 +45,7 @@ type RequestMetadata = Record<string, unknown> & {
   usage?: NormalizedLlmUsage;
   purpose?: LlmRequestUsageInfo['purpose'];
   context?: LlmRequestUsageInfo['context'];
+  timing?: NonNullable<LlmRequestUsageInfo['timing']>;
 };
 
 /** Existing local request JSON stores only normalized numbers and bounded diagnostics, never bodies. */
@@ -90,6 +91,53 @@ export function updateModelRequest(
   // Usage can arrive after cancellation; it must not reopen the request.
   const nextStage = row && terminalStages.has(row.stage) ? row.stage : stage;
   next.firstSeen![stage] ??= now;
+  // Only bounded known stages enter timing maps. Never store input text or combine clocks.
+  if (
+    [
+      'preparing',
+      'retry_wait',
+      'dispatching',
+      'native_queued',
+      'admitted',
+      'sent',
+      'headers',
+      'first_byte',
+      'receiving',
+      'tool_arguments',
+      'visible_text',
+      'thinking',
+      'complete',
+      'failed',
+      'cancelled',
+    ].includes(stage)
+  ) {
+    const timing: NonNullable<LlmRequestUsageInfo['timing']> = {
+      workerFirstMs: { ...previous.timing?.workerFirstMs },
+      nativeFirstMs: { ...previous.timing?.nativeFirstMs },
+      ...(previous.timing?.hostRequestId ? { hostRequestId: previous.timing.hostRequestId } : {}),
+    };
+    for (const [field, map] of [
+      ['workerElapsedMs', timing.workerFirstMs],
+      ['nativeElapsedMs', timing.nativeFirstMs],
+    ] as const) {
+      const value = metadata[field];
+      if (
+        typeof value === 'number' &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= Number.MAX_SAFE_INTEGER
+      )
+        map[stage] ??= value;
+    }
+    if (typeof metadata.hostRequestId === 'string' && metadata.hostRequestId.length <= 200)
+      timing.hostRequestId = metadata.hostRequestId;
+    if (
+      Object.keys(timing.workerFirstMs).length ||
+      Object.keys(timing.nativeFirstMs).length ||
+      timing.hostRequestId
+    )
+      next.timing = timing;
+  }
   for (const key of metadataKeys)
     if (metadata[key] !== undefined) (next as Record<string, unknown>)[key] = metadata[key];
   if (usage) {
@@ -151,6 +199,7 @@ export function readRequestAccounting(
       sent: metadata.firstSeen?.sent !== undefined,
       startedAt: row.created_at,
       completedAt: row.completed_at ?? undefined,
+      timing: metadata.timing,
       usage,
       usageSource: usage ? 'provider_reported' : undefined,
       coverage:

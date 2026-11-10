@@ -33,6 +33,13 @@ export function prepareAgentGeneration(
       params.targetPlatform,
       provenance,
       params.productionSkillId,
+      params.productionWorkflowVersion === 2
+        ? {
+            version: 2,
+            sources: params.productionSources!,
+            requestedAt: params.productionRequestedAt,
+          }
+        : undefined,
     );
     services.generations.configureAgentTools(prepared.stream, agent.tools);
     return { ...prepared, agentTaskId: agent.taskId };

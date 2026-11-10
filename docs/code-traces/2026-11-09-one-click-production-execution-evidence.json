@@ -1,0 +1,258 @@
+{
+  "capturedAt": "2026-11-09T08:30:59.597Z",
+  "source": "Consistent SQLite backup read with readonly=true; queries export metadata only",
+  "project": {
+    "id": "17c07931-d9dc-43e4-b8ca-12a59e7a1f46",
+    "name": "夫是德国"
+  },
+  "task": {
+    "id": "4b089522-8131-4d8c-8aac-19c6739199e3",
+    "project_id": "17c07931-d9dc-43e4-b8ca-12a59e7a1f46",
+    "status": "cancelled",
+    "created_at": "2026-11-09T07:01:22.454Z",
+    "completed_at": "2026-11-09T08:20:38.270Z",
+    "turn_count": 211,
+    "input_tokens": 23503337,
+    "output_tokens": 184917,
+    "error_code": "cancelled",
+    "error_message": "Provider generation cancelled."
+  },
+  "generationId": "03b54e88-0f17-4c2e-b116-ee4f509bd77f",
+  "elapsedMinutes": 79.2636,
+  "activeScenes": 4,
+  "activeShots": 13,
+  "activeMaterialDocuments": [],
+  "toolCalls": 184,
+  "failedCalls": 47,
+  "failureCategories": {
+    "protected_plan_intent": 19,
+    "TASK_REPAIR_REQUIRED": 4,
+    "TASK_REVIEW_NOT_READY": 2,
+    "AGENT_TOOL_ARGUMENTS_INVALID": 4,
+    "TASK_REVIEW_INVALID": 3,
+    "TASK_REVIEW_REQUIREMENTS_INVALID": 11,
+    "TASK_REVIEW_REQUIREMENT_COVERAGE_REQUIRED": 1,
+    "TASK_REVIEW_EVIDENCE_INVALID": 1,
+    "TASK_REVIEW_STALE": 1,
+    "TASK_REVIEW_EVIDENCE_UNRELATED": 1
+  },
+  "lastContentWrite": "2026-11-09T07:49:14.255Z",
+  "reviewEvents": [
+    {
+      "callId": "call_5385227fafae41a2850ed32a7de3745c",
+      "time": "2026-11-09T08:18:03.955Z",
+      "conclusion": "needs_revision",
+      "reviewedTargetCount": 3,
+      "coverageCount": 0,
+      "issueEvidenceStates": [
+        "needs_correction"
+      ],
+      "countedAsWorkProgress": false
+    }
+  ],
+  "invalidRequirements": [
+    {
+      "callId": "call_e4d181eb23404de899ea35ffeab078d3",
+      "time": "2026-11-09T07:53:32.881Z",
+      "assessmentCount": 24,
+      "firstInvalid": {
+        "index": 0,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "4b6da657-5b17-4b07-8ae8-ed35b564c6a6",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_e841de26c8f34d5c9386cac739214859",
+      "time": "2026-11-09T07:55:53.895Z",
+      "assessmentCount": 18,
+      "firstInvalid": {
+        "index": 1,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "6a3bcb74-27b1-42f3-8acb-882500c42fa8",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_82ca1210fb8c44989ffeb94dab764ecc",
+      "time": "2026-11-09T07:57:00.630Z",
+      "assessmentCount": 17,
+      "firstInvalid": {
+        "index": 2,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "52adfb04-92e0-478e-95ab-edb10c56cc54",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_f7751df22dcb4d44920e9bdd7b7d71c8",
+      "time": "2026-11-09T07:58:06.319Z",
+      "assessmentCount": 18,
+      "firstInvalid": {
+        "index": 1,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "6a3bcb74-27b1-42f3-8acb-882500c42fa8",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_1122349420594ffca0ae8b7f65bc86b4",
+      "time": "2026-11-09T07:59:14.554Z",
+      "assessmentCount": 17,
+      "firstInvalid": {
+        "index": 0,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "4b6da657-5b17-4b07-8ae8-ed35b564c6a6",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_583cbe077494452c949eb3aee711b5d6",
+      "time": "2026-11-09T08:00:24.624Z",
+      "assessmentCount": 15,
+      "firstInvalid": {
+        "index": 2,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "52adfb04-92e0-478e-95ab-edb10c56cc54",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_a0ef718bdb1c4fb5b6b04f21a1892d15",
+      "time": "2026-11-09T08:02:31.371Z",
+      "assessmentCount": 34,
+      "firstInvalid": {
+        "index": 8,
+        "fields": [
+          "targetId"
+        ],
+        "targetId": "7a1068aa-c5ee-44f3-8acb-882500c42fa8",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_0d0748c18c934cb6aa4de5c5a1b3508f",
+      "time": "2026-11-09T08:03:04.711Z",
+      "assessmentCount": 6,
+      "firstInvalid": {
+        "index": 4,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "52adfb04-92e0-478e-95ab-edb10c56cc54",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_937b916f9f724db88922fa1b3bd8ce69",
+      "time": "2026-11-09T08:05:36.394Z",
+      "assessmentCount": 10,
+      "firstInvalid": {
+        "index": 8,
+        "fields": [
+          "targetId"
+        ],
+        "targetId": "7a1068aa-5b17-4b07-8ae8-ed10e64-2c?",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_d2062a3a0fee4edeb8d968805882d29d",
+      "time": "2026-11-09T08:08:02.272Z",
+      "assessmentCount": 6,
+      "firstInvalid": {
+        "index": 2,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "6a3bcb74-27b1-42f3-8acb-882500c42fa8",
+        "requirementId": "original"
+      }
+    },
+    {
+      "callId": "call_2b702ebf7201479f9e3ac22bb5314c14",
+      "time": "2026-11-09T08:17:37.984Z",
+      "assessmentCount": 47,
+      "firstInvalid": {
+        "index": 2,
+        "fields": [
+          "requirementQuote"
+        ],
+        "targetId": "6a3bcb74-27b1-42f3-8acb-882500c42fa8",
+        "requirementId": "original"
+      }
+    }
+  ],
+  "failureReplay": {
+    "implementation": "Current TypeScript source via tsx",
+    "samples": 19,
+    "fingerprintGroups": 18,
+    "maxGroupCount": 2,
+    "thrown": null,
+    "identicalControlError": "AGENT_TOOL_FAILURE_STALLED: 相同工具目标和错误状态已重复四次，期间没有新的用户指令、读取证据或保存进展。已停止无效重试；已保存内容保留，本次任务尚未完成。",
+    "scope": "Only the same protected-plan errors, preserving their actual arguments. Intermediate reads and successful writes omitted. This isolates fingerprint fragmentation; it is not a complete runtime replay."
+  },
+  "planReplay": {
+    "callId": "call_6892099b999244ed9caba38c8bf39c13",
+    "error": "deliverables[0].origin: confirmed user obligations and their requirement sources cannot be removed.",
+    "firstRequestedIntent": "revise"
+  },
+  "modelRequestCount": 211,
+  "diagnosticTaskId": "6985579f-413b-46cb-988e-0e22c274cfd6",
+  "diagnosisResults": [
+    {
+      "callId": "call_22b7eaef72404160b8d8e94636a790fb",
+      "tool": "conversation.task.route",
+      "targetGenerationId": "03b54e88-0f17-4c2e-b116-ee4f509bd77f",
+      "targetStatus": "cancelled",
+      "receiptOffset": 0,
+      "receiptNextOffset": 20,
+      "receiptCount": 20
+    },
+    {
+      "callId": "call_ba702d40e1f2404e96fda9e405dde343",
+      "tool": "conversation.task.checkpoint",
+      "operation": "result",
+      "resultId": "1d1ba7de-e216-4130-a99b-b5b332d37511",
+      "offset": 0,
+      "endOffset": 4096,
+      "totalCharacters": 15302,
+      "nextOffset": 4096
+    },
+    {
+      "callId": "call_504dff82ef8b48e188b14d414c7ea235",
+      "tool": "conversation.task.checkpoint",
+      "operation": "result",
+      "resultId": "1d1ba7de-e216-4130-a99b-b5b332d37511",
+      "offset": 4096,
+      "endOffset": 8192,
+      "totalCharacters": 15302,
+      "nextOffset": 8192
+    }
+  ],
+  "receiptPages": [
+    {
+      "offset": 0,
+      "nextOffset": 20,
+      "count": 20,
+      "lastTime": "2026-11-09T07:42:00.447Z"
+    },
+    {
+      "offset": 20,
+      "count": 2,
+      "lastTime": "2026-11-09T07:49:14.255Z"
+    }
+  ]
+}

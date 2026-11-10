@@ -12,14 +12,13 @@ import Database from 'better-sqlite3';
 import type { Context } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import type { LlmGenerationRuntimeRequest } from '@ai-video/contracts';
-import { AgentContextStore, contextContentHash } from '@ai-video/persistence';
+import { AgentContextStore } from '@ai-video/persistence';
 import { saveTaskPlan, assessTaskDeliverables } from '../src/agent-task-deliverables.js';
 import {
   taskReviewState,
   submitTaskReview,
   type ReviewManifest,
 } from '../src/agent-task-review.js';
-import { scriptToMediaCompletionPending } from '../src/production-skill-validation.js';
 import { assertNoReadLoop } from '../src/agent-context-budget.js';
 import { AgentContextManager } from '../src/agent-context-manager.js';
 import { ProjectService } from '../src/project-service.js';
@@ -30,7 +29,7 @@ function fixture() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE agent_tasks(id TEXT,request_snapshot_json TEXT);
-    INSERT INTO agent_tasks VALUES('task','{"productionSkillId":"script-to-media"}');
+    INSERT INTO agent_tasks VALUES('task','{}');
     CREATE TABLE agent_tool_calls(project_id TEXT,generation_id TEXT,tool_name TEXT,status TEXT,result_summary_json TEXT);
     CREATE TABLE agent_execution_outputs(id TEXT PRIMARY KEY,project_id TEXT,task_id TEXT,plan_key TEXT,tool_name TEXT,quantity INTEGER,created_at TEXT,UNIQUE(project_id,task_id,plan_key));
     CREATE TABLE agent_execution_commits(project_id TEXT,task_id TEXT,operation_key TEXT,receipt_id TEXT,sequence INTEGER);
@@ -39,8 +38,8 @@ function fixture() {
     CREATE TABLE document_versions(id TEXT,document_id TEXT,content_markdown TEXT);
     CREATE TABLE scenes(id TEXT,project_id TEXT,archived_at TEXT);
     INSERT INTO scenes VALUES('scene','project',NULL);
-    CREATE TABLE shots(id TEXT,scene_id TEXT,authoring_ir_json TEXT,updated_at TEXT,archived_at TEXT);
-    CREATE TABLE agent_context_tasks(project_id TEXT,task_id TEXT,state_json TEXT);
+    CREATE TABLE shots(id TEXT,scene_id TEXT,prompt TEXT,timing_json TEXT,bindings_json TEXT,updated_at TEXT,archived_at TEXT,row_version INTEGER DEFAULT 1);
+    CREATE TABLE agent_context_tasks(project_id TEXT,task_id TEXT,state_json TEXT,runtime_json TEXT);
     CREATE TABLE agent_context_checkpoints(project_id TEXT,task_id TEXT,revision INTEGER,state_json TEXT,runtime_json TEXT);
     CREATE TABLE agent_context_results(id TEXT PRIMARY KEY,project_id TEXT,task_id TEXT,call_id TEXT,tool_name TEXT,status TEXT,version INTEGER,content TEXT,content_hash TEXT,arguments_json TEXT,created_at TEXT,UNIQUE(project_id,task_id,call_id,content_hash));
   `);
@@ -58,17 +57,20 @@ function fixture() {
   };
   const shot = (id: string) => {
     const ir = {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: `${id}：人物停步，说“等一下”。`,
-      references: { characterDocumentIds: [], sceneDocumentIds: [], propDocumentIds: [] },
+      bindings: {
+        schemaVersion: 1,
+        characterDocumentIds: [],
+        sceneDocumentIds: [],
+        propDocumentIds: [],
+      },
       timing: {
         estimatedDurationSeconds: 3,
-        rationale: '自然对白',
-        beats: [{ kind: 'dialogue', startSeconds: 0, endSeconds: 3, description: '停步对白' }],
       },
     };
-    db.prepare('INSERT INTO shots VALUES(?,?,?,?,NULL)').run(id, 'scene', JSON.stringify(ir), at);
+    db.prepare(
+      'INSERT INTO shots(id,scene_id,prompt,timing_json,bindings_json,updated_at,archived_at) VALUES(?,?,?,?,?,?,NULL)',
+    ).run(id, 'scene', ir.prompt, JSON.stringify(ir.timing), JSON.stringify(ir.bindings), at);
     return ir;
   };
   return { db, store, receipt, result, plan, shot };
@@ -91,68 +93,24 @@ function fixture() {
     const before = assessTaskDeliverables(f.db, 'project', 'generation', 'task')!.pending;
     assert.equal(before[0]!.persistedCount, 1);
     assert.equal(before[0]!.creationBinding, undefined);
-    const ir = JSON.parse(
-      (
-        f.db.prepare("SELECT authoring_ir_json FROM shots WHERE id='shot'").get() as {
-          authoring_ir_json: string;
-        }
-      ).authoring_ir_json,
-    ) as unknown;
+    const row = f.db
+      .prepare("SELECT prompt,timing_json,bindings_json FROM shots WHERE id='shot'")
+      .get() as { prompt: string; timing_json: string; bindings_json: string };
+    const ir = {
+      prompt: row.prompt,
+      timing: JSON.parse(row.timing_json) as unknown,
+      bindings: JSON.parse(row.bindings_json) as unknown,
+    };
     f.result('production.read', {
       status: 'read',
       target: { kind: 'shot', id: 'shot' },
-      authoringIR: ir,
+      authoring: ir,
     });
     const pending = assessTaskDeliverables(f.db, 'project', 'generation', 'task')!.pending;
     assert.deepEqual(pending, []);
     findings.push({
       probe: 'A_existing_target_without_current_write',
       observedCurrentBehavior: pending,
-    });
-  } finally {
-    f.db.close();
-  }
-}
-
-// B: The contract fixes all eleven targets independently of read history.
-{
-  const f = fixture();
-  try {
-    const ids = Array.from({ length: 11 }, (_, i) => `shot-${i + 1}`);
-    const irs = ids.map(f.shot);
-    f.plan([
-      { key: 'episode', toolName: 'scene.update_shot_prompts', minimumCount: 11, targetIds: ids },
-    ]);
-    f.db
-      .prepare(
-        "INSERT INTO documents VALUES('source','project','source-v1','active',?,'原文','plan')",
-      )
-      .run(at);
-    f.db.prepare("INSERT INTO document_versions VALUES('source-v1','source','原文任务来源')").run();
-    f.result('library.read', {
-      status: 'read',
-      sourceId: 'source',
-      versionId: 'source-v1',
-      content: '原文任务来源',
-    });
-    f.result('production.read', {
-      status: 'read',
-      target: { kind: 'shot', id: ids[0] },
-      view: 'authoring',
-      version: contextContentHash(JSON.stringify(irs[0])),
-      authoringIR: irs[0],
-    });
-    const pending = scriptToMediaCompletionPending(f.db, 'project', 'generation', 'task')!;
-    const review = pending[0]!.semanticReview as { ready: boolean; reviewScope: string[] };
-    assert.equal(review.ready, false);
-    assert.deepEqual(new Set(review.reviewScope), new Set(ids));
-    findings.push({
-      probe: 'B_review_scope_follows_reads_not_declared_targets',
-      observedCurrentBehavior: {
-        declaredTargets: ids.length,
-        reviewReady: review.ready,
-        reviewScope: review.reviewScope,
-      },
     });
   } finally {
     f.db.close();
@@ -385,7 +343,7 @@ console.log(
   JSON.stringify(
     {
       purpose:
-        'Regression checks for the six isolated architecture defects; not provider business acceptance.',
+        'Regression checks for isolated task/review architecture defects; not provider business acceptance.',
       isolation:
         'Synthetic in-memory databases and one disposable project; no provider or user project access.',
       findings,

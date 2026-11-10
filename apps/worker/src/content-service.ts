@@ -43,12 +43,8 @@ import type {
   ShotSaveParams,
   ShotStoryboardSaveParams,
 } from '@ai-video/contracts';
-import {
-  validateProductionAuthoringIR,
-  type ProductionSceneAuthoringIR,
-  type ProductionShotAuthoringIR,
-} from '@ai-video/contracts';
-import { validateProductionIRReferences } from './project-ir-validation.js';
+import { validatePromptBindings, validateProductionTiming } from '@ai-video/contracts';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import type {
   ConversationModelPreferenceRecord,
   ConversationRecord,
@@ -63,10 +59,8 @@ import {
 } from '@ai-video/persistence';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
-import { requireProductionSceneDocument } from './scene-document-binding.js';
 import { validateProductionImageBinding } from './scene-cast-binding.js';
-import { resolveIRSceneBindings } from './production-ir-bindings.js';
-
+import { resolvePromptSceneBindings } from './prompt-binding-media.js';
 const documentKinds = new Set<DocumentKind>([
   'outline',
   'plan',
@@ -74,17 +68,16 @@ const documentKinds = new Set<DocumentKind>([
   'character',
   'scene',
   'prop',
+  'voice',
   'storyboard',
   'note',
 ]);
 const scopeTypes = new Set<ConversationScopeType>(['project', 'scene', 'shot']);
-
 function required(value: string, name: string): string {
   const result = value.trim();
   if (!result) throw new Error(`${name} is required.`);
   return result;
 }
-
 function parseShotReferenceBindings(value?: string | null): ShotReferenceBindingInfo | undefined {
   if (!value) return undefined;
   try {
@@ -95,7 +88,6 @@ function parseShotReferenceBindings(value?: string | null): ShotReferenceBinding
     return undefined;
   }
 }
-
 function shotReferenceBindingsTableExists(database: Database.Database): boolean {
   return Boolean(
     database
@@ -103,21 +95,18 @@ function shotReferenceBindingsTableExists(database: Database.Database): boolean 
       .get(),
   );
 }
-
 const sceneMaterialRoles = new Set<SceneMaterialBindingInfo['role']>([
   'character',
   'scene',
   'prop',
   'other',
 ]);
-
 function asConversation(record: ConversationRecord): ConversationInfo {
   if (!scopeTypes.has(record.scopeType)) {
     throw new Error(`Unsupported conversation scope: ${record.scopeType}`);
   }
   return record;
 }
-
 function sliceConversationPage(
   items: ConversationInfo[],
   start: number,
@@ -129,22 +118,17 @@ function sliceConversationPage(
     nextCursor: items.length > start + limit ? page.at(-1)?.id : undefined,
   };
 }
-
 export class ContentService {
   private readonly workflow: DocumentWorkflowService;
-
   constructor(private readonly projects: ProjectService) {
     this.workflow = new DocumentWorkflowService(projects);
   }
-
   listDocuments(): DocumentSummary[] {
     return this.workflow.listDocuments();
   }
-
   getDocument(documentId: string): DocumentDetail {
     return this.workflow.getDocument(documentId);
   }
-
   saveDocument(params: DocumentSaveParams): DocumentDetail {
     if (params.kind && !documentKinds.has(params.kind))
       throw new Error('Document kind is invalid.');
@@ -155,15 +139,12 @@ export class ContentService {
       expectedDocumentRowVersion: params.expectedDocumentRowVersion ?? existing?.rowVersion,
     });
   }
-
   listDocumentVersions(documentId: string): DocumentVersionInfo[] {
     return this.workflow.listVersions(documentId);
   }
-
   restoreDocument(params: DocumentRestoreParams): DocumentDetail {
     return this.workflow.restoreDocument(params);
   }
-
   listScenes(includeArchived = false): SceneInfo[] {
     return this.projects.access(false, (database, project) =>
       createRepositories(database)
@@ -173,7 +154,6 @@ export class ContentService {
         ),
     );
   }
-
   changeProductionLifecycle(params: ProductionLifecycleParams): SceneInfo | ShotInfo {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -235,275 +215,155 @@ export class ContentService {
       })(),
     );
   }
-
-  saveScene(params: SceneSaveParams): SceneInfo {
+  saveScene(params: SceneSaveParams, allocation?: { newId: string }): SceneInfo {
     const title = required(params.title, 'Scene title');
-    return this.projects.access(true, (database, project) =>
-      database.transaction(() => {
-        const repositories = createRepositories(database);
-        const existing = params.sceneId ? repositories.scenes.get(params.sceneId) : undefined;
-        if (params.sceneId && (!existing || existing.projectId !== project.id)) {
+    return this.projects.access(true, (db, project) =>
+      db.transaction(() => {
+        const repos = createRepositories(db),
+          cast = new SceneCharacterRepository(db);
+        const current = params.sceneId ? repos.scenes.get(params.sceneId) : undefined;
+        if (params.sceneId && (!current || current.projectId !== project.id))
           throw new Error('Scene was not found.');
-        }
-        if (existing?.archivedAt) throw new Error('场次已归档，请先恢复。');
-        if (existing && params.expectedRowVersion !== existing.rowVersion) {
+        if (current?.archivedAt) throw new Error('场次已归档，请先恢复。');
+        if (current && current.rowVersion !== params.expectedRowVersion)
           throw new Error('SCENE_ROW_VERSION_CONFLICT');
-        }
-        // The IR list is authoritative. The singular field remains a read/write
-        // compatibility projection for older callers that do not send an IR.
-        const requestedSceneDocumentIds =
-          params.sceneDocumentIds !== undefined
-            ? params.sceneDocumentIds === null
-              ? []
-              : [...params.sceneDocumentIds]
-            : params.authoringIR === undefined && params.sceneDocumentId !== undefined
-              ? params.sceneDocumentId
+        let bindings =
+          params.bindings === undefined
+            ? current?.bindingsJson
+              ? validatePromptBindings(JSON.parse(current.bindingsJson))
+              : undefined
+            : params.bindings === null
+              ? undefined
+              : validatePromptBindings(params.bindings);
+        const requestedLocations =
+          params.sceneDocumentIds === undefined
+            ? params.sceneDocumentId === undefined
+              ? undefined
+              : params.sceneDocumentId
                 ? [params.sceneDocumentId]
                 : []
-              : undefined;
-        let sceneDocumentId =
-          requestedSceneDocumentIds !== undefined
-            ? requestedSceneDocumentIds.length === 1
-              ? requestedSceneDocumentIds[0]
-              : undefined
-            : existing?.sceneDocumentId;
-        for (const documentId of requestedSceneDocumentIds ?? [])
-          requireProductionSceneDocument(database, project.id, documentId);
-        if (sceneDocumentId) requireProductionSceneDocument(database, project.id, sceneDocumentId);
-        const existingAuthoringIR = existing?.authoringIRJson
-          ? (validateProductionAuthoringIR(
-              JSON.parse(existing.authoringIRJson),
-              'scene',
-            ) as ProductionSceneAuthoringIR)
-          : undefined;
-        let authoringIR: ProductionSceneAuthoringIR | undefined =
-          params.authoringIR === undefined
-            ? existingAuthoringIR
-            : params.authoringIR === null
-              ? undefined
-              : (validateProductionAuthoringIR(
-                  params.authoringIR,
-                  'scene',
-                ) as ProductionSceneAuthoringIR);
-        if (params.authoringIR === null && params.videoPrompt?.trim())
-          throw new Error('Scene prompt must be empty when authoringIR is cleared.');
-        if (requestedSceneDocumentIds !== undefined && authoringIR) {
-          authoringIR = {
-            ...authoringIR,
-            references: {
-              ...authoringIR.references,
-              sceneDocumentIds: requestedSceneDocumentIds,
-            },
-          };
-        } else if (
-          requestedSceneDocumentIds !== undefined &&
-          !authoringIR &&
-          (params.videoPrompt?.trim() || existing?.videoPrompt?.trim())
-        ) {
-          authoringIR = {
+            : (params.sceneDocumentIds ?? []);
+        if (requestedLocations !== undefined)
+          bindings = { schemaVersion: 1, ...bindings, sceneDocumentIds: requestedLocations };
+        if (params.characterBindings !== undefined)
+          bindings = {
             schemaVersion: 1,
-            kind: 'scene',
-            prompt: params.videoPrompt?.trim() || existing?.videoPrompt?.trim() || '',
-            references: { sceneDocumentIds: requestedSceneDocumentIds },
+            ...bindings,
+            characterDocumentIds: params.characterBindings.map((item) => item.characterDocumentId),
           };
-        }
-        if (
-          authoringIR &&
-          (params.authoringIR !== undefined || requestedSceneDocumentIds !== undefined)
-        )
-          validateProductionIRReferences(database, project.id, authoringIR);
-        if (params.authoringIR === undefined && params.videoPrompt !== undefined)
-          authoringIR = params.videoPrompt.trim()
-            ? {
-                ...(authoringIR ?? { schemaVersion: 1, kind: 'scene' }),
-                prompt: params.videoPrompt,
-              }
-            : undefined;
-        if (authoringIR)
-          authoringIR = validateProductionAuthoringIR(
-            authoringIR,
-            'scene',
-          ) as ProductionSceneAuthoringIR;
-        if (
-          params.authoringIR !== undefined &&
-          authoringIR &&
-          params.videoPrompt !== undefined &&
-          params.videoPrompt !== authoringIR.prompt
-        )
-          throw new Error('Scene prompt must match authoringIR.prompt.');
-        const videoPrompt = authoringIR?.prompt;
-        if (videoPrompt && videoPrompt.length > 20_000) {
-          throw new Error('Scene video prompt must be at most 20000 characters.');
-        }
-        let materialBindings =
+        if (bindings) validatePromptBindingReferences(db, project.id, bindings);
+        const prompt = params.prompt ?? current?.prompt;
+        if (prompt !== undefined && prompt.length > 20000)
+          throw new Error('Scene prompt must be at most 20000 characters.');
+        const timing =
+          params.timing === undefined
+            ? current?.timingJson
+              ? validateProductionTiming(JSON.parse(current.timingJson))
+              : undefined
+            : validateProductionTiming(params.timing);
+        const previousCast = current ? cast.list(current.id) : [];
+        const materialBindings =
           params.materialBindings === undefined
-            ? this.parseSceneMaterialBindings(existing?.materialBindingsJson)
-            : this.validateSceneMaterialBindings(database, project.id, params.materialBindings);
-        const castRepository = new SceneCharacterRepository(database);
-        let characterBindings =
-          params.characterBindings === undefined
-            ? existing
-              ? castRepository.list(existing.id)
-              : []
-            : params.characterBindings;
+            ? this.parseSceneMaterialBindings(current?.materialBindingsJson)
+            : this.validateSceneMaterialBindings(db, project.id, params.materialBindings);
+        const projected = resolvePromptSceneBindings(
+          db,
+          project.id,
+          current?.id ?? '',
+          bindings ?? { schemaVersion: 1 },
+          { characterBindings: previousCast, materialBindings },
+        );
+        const characters = params.characterBindings ?? projected.characterBindings;
         if (
-          authoringIR &&
-          (params.authoringIR !== undefined || requestedSceneDocumentIds !== undefined)
-        ) {
-          const projected = resolveIRSceneBindings(
-            database,
-            project.id,
-            existing?.id ?? '',
-            {
-              ...authoringIR,
-              references: {
-                ...authoringIR.references,
-                ...(params.characterBindings !== undefined
-                  ? { characterDocumentIds: undefined }
-                  : {}),
-                ...(params.materialBindings !== undefined ? { propDocumentIds: undefined } : {}),
-              },
-            },
-            {
-              sceneDocumentId,
-              sceneDocumentIds: existingAuthoringIR?.references?.sceneDocumentIds,
-              materialBindings,
-              characterBindings,
-            },
-          );
-          // The IR is authoritative for reusable location references. The
-          // legacy column is only a single-value compatibility projection.
-          sceneDocumentId = projected.sceneDocumentId;
-          if (params.characterBindings === undefined)
-            characterBindings = projected.characterBindings;
-          if (params.materialBindings === undefined) materialBindings = projected.materialBindings;
-        }
-        if (
-          params.characterBindings !== undefined &&
-          (characterBindings.length > 30 ||
-            new Set(characterBindings.map((item) => item.characterDocumentId)).size !==
-              characterBindings.length)
+          characters.length > 30 ||
+          new Set(characters.map((c) => c.characterDocumentId)).size !== characters.length
         )
           throw new Error('场次最多绑定 30 位不重复的角色。');
-        if (params.characterBindings !== undefined) {
-          for (const binding of characterBindings) {
-            const character = database
-              .prepare(
-                `SELECT id FROM documents d WHERE id=? AND project_id=? AND kind='character' AND lifecycle_status='active'
-              AND NOT EXISTS(SELECT 1 FROM document_bindings WHERE document_id=d.id AND domain_scope='novel' AND status<>'archived')`,
-              )
-              .get(binding.characterDocumentId, project.id);
-            if (!character) throw new Error('场次只能绑定当前项目中有效的制作角色资料。');
-            if (binding.imageAssetId)
-              validateProductionImageBinding(
-                database,
-                project.id,
-                binding.imageAssetId,
-                binding.characterDocumentId,
-                'character',
-              );
-          }
-          if (existing) {
-            const speakers = database
-              .prepare(
-                "SELECT DISTINCT character_document_id AS id FROM dubbing_cues WHERE scene_id=? AND deleted_at IS NULL AND speaker_kind='character'",
-              )
-              .all(existing.id) as Array<{ id: string }>;
-            if (
-              speakers.some(
-                (speaker) =>
-                  !characterBindings.some((binding) => binding.characterDocumentId === speaker.id),
-              )
+        for (const item of characters)
+          if (item.imageAssetId)
+            validateProductionImageBinding(
+              db,
+              project.id,
+              item.imageAssetId,
+              item.characterDocumentId,
+              'character',
+            );
+        if (current && params.characterBindings !== undefined) {
+          const speakers = db
+            .prepare(
+              "SELECT DISTINCT character_document_id AS id FROM dubbing_cues WHERE scene_id=? AND deleted_at IS NULL AND speaker_kind='character'",
             )
-              throw new Error('角色仍有本场台词，请先移除或更改对应台词。');
-          }
+            .all(current.id) as Array<{ id: string }>;
+          if (
+            speakers.some(
+              (speaker) => !characters.some((c) => c.characterDocumentId === speaker.id),
+            )
+          )
+            throw new Error('角色仍有本场台词，请先移除或更改对应台词。');
         }
-        const dialogueAudioId =
-          params.dialogueAudioId === undefined
-            ? existing?.dialogueAudioId
-            : (params.dialogueAudioId ?? undefined);
-        const now = new Date().toISOString();
-        const record = {
-          id: existing?.id ?? randomUUID(),
+        const now = new Date().toISOString(),
+          id = current?.id ?? allocation?.newId ?? randomUUID();
+        repos.scenes.save({
+          id,
           projectId: project.id,
           title,
-          sceneDocumentId,
-          videoPrompt,
-          authoringIRJson: authoringIR ? JSON.stringify(authoringIR) : undefined,
-          materialBindingsJson: JSON.stringify(materialBindings),
-          dialogueAudioId,
+          prompt,
+          bindingsJson: bindings ? JSON.stringify(bindings) : undefined,
+          timingJson: timing ? JSON.stringify(timing) : undefined,
+          sceneDocumentId: projected.sceneDocumentId,
+          materialBindingsJson: JSON.stringify(projected.materialBindings),
+          dialogueAudioId:
+            params.dialogueAudioId === undefined
+              ? current?.dialogueAudioId
+              : (params.dialogueAudioId ?? undefined),
           position:
-            existing?.position ??
-            (repositories.scenes.listByProject(project.id, true).at(-1)?.position ?? -1) + 1,
-          rowVersion: existing?.rowVersion ?? 0,
-          createdAt: existing?.createdAt ?? now,
+            current?.position ??
+            (repos.scenes.listByProject(project.id, true).at(-1)?.position ?? -1) + 1,
+          rowVersion: current?.rowVersion ?? 0,
+          createdAt: current?.createdAt ?? now,
           updatedAt: now,
-        };
-        repositories.scenes.save(record);
-        if (params.characterBindings !== undefined || params.authoringIR)
-          castRepository.replace(record.id, characterBindings);
-        database
-          .prepare('UPDATE scenes SET authoring_bindings_applied=1 WHERE id=?')
-          .run(record.id);
+        });
+        cast.replace(id, characters);
         rebuildLibraryChunksForRecord(
-          database,
+          db,
           project.id,
           {
             sourceType: 'scene',
-            sourceId: record.id,
+            sourceId: id,
             status: 'active',
-            title: record.title,
-            content: record.title,
+            title,
+            content: title,
             scopeType: 'scene',
-            scopeId: record.id,
+            scopeId: id,
           },
           now,
         );
-        repositories.projects.touch(now);
+        repos.projects.touch(now);
         project.updatedAt = now;
-        return this.toSceneInfo(
-          repositories.scenes.get(record.id)!,
-          castRepository.list(record.id),
-        );
+        return this.toSceneInfo(repos.scenes.get(id)!, cast.list(id));
       })(),
     );
   }
-
   private toSceneInfo(
-    record: {
-      id: string;
-      projectId: string;
-      title: string;
-      sceneDocumentId?: string;
-      videoPrompt?: string;
-      authoringIRJson?: string;
-      materialBindingsJson?: string;
-      dialogueAudioId?: string;
-      archivedAt?: string;
-      position: number;
-      rowVersion: number;
-      createdAt: string;
-      updatedAt: string;
-    },
+    record: import('@ai-video/domain').SceneRecord,
     characterBindings: SceneCharacterBindingInfo[] = [],
   ): SceneInfo {
-    const authoringIR = record.authoringIRJson
-      ? (validateProductionAuthoringIR(
-          JSON.parse(record.authoringIRJson),
-          'scene',
-        ) as ProductionSceneAuthoringIR)
+    const bindings = record.bindingsJson
+      ? validatePromptBindings(JSON.parse(record.bindingsJson))
       : undefined;
     const sceneDocumentIds =
-      authoringIR?.references?.sceneDocumentIds ??
-      (record.sceneDocumentId ? [record.sceneDocumentId] : undefined);
+      bindings?.sceneDocumentIds ?? (record.sceneDocumentId ? [record.sceneDocumentId] : []);
     return {
       id: record.id,
       projectId: record.projectId,
       title: record.title,
-      sceneDocumentId: record.sceneDocumentId,
-      ...(sceneDocumentIds !== undefined ? { sceneDocumentIds: [...sceneDocumentIds] } : {}),
-      videoPrompt: record.videoPrompt,
-      authoringIR,
+      prompt: record.prompt,
+      bindings,
+      timing: record.timingJson
+        ? validateProductionTiming(JSON.parse(record.timingJson))
+        : undefined,
+      sceneDocumentId: sceneDocumentIds.length === 1 ? sceneDocumentIds[0] : undefined,
+      sceneDocumentIds,
       materialBindings: this.parseSceneMaterialBindings(record.materialBindingsJson),
       characterBindings,
       dialogueAudioId: record.dialogueAudioId,
@@ -514,7 +374,6 @@ export class ContentService {
       updatedAt: record.updatedAt,
     };
   }
-
   private parseSceneMaterialBindings(value?: string): SceneMaterialBindingInfo[] {
     if (!value) return [];
     try {
@@ -535,7 +394,6 @@ export class ContentService {
       return [];
     }
   }
-
   private validateSceneMaterialBindings(
     database: Database.Database,
     projectId: string,
@@ -577,7 +435,6 @@ export class ContentService {
       };
     });
   }
-
   listShots(sceneId: string, includeArchived = false): ShotInfo[] {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -590,7 +447,6 @@ export class ContentService {
         );
     });
   }
-
   getShotReferenceBindings(shotId: string): ShotReferenceBindingResult {
     return this.projects.access(false, (database, project) => {
       const shot = database
@@ -605,7 +461,6 @@ export class ContentService {
       };
     });
   }
-
   saveShotReferenceBindings(params: ShotReferenceBindingSaveParams): ShotReferenceBindingResult {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -613,8 +468,8 @@ export class ContentService {
           throw new Error('镜头参考图存储尚未迁移，请重启项目后重试。');
         const shot = database
           .prepare(
-            `SELECT s.id,s.scene_id,s.authoring_ir_json AS shotIR,
-                    c.scene_document_id AS sceneDocumentId,c.authoring_ir_json AS sceneIR
+            `SELECT s.id,s.scene_id,s.bindings_json AS shotIR,
+                    c.scene_document_id AS sceneDocumentId,c.bindings_json AS sceneIR
              FROM shots s JOIN scenes c ON c.id=s.scene_id
              WHERE s.id=? AND c.project_id=?`,
           )
@@ -655,7 +510,6 @@ export class ContentService {
       })(),
     );
   }
-
   private readShotReferenceBindings(
     database: Database.Database,
     projectId: string,
@@ -664,10 +518,13 @@ export class ContentService {
     if (!shotReferenceBindingsTableExists(database)) return undefined;
     const row = database
       .prepare('SELECT bindings_json FROM shot_reference_bindings WHERE shot_id=? AND project_id=?')
-      .get(shotId, projectId) as { bindings_json: string } | undefined;
+      .get(shotId, projectId) as
+      | {
+          bindings_json: string;
+        }
+      | undefined;
     return parseShotReferenceBindings(row?.bindings_json);
   }
-
   private validateShotReferenceBindings(
     database: Database.Database,
     projectId: string,
@@ -677,18 +534,13 @@ export class ContentService {
     },
     bindings: ShotReferenceBindingInfo,
   ): void {
-    const shotIR = shot.shotIR
-      ? (validateProductionAuthoringIR(
-          JSON.parse(shot.shotIR),
-          'shot',
-        ) as ProductionShotAuthoringIR)
-      : undefined;
+    const shotIR = shot.shotIR ? validatePromptBindings(JSON.parse(shot.shotIR)) : undefined;
     const castIds = new Set(
-      shotIR?.references?.characterDocumentIds ??
+      shotIR?.characterDocumentIds ??
         (bindings.characterBindings ?? []).map((item) => item.characterDocumentId),
     );
     const sceneIds = new Set([
-      ...(shotIR?.references?.sceneDocumentIds ??
+      ...(shotIR?.sceneDocumentIds ??
         (bindings.sceneBindings ?? []).map((item) => item.sourceDocumentId)),
     ]);
     const characterAssets = [
@@ -726,7 +578,6 @@ export class ContentService {
     if (bindings.firstFrameAssetId)
       this.validateShotReferenceAsset(database, projectId, bindings.firstFrameAssetId, new Set());
   }
-
   private validateShotReferenceAsset(
     database: Database.Database,
     projectId: string,
@@ -748,156 +599,101 @@ export class ContentService {
          JOIN generation_jobs j ON j.id=r.job_id AND j.project_id=?
          WHERE r.asset_id=? AND json_extract(j.task_snapshot_json,'$.sourceDocumentId') IS NOT NULL`,
       )
-      .all(projectId, assetId) as Array<{ sourceDocumentId: string | null }>;
+      .all(projectId, assetId) as Array<{
+      sourceDocumentId: string | null;
+    }>;
     const knownSources = sources
       .map((row) => row.sourceDocumentId)
       .filter((id): id is string => Boolean(id));
     if (knownSources.length && !knownSources.some((id) => allowedDocuments.has(id)))
       throw new Error('镜头参考图与当前镜头绑定的角色或场景不匹配。');
   }
-
-  saveShot(params: ShotSaveParams): ShotInfo {
+  saveShot(params: ShotSaveParams, allocation?: { newId: string }): ShotInfo {
     const title = required(params.title, 'Shot title');
-    if (params.authoringIR === null && params.prompt?.trim())
-      throw new Error('Shot prompt must be empty when authoringIR is cleared.');
-    let authoringIR: ProductionShotAuthoringIR | undefined;
-    if (params.authoringIR !== undefined && params.authoringIR !== null)
-      authoringIR = validateProductionAuthoringIR(
-        params.authoringIR,
-        'shot',
-      ) as ProductionShotAuthoringIR;
-    const prompt = authoringIR?.prompt ?? params.prompt;
-    if (authoringIR && params.prompt !== undefined && params.prompt !== authoringIR.prompt)
-      throw new Error('Shot prompt must match authoringIR.prompt.');
-    if (prompt !== undefined && prompt.length > 20000) {
+    if (params.prompt !== undefined && params.prompt.length > 20000)
       throw new Error('Shot prompt must be at most 20000 characters.');
-    }
-    return this.projects.access(true, (database, project) => {
-      const repositories = createRepositories(database);
-      const scene = repositories.scenes.get(params.sceneId);
-      if (!scene || scene.projectId !== project.id) throw new Error('Scene was not found.');
-      const existing = params.shotId ? repositories.shots.get(params.shotId) : undefined;
-      if (params.shotId && (!existing || existing.sceneId !== scene.id)) {
-        throw new Error('Shot was not found.');
-      }
-      if (scene.archivedAt || existing?.archivedAt) throw new Error('场次或镜头已归档，请先恢复。');
-      if (existing && params.expectedRowVersion !== existing.rowVersion) {
-        throw new Error('SHOT_ROW_VERSION_CONFLICT');
-      }
-      if (params.authoringIR && authoringIR)
-        validateProductionIRReferences(database, project.id, authoringIR);
-      if (params.authoringIR === undefined && existing?.authoringIRJson)
-        authoringIR = validateProductionAuthoringIR(
-          JSON.parse(existing.authoringIRJson),
-          'shot',
-        ) as ProductionShotAuthoringIR;
-      if (params.authoringIR === undefined && params.prompt !== undefined)
-        authoringIR = params.prompt.trim()
-          ? { ...(authoringIR ?? { schemaVersion: 1, kind: 'shot' }), prompt: params.prompt }
-          : undefined;
-      if (authoringIR)
-        authoringIR = validateProductionAuthoringIR(
-          authoringIR,
-          'shot',
-        ) as ProductionShotAuthoringIR;
-      if (params.documentId) {
-        const document = repositories.documents.get(params.documentId);
-        if (!document || document.projectId !== project.id) {
-          throw new Error('Shot document was not found.');
+    return this.projects.access(true, (db, project) =>
+      db.transaction(() => {
+        const repos = createRepositories(db),
+          scene = repos.scenes.get(params.sceneId);
+        if (!scene || scene.projectId !== project.id) throw new Error('Scene was not found.');
+        const current = params.shotId ? repos.shots.get(params.shotId) : undefined;
+        if (params.shotId && (!current || current.sceneId !== scene.id))
+          throw new Error('Shot was not found.');
+        if (scene.archivedAt || current?.archivedAt)
+          throw new Error('场次或镜头已归档，请先恢复。');
+        if (current && current.rowVersion !== params.expectedRowVersion)
+          throw new Error('SHOT_ROW_VERSION_CONFLICT');
+        const bindings =
+          params.bindings === undefined
+            ? current?.bindingsJson
+              ? validatePromptBindings(JSON.parse(current.bindingsJson))
+              : undefined
+            : params.bindings === null
+              ? undefined
+              : validatePromptBindings(params.bindings);
+        if (bindings) validatePromptBindingReferences(db, project.id, bindings);
+        const timing =
+          params.timing === undefined
+            ? current?.timingJson
+              ? validateProductionTiming(JSON.parse(current.timingJson))
+              : undefined
+            : validateProductionTiming(params.timing);
+        if (params.documentId) {
+          const document = repos.documents.get(params.documentId),
+            owner = repos.shots.findByDocumentId(params.documentId);
+          if (!document || document.projectId !== project.id || (owner && owner.id !== current?.id))
+            throw new Error('Shot document was not found or is already attached.');
         }
-        const owner = repositories.shots.findByDocumentId(params.documentId);
-        if (owner && owner.id !== (params.shotId ?? existing?.id)) {
-          throw new Error('Shot document is already attached to another shot.');
-        }
-      }
-      const now = new Date().toISOString();
-      const record: ShotRecord = {
-        id: existing?.id ?? randomUUID(),
-        sceneId: scene.id,
-        title,
-        position:
-          existing?.position ??
-          (repositories.shots.listByScene(scene.id, true).at(-1)?.position ?? -1) + 1,
-        status: params.status ?? existing?.status ?? 'draft',
-        documentId: params.documentId ?? existing?.documentId,
-        prompt: authoringIR?.prompt,
-        authoringIRJson: authoringIR ? JSON.stringify(authoringIR) : undefined,
-        rowVersion: existing?.rowVersion ?? 0,
-        createdAt: existing?.createdAt ?? now,
-        updatedAt: now,
-      };
-      repositories.shots.save(record);
-      if (params.referenceBindings !== undefined) {
-        const bindings = params.referenceBindings ?? undefined;
-        if (!shotReferenceBindingsTableExists(database)) {
-          if (bindings) throw new Error('镜头参考图存储尚未迁移，请重启项目后重试。');
-        }
-        if (bindings)
-          this.validateShotReferenceBindings(
-            database,
-            project.id,
-            {
-              scene_id: scene.id,
-              shotIR: record.authoringIRJson ?? existing?.authoringIRJson ?? null,
-            },
-            bindings,
-          );
-        if (bindings && shotReferenceBindingsTableExists(database))
-          database
-            .prepare(
-              `INSERT INTO shot_reference_bindings(shot_id,project_id,bindings_json,updated_at)
-               VALUES(?,?,?,?)
-               ON CONFLICT(shot_id) DO UPDATE SET
-                 project_id=excluded.project_id,bindings_json=excluded.bindings_json,
-                 updated_at=excluded.updated_at`,
-            )
-            .run(record.id, project.id, JSON.stringify(bindings), now);
-        else if (shotReferenceBindingsTableExists(database))
-          database
-            .prepare('DELETE FROM shot_reference_bindings WHERE shot_id=? AND project_id=?')
-            .run(record.id, project.id);
-      }
-      rebuildLibraryChunksForRecord(
-        database,
-        project.id,
-        {
-          sourceType: 'shot',
-          sourceId: record.id,
-          documentId: record.documentId,
-          status: record.status || 'active',
-          title: record.title,
-          content: [record.title, record.prompt?.trim()].filter(Boolean).join('\n'),
-          scopeType: 'shot',
-          scopeId: record.id,
-        },
-        now,
-      );
-      repositories.projects.touch(now);
-      project.updatedAt = now;
-      return this.toShotInfo(
-        repositories.shots.get(record.id)!,
-        this.readShotReferenceBindings(database, project.id, record.id),
-      );
-    });
+        const now = new Date().toISOString(),
+          id = current?.id ?? allocation?.newId ?? randomUUID();
+        const record: ShotRecord = {
+          id,
+          sceneId: scene.id,
+          title,
+          prompt: params.prompt ?? current?.prompt,
+          bindingsJson: bindings ? JSON.stringify(bindings) : undefined,
+          timingJson: timing ? JSON.stringify(timing) : undefined,
+          position:
+            current?.position ??
+            (repos.shots.listByScene(scene.id, true).at(-1)?.position ?? -1) + 1,
+          status: params.status ?? current?.status ?? 'draft',
+          documentId: params.documentId ?? current?.documentId,
+          rowVersion: current?.rowVersion ?? 0,
+          createdAt: current?.createdAt ?? now,
+          updatedAt: now,
+        };
+        repos.shots.save(record);
+        if (params.referenceBindings !== undefined)
+          this.saveShotReferenceBindings({
+            shotId: id,
+            referenceBindings: params.referenceBindings,
+          });
+        rebuildLibraryChunksForRecord(
+          db,
+          project.id,
+          {
+            sourceType: 'shot',
+            sourceId: id,
+            documentId: record.documentId,
+            status: record.status,
+            title,
+            content: [title, record.prompt].filter(Boolean).join('\n'),
+            scopeType: 'shot',
+            scopeId: id,
+          },
+          now,
+        );
+        repos.projects.touch(now);
+        project.updatedAt = now;
+        return this.toShotInfo(
+          repos.shots.get(id)!,
+          this.readShotReferenceBindings(db, project.id, id),
+        );
+      })(),
+    );
   }
-
-  private toShotInfo(
-    record: {
-      id: string;
-      sceneId: string;
-      title: string;
-      position: number;
-      status: string;
-      documentId?: string;
-      prompt?: string;
-      archivedAt?: string;
-      authoringIRJson?: string;
-      rowVersion: number;
-      createdAt: string;
-      updatedAt: string;
-    },
-    referenceBindings?: ShotReferenceBindingInfo,
-  ): ShotInfo {
+  private toShotInfo(record: ShotRecord, referenceBindings?: ShotReferenceBindingInfo): ShotInfo {
     return {
       id: record.id,
       sceneId: record.sceneId,
@@ -907,11 +703,11 @@ export class ContentService {
       documentId: record.documentId,
       archivedAt: record.archivedAt,
       prompt: record.prompt,
-      authoringIR: record.authoringIRJson
-        ? (validateProductionAuthoringIR(
-            JSON.parse(record.authoringIRJson),
-            'shot',
-          ) as ProductionShotAuthoringIR)
+      bindings: record.bindingsJson
+        ? validatePromptBindings(JSON.parse(record.bindingsJson))
+        : undefined,
+      timing: record.timingJson
+        ? validateProductionTiming(JSON.parse(record.timingJson))
         : undefined,
       referenceBindings,
       rowVersion: record.rowVersion,
@@ -919,7 +715,6 @@ export class ContentService {
       updatedAt: record.updatedAt,
     };
   }
-
   saveShotStoryboard(params: ShotStoryboardSaveParams): DocumentDetail {
     const title = required(params.title, 'Storyboard title');
     const resolved = this.projects.access(false, (database, project) => {
@@ -966,7 +761,6 @@ export class ContentService {
     }
     return document;
   }
-
   listConstraints(): ConstraintInfo[] {
     return this.projects.access(false, (database, project) =>
       createRepositories(database)
@@ -983,7 +777,6 @@ export class ContentService {
         })),
     );
   }
-
   listConversations(params: ConversationListParams): ConversationPage {
     const query = params.query?.trim().toLocaleLowerCase();
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
@@ -1008,7 +801,6 @@ export class ContentService {
         }
         return sliceConversationPage(conversations, 0, limit);
       }
-
       const paged = repo.listPageByProject(project.id, {
         limit: limit + 1,
         cursor: params.cursor,
@@ -1024,7 +816,6 @@ export class ContentService {
       };
     });
   }
-
   createConversation(params: ConversationCreateParams): ConversationInfo {
     if (!scopeTypes.has(params.scopeType)) throw new Error('Conversation scope is invalid.');
     return this.projects.access(true, (database, project) => {
@@ -1046,7 +837,6 @@ export class ContentService {
       return record;
     });
   }
-
   updateConversation(params: ConversationUpdateParams): ConversationInfo {
     const title = required(params.title, 'Conversation title');
     return this.projects.access(true, (database, project) => {
@@ -1064,7 +854,6 @@ export class ContentService {
       return asConversation(record);
     });
   }
-
   archiveConversation(params: ConversationArchiveParams): ConversationInfo {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -1081,7 +870,6 @@ export class ContentService {
       return asConversation(record);
     });
   }
-
   restoreConversation(params: ConversationRestoreParams): ConversationInfo {
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -1098,7 +886,6 @@ export class ContentService {
       return asConversation(record);
     });
   }
-
   getConversationModelPreference(
     params: ConversationModelPreferenceGetParams,
   ): ConversationModelPreferenceInfo | null {
@@ -1114,7 +901,6 @@ export class ContentService {
       );
     });
   }
-
   listConversationModelPreferences(conversationId: string): ConversationModelPreferenceInfo[] {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -1125,7 +911,6 @@ export class ContentService {
       return repositories.conversationModelPreferences.listByConversation(conversationId);
     });
   }
-
   setConversationModelPreference(
     params: ConversationModelPreferenceSetParams,
   ): ConversationModelPreferenceInfo {
@@ -1152,7 +937,6 @@ export class ContentService {
       return record;
     });
   }
-
   clearConversationModelPreference(params: ConversationModelPreferenceClearParams): {
     cleared: boolean;
   } {
@@ -1172,7 +956,6 @@ export class ContentService {
       return { cleared: Boolean(existed) };
     });
   }
-
   getConversationPromptTemplate(conversationId: string): ConversationPromptTemplateInfo {
     return this.projects.access(false, (database, project) => {
       const conversation = createRepositories(database).conversations.get(conversationId);
@@ -1204,7 +987,6 @@ export class ContentService {
         : { conversationId, content: '', rowVersion: 0 };
     });
   }
-
   saveConversationPromptTemplate(
     params: ConversationPromptTemplateSaveParams,
   ): ConversationPromptTemplateInfo {
@@ -1281,7 +1063,6 @@ export class ContentService {
       })(),
     );
   }
-
   listMessages(params: ChatMessageListParams): ChatMessagePage {
     return this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -1306,7 +1087,6 @@ export class ContentService {
       return { items, nextCursor: hasMore ? items[0]?.id : undefined };
     });
   }
-
   saveMessage(params: ChatMessageSaveParams): ChatMessageInfo {
     if (!params.content.trim() && params.status !== 'streaming') {
       throw new Error('Message content is required.');
@@ -1356,15 +1136,15 @@ export class ContentService {
       return record;
     });
   }
-
   messageToDocument(params: MessageDocumentParams): DocumentDetail {
     return this.workflow.createDocumentDraftFromMessage({
       messageId: params.messageId,
       title: params.title,
     }).document;
   }
-
-  messageToMemory(messageId: string): { id: string } {
+  messageToMemory(messageId: string): {
+    id: string;
+  } {
     const content = this.getMessageContent(messageId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -1396,8 +1176,9 @@ export class ContentService {
       return { id };
     });
   }
-
-  messageToConstraint(params: MessageConstraintParams): { id: string } {
+  messageToConstraint(params: MessageConstraintParams): {
+    id: string;
+  } {
     const content = this.getMessageContent(params.messageId);
     return this.projects.access(true, (database, project) => {
       const repositories = createRepositories(database);
@@ -1431,11 +1212,9 @@ export class ContentService {
       return { id };
     });
   }
-
   private getMessageContent(messageId: string): string {
     return this.getMessageContext(messageId).content;
   }
-
   private getMessageContext(messageId: string): {
     content: string;
     conversation: ConversationRecord;
@@ -1451,7 +1230,6 @@ export class ContentService {
       return { content: message.content, conversation };
     });
   }
-
   private assertScope(
     repositories: ReturnType<typeof createRepositories>,
     projectId: string,
@@ -1470,7 +1248,6 @@ export class ContentService {
     if (!shot || scene?.projectId !== projectId) throw new Error('Shot was not found.');
   }
 }
-
 function toAttemptInfo(attempt: LlmGenerationAttemptRecord): LlmAttemptInfo {
   let persistedUsage: NormalizedLlmUsage | undefined;
   if (attempt.rawUsageJson) {

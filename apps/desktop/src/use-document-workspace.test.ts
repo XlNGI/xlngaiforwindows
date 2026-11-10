@@ -1,14 +1,12 @@
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentDetail } from '@ai-video/contracts';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { callWorker } from './worker-client';
 import { selectWorkerScope } from './worker-scope';
-
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 vi.mock('./markdown-import-client', () => ({ readMarkdownDocument: vi.fn() }));
-
 const savedDocument: DocumentDetail = {
   id: 'd-outline',
   projectId: 'project',
@@ -30,12 +28,10 @@ const savedDocument: DocumentDetail = {
     createdAt: 'now',
   },
 };
-
 describe('useDocumentWorkspace close', () => {
   const closeDocumentPanel = vi.fn();
   const openDocumentWorkspace = vi.fn();
   const syncDetachedPanel = vi.fn();
-
   beforeEach(() => {
     selectWorkerScope(undefined);
     closeDocumentPanel.mockReset();
@@ -43,7 +39,6 @@ describe('useDocumentWorkspace close', () => {
     syncDetachedPanel.mockReset();
     vi.mocked(callWorker).mockReset();
   });
-
   const renderWorkspace = () =>
     renderHook(() =>
       useDocumentWorkspace({
@@ -53,7 +48,175 @@ describe('useDocumentWorkspace close', () => {
         closeDocumentPanel,
       }),
     );
-
+  it('loads and saves a character voice inline, includes it in close protection, and reopens it', async () => {
+    const character: DocumentDetail = {
+      ...savedDocument,
+      kind: 'character',
+      currentVersion: {
+        ...savedDocument.currentVersion!,
+        bindings: { schemaVersion: 1, voiceDocumentId: 'voice' },
+      },
+    };
+    let voice: DocumentDetail = {
+      ...savedDocument,
+      id: 'voice',
+      kind: 'voice',
+      title: '角色音色',
+      rowVersion: 3,
+      currentVersion: {
+        ...savedDocument.currentVersion!,
+        documentId: 'voice',
+        contentMarkdown: '低沉声音',
+        sampleText: '原试音',
+      },
+    };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'document.get')
+        return Promise.resolve(
+          (params as { documentId: string }).documentId === 'voice' ? voice : character,
+        );
+      if (method === 'document.draft.save') {
+        const input = params as {
+          documentId: string;
+          contentMarkdown: string;
+          sampleText?: string;
+        };
+        if (input.documentId === 'voice') {
+          voice = {
+            ...voice,
+            rowVersion: 4,
+            currentVersion: {
+              ...voice.currentVersion!,
+              contentMarkdown: input.contentMarkdown,
+              sampleText: input.sampleText,
+            },
+          };
+          return Promise.resolve(voice);
+        }
+        return Promise.resolve(character);
+      }
+      return Promise.resolve(method === 'document.list' ? [character, voice] : []);
+    });
+    const { result } = renderWorkspace();
+    await act(async () => result.current.selectDocument(character));
+    await waitFor(() => expect(result.current.characterVoicePrompt.content).toBe('低沉声音'));
+    act(() => {
+      result.current.characterVoicePrompt.setContent('沉稳清晰');
+      result.current.characterVoicePrompt.setSampleText('新的试音台词');
+    });
+    expect(result.current.documentContent).toBe('# draft');
+    expect(result.current.documentDirty).toBe(true);
+    act(() => result.current.requestCloseDocument());
+    expect(result.current.documentCloseConfirmation).toBe(true);
+    expect(closeDocumentPanel).not.toHaveBeenCalled();
+    await act(async () => result.current.saveAndCloseDocument());
+    expect(callWorker).toHaveBeenCalledWith(
+      'document.draft.save',
+      expect.objectContaining({
+        documentId: 'voice',
+        kind: 'voice',
+        contentMarkdown: '沉稳清晰',
+        sampleText: '新的试音台词',
+        expectedDocumentRowVersion: 3,
+      }),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'document.draft.save',
+      expect.objectContaining({
+        documentId: character.id,
+      }),
+    );
+    expect(result.current.document?.currentVersion?.bindings).toEqual({
+      schemaVersion: 1,
+      voiceDocumentId: 'voice',
+    });
+    expect(result.current.documentDirty).toBe(false);
+    expect(closeDocumentPanel).toHaveBeenCalledOnce();
+    await act(async () => result.current.selectDocument({ ...savedDocument, id: 'other' }));
+    await act(async () => result.current.selectDocument(character));
+    await waitFor(() =>
+      expect(result.current.characterVoicePrompt.sampleText).toBe('新的试音台词'),
+    );
+  });
+  it('retains inline voice edits on a CAS failure and blocks switching until saved or discarded', async () => {
+    const character: DocumentDetail = {
+      ...savedDocument,
+      kind: 'character',
+      currentVersion: {
+        ...savedDocument.currentVersion!,
+        bindings: { schemaVersion: 1, voiceDocumentId: 'voice' },
+      },
+    };
+    const voice: DocumentDetail = { ...savedDocument, id: 'voice', kind: 'voice' };
+    vi.mocked(callWorker).mockImplementation((method, params) => {
+      if (method === 'document.get')
+        return Promise.resolve(
+          (params as { documentId: string }).documentId === 'voice' ? voice : character,
+        );
+      if (method === 'document.draft.save') return Promise.reject(new Error('版本冲突'));
+      return Promise.resolve(method === 'document.list' ? [character, voice] : []);
+    });
+    const { result } = renderWorkspace();
+    await act(async () => result.current.selectDocument(character));
+    await waitFor(() => expect(result.current.characterVoicePrompt.document?.id).toBe('voice'));
+    act(() => result.current.characterVoicePrompt.setContent('保留的修改'));
+    await act(async () => result.current.saveAndCloseDocument());
+    expect(result.current.contentMessage).toBe('版本冲突');
+    expect(result.current.characterVoicePrompt.content).toBe('保留的修改');
+    expect(result.current.documentDirty).toBe(true);
+    expect(closeDocumentPanel).not.toHaveBeenCalled();
+    await act(async () => result.current.openDocumentById('other'));
+    expect(callWorker).not.toHaveBeenCalledWith('document.get', { documentId: 'other' });
+    act(() => result.current.discardDocumentChanges());
+    expect(result.current.documentDirty).toBe(false);
+    expect(result.current.characterVoicePrompt.content).toBe('# draft');
+  });
+  it('treats audition-only edits as dirty and saves the same-version voice IR with CAS', async () => {
+    const voice: DocumentDetail = {
+      ...savedDocument,
+      kind: 'voice',
+      currentVersion: {
+        ...savedDocument.currentVersion!,
+        sampleText: '原试音',
+        bindings: { schemaVersion: 1 as const },
+      },
+    };
+    vi.mocked(callWorker).mockImplementation(
+      (method) =>
+        Promise.resolve(
+          method === 'document.draft.save'
+            ? voice
+            : method === 'document.list'
+              ? [voice]
+              : method === 'document.versions'
+                ? [voice.currentVersion]
+                : [],
+        ) as never,
+    );
+    const { result } = renderWorkspace();
+    act(() => {
+      result.current.setDocument(voice);
+      result.current.setDocumentKind('voice');
+      result.current.setDocumentTitle(voice.title);
+      result.current.setDocumentContent('# draft');
+      result.current.setDocumentBindings(voice.currentVersion!.bindings ?? undefined);
+      result.current.setDocumentSampleText('原试音');
+    });
+    expect(result.current.documentDirty).toBe(false);
+    act(() => result.current.setDocumentSampleText('新试音'));
+    expect(result.current.documentDirty).toBe(true);
+    await act(async () => {
+      await result.current.saveAndCloseDocument();
+    });
+    expect(callWorker).toHaveBeenCalledWith(
+      'document.draft.save',
+      expect.objectContaining({
+        expectedDocumentRowVersion: 1,
+        sampleText: '新试音',
+        bindings: { schemaVersion: 1 as const },
+      }),
+    );
+  });
   it('refreshes a running save without opening a panel or replacing dirty content/CAS', async () => {
     selectWorkerScope({ projectId: 'project', projectSessionId: 'session' });
     vi.mocked(callWorker).mockImplementation((method) =>
@@ -86,35 +249,27 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.document?.rowVersion).toBe(2);
     expect(result.current.documentTitle).toBe('Updated');
   });
-
   it('closes a clean editor without confirmation', () => {
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.requestCloseDocument();
     });
-
     expect(closeDocumentPanel).toHaveBeenCalledOnce();
     expect(result.current.documentCloseConfirmation).toBe(false);
   });
-
   it('asks before discarding untitled content', () => {
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocumentContent('# draft');
     });
     act(() => {
       result.current.requestCloseDocument();
     });
-
     expect(closeDocumentPanel).not.toHaveBeenCalled();
     expect(result.current.documentCloseConfirmation).toBe(true);
   });
-
   it('asks before discarding edits to an existing document', () => {
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocument(savedDocument);
       result.current.setDocumentTitle(savedDocument.title);
@@ -127,14 +282,11 @@ describe('useDocumentWorkspace close', () => {
     act(() => {
       result.current.requestCloseDocument();
     });
-
     expect(closeDocumentPanel).not.toHaveBeenCalled();
     expect(result.current.documentCloseConfirmation).toBe(true);
   });
-
   it('discards dirty changes and closes the panel', () => {
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocumentTitle('Draft');
       result.current.setDocumentContent('# draft');
@@ -145,13 +297,11 @@ describe('useDocumentWorkspace close', () => {
     act(() => {
       result.current.discardDocumentChanges();
     });
-
     expect(result.current.documentTitle).toBe('');
     expect(result.current.documentContent).toBe('');
     expect(result.current.documentCloseConfirmation).toBe(false);
     expect(closeDocumentPanel).toHaveBeenCalledOnce();
   });
-
   it('saves dirty changes and then closes the panel', async () => {
     vi.mocked(callWorker).mockImplementation((method: string) => {
       if (method === 'document.draft.save') return Promise.resolve(savedDocument);
@@ -161,16 +311,13 @@ describe('useDocumentWorkspace close', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocumentTitle('Draft');
       result.current.setDocumentContent('# draft');
     });
-
     await act(async () => {
       await result.current.saveAndCloseDocument();
     });
-
     expect(callWorker).toHaveBeenCalledWith(
       'document.draft.save',
       expect.objectContaining({
@@ -181,26 +328,21 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.documentCloseConfirmation).toBe(false);
     expect(closeDocumentPanel).toHaveBeenCalledOnce();
   });
-
   it('keeps the panel open when save-and-close fails', async () => {
     vi.mocked(callWorker).mockRejectedValue(new Error('保存失败'));
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocumentTitle('Draft');
       result.current.setDocumentContent('# draft');
       result.current.setDocumentCloseConfirmation(true);
     });
-
     await act(async () => {
       await result.current.saveAndCloseDocument();
     });
-
     expect(result.current.documentCloseConfirmation).toBe(true);
     expect(closeDocumentPanel).not.toHaveBeenCalled();
     expect(result.current.contentMessage).toBe('保存失败');
   });
-
   it('discards local edits and archives the last saved document version', async () => {
     const archivedDocument = {
       ...savedDocument,
@@ -214,7 +356,6 @@ describe('useDocumentWorkspace close', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocument(savedDocument);
       result.current.setDocumentTitle(savedDocument.title);
@@ -227,7 +368,6 @@ describe('useDocumentWorkspace close', () => {
     await act(async () => {
       await result.current.confirmArchiveDocument(false);
     });
-
     expect(callWorker).toHaveBeenCalledWith('document.archive', {
       documentId: savedDocument.id,
       expectedDocumentRowVersion: savedDocument.rowVersion,
@@ -237,7 +377,6 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.archivedDocuments).toEqual([archivedDocument]);
     expect(result.current.documentArchiveConfirmation).toBe(false);
   });
-
   it('archives a non-selected directory item without replacing the open document', async () => {
     const currentDocument: DocumentDetail = {
       ...savedDocument,
@@ -262,7 +401,6 @@ describe('useDocumentWorkspace close', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocument(currentDocument);
       result.current.setDocumentTitle(currentDocument.title);
@@ -274,7 +412,6 @@ describe('useDocumentWorkspace close', () => {
     await act(async () => {
       await result.current.confirmArchiveDocument(false);
     });
-
     expect(callWorker).toHaveBeenCalledWith('document.archive', {
       documentId: directoryTarget.id,
       expectedDocumentRowVersion: directoryTarget.rowVersion,
@@ -285,7 +422,6 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.archivedDocuments).toEqual([archivedDocument]);
     expect(result.current.documentArchiveConfirmation).toBe(false);
   });
-
   it('keeps a successful save in the editor when the following archive fails', async () => {
     const editedDocument: DocumentDetail = {
       ...savedDocument,
@@ -304,7 +440,6 @@ describe('useDocumentWorkspace close', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();
-
     act(() => {
       result.current.setDocument(savedDocument);
       result.current.setDocumentTitle(editedDocument.title);
@@ -317,7 +452,6 @@ describe('useDocumentWorkspace close', () => {
     await act(async () => {
       await result.current.confirmArchiveDocument(true);
     });
-
     expect(callWorker).toHaveBeenCalledWith(
       'document.draft.save',
       expect.objectContaining({ expectedDocumentRowVersion: savedDocument.rowVersion }),
@@ -332,7 +466,6 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.documentArchiveConfirmation).toBe(true);
     expect(result.current.contentMessage).toBe('文档版本已变化');
   });
-
   it('restores an archived document into the active directory and editor', async () => {
     const archivedSummary = {
       ...savedDocument,
@@ -348,12 +481,10 @@ describe('useDocumentWorkspace close', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     const { result } = renderWorkspace();
-
     let restored: DocumentDetail | undefined;
     await act(async () => {
       restored = await result.current.restoreArchivedDocument(archivedSummary);
     });
-
     expect(restored).toEqual(savedDocument);
     expect(callWorker).toHaveBeenCalledWith('document.unarchive', {
       documentId: savedDocument.id,
@@ -364,7 +495,6 @@ describe('useDocumentWorkspace close', () => {
     expect(result.current.document).toEqual(savedDocument);
     expect(openDocumentWorkspace).toHaveBeenCalledWith(savedDocument.kind);
   });
-
   it('applies batch deletion to the open editor and preserves successful deletion if refresh fails', async () => {
     vi.mocked(callWorker).mockRejectedValue(new Error('刷新失败'));
     const { result } = renderWorkspace();
@@ -385,7 +515,6 @@ describe('useDocumentWorkspace close', () => {
     expect(closeDocumentPanel).toHaveBeenCalledOnce();
   });
 });
-
 it('keeps delayed save, follow-up reads and finally bound to the original project after a view switch', async () => {
   selectWorkerScope({ projectId: 'A', projectSessionId: 'A-epoch' });
   let finish!: (value: DocumentDetail) => void;

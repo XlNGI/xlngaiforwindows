@@ -6,12 +6,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
-function productionIR(prompt, shot = false) {
+function promptRecord(prompt, shot = false) {
   return {
-    schemaVersion: 1,
-    kind: shot ? 'shot' : 'scene',
     prompt,
-    ...(shot ? { timing: { estimatedDurationSeconds: 4, rationale: 'action and pause' } } : {}),
+    ...(shot ? { timing: { estimatedDurationSeconds: 4 } } : {}),
   };
 }
 
@@ -315,20 +313,26 @@ try {
           scenes: [
             {
               title: '庭院',
-              sceneDocumentId: courtyardSetting.documentId,
-              characterDocumentIds: [],
-              authoringIR: productionIR('庭院'),
+              bindings: {
+                schemaVersion: 1,
+                sceneDocumentIds: [courtyardSetting.documentId],
+                characterDocumentIds: [],
+              },
+              ...promptRecord('庭院'),
               shots: [
-                { title: '远景', authoringIR: productionIR('清晨的庭院', true) },
-                { title: '近景', authoringIR: productionIR('门上的霜', true) },
+                { title: '远景', ...promptRecord('清晨的庭院', true) },
+                { title: '近景', ...promptRecord('门上的霜', true) },
               ],
             },
             {
               title: '书房',
-              sceneDocumentId: studySetting.documentId,
-              characterDocumentIds: [],
-              authoringIR: productionIR('书房'),
-              shots: [{ title: '信件特写', authoringIR: productionIR('桌上的信', true) }],
+              bindings: {
+                schemaVersion: 1,
+                sceneDocumentIds: [studySetting.documentId],
+                characterDocumentIds: [],
+              },
+              ...promptRecord('书房'),
+              shots: [{ title: '信件特写', ...promptRecord('桌上的信', true) }],
             },
           ],
         };
@@ -407,7 +411,8 @@ try {
             {
               shotId: target.id,
               expectedRowVersion: authored.rowVersion,
-              authoringIR: authored.authoring,
+              prompt: authored.authoring.prompt,
+              bindings: authored.authoring.bindings,
             },
           ],
         };

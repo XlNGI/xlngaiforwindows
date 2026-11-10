@@ -263,6 +263,8 @@ pub(crate) enum LlmStreamEvent {
         tool_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         received_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        native_elapsed_ms: Option<u64>,
     },
     Started,
     Delta {
@@ -693,7 +695,7 @@ fn stream_provider_with_timeouts<F, A>(
     runtime: LlmRuntimeRequest,
     secret: CredentialSecret,
     cancellation: Arc<LlmCancellation>,
-    mut emit: F,
+    emit: F,
     allow_http_for_test: bool,
     acquire: A,
     timeouts: StreamTimeouts,
@@ -705,6 +707,18 @@ where
         &LlmCancellation,
     ) -> Result<request_guard::Permit, request_guard::AdmissionError>,
 {
+    let native_started = Instant::now();
+    let mut forward = emit;
+    let mut emit = |mut event: LlmStreamEvent| {
+        if let LlmStreamEvent::RequestProgress {
+            native_elapsed_ms, ..
+        } = &mut event
+        {
+            *native_elapsed_ms =
+                Some(native_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        }
+        forward(event)
+    };
     if cancellation.is_cancelled() {
         return Err(StreamFailure::cancelled());
     }
@@ -1541,6 +1555,7 @@ fn request_progress(stage: &str, received_bytes: Option<u64>) -> LlmStreamEvent 
         argument_bytes: None,
         tool_name: None,
         received_bytes,
+        native_elapsed_ms: None,
         request_body_hash: None,
         request_body_bytes: None,
         wire_context: None,
@@ -2191,6 +2206,7 @@ impl SseParser {
                 ),
                 tool_name: name,
                 received_bytes: None,
+                native_elapsed_ms: None,
             })?;
         }
         Ok(())
@@ -3292,12 +3308,21 @@ mod tests {
             });
             let mut diagnostics = None;
             let mut reported_hash = None;
+            let mut progress_times = Vec::new();
             let scheduler = request_guard::isolated_for_tests();
             stream_provider_with_admission(
                 runtime,
                 CredentialSecret::for_test("local-mock-key"),
                 Arc::new(LlmCancellation::default()),
                 |event| {
+                    if let LlmStreamEvent::RequestProgress {
+                        native_elapsed_ms, ..
+                    } = &event
+                    {
+                        progress_times.push(
+                            native_elapsed_ms.expect("native progress needs monotonic timing"),
+                        );
+                    }
                     if let LlmStreamEvent::RequestProgress {
                         wire_context: Some(wire),
                         request_body_hash,
@@ -3314,6 +3339,8 @@ mod tests {
             )
             .unwrap();
             let sent = server.join().unwrap();
+            assert!(progress_times.len() >= 4);
+            assert!(progress_times.windows(2).all(|pair| pair[0] <= pair[1]));
             let wire = diagnostics.unwrap();
             use sha2::Digest;
             assert_eq!(

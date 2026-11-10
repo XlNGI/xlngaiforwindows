@@ -293,6 +293,19 @@ describe('GenerationService', () => {
     });
     generations.recordProviderUsage(prepared.stream, 'r1', { outputTokens: 10, totalTokens: 110 });
     generations.recordProviderUsage(prepared.stream, 'r1', { outputTokens: 10, totalTokens: 110 });
+    generations.recordProviderRequest(prepared.stream, 'r1', 'sent', {
+      hostRequestId: 'host-r1',
+      workerElapsedMs: 500,
+      nativeElapsedMs: 20,
+    });
+    generations.recordProviderRequest(prepared.stream, 'r1', 'sent', {
+      workerElapsedMs: 999,
+      nativeElapsedMs: 30,
+    });
+    generations.recordProviderRequest(prepared.stream, 'r1', 'headers', {
+      workerElapsedMs: 850,
+      nativeElapsedMs: 370,
+    });
     generations.recordProviderRequest(prepared.stream, 'r1', 'complete', {});
     generations.recordProviderRequest(prepared.stream, 'r2', 'failed', {
       errorCode: 'PROVIDER_FAILED',
@@ -314,6 +327,14 @@ describe('GenerationService', () => {
       db.prepare('SELECT metadata_json FROM llm_provider_requests').all(),
     );
     expect(JSON.stringify(rows)).not.toContain('discard-me');
+    expect(
+      complete.assistantMessage.attempt?.accounting?.requests.find((r) => r.requestId === 'r1')
+        ?.timing,
+    ).toEqual({
+      hostRequestId: 'host-r1',
+      workerFirstMs: { sent: 500, headers: 850 },
+      nativeFirstMs: { sent: 20, headers: 370 },
+    });
     expect(indexLlmAttempt).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({

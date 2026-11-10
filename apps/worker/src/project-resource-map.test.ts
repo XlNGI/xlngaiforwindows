@@ -9,15 +9,16 @@ import { AgentSystemToolService } from './agent-system-tool-service.js';
 import { ProjectStructureCompiler } from './structure-compiler.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { validateToolArguments } from '@earendil-works/pi-ai';
-
-const fixtures: Array<{ projects: ProjectService; directory: string }> = [];
+const fixtures: Array<{
+  projects: ProjectService;
+  directory: string;
+}> = [];
 afterEach(async () => {
   for (const f of fixtures.splice(0)) {
     f.projects.close();
     await rm(f.directory, { recursive: true, force: true });
   }
 });
-
 async function setup() {
   const directory = await mkdtemp(join(tmpdir(), 'resource-map-page-'));
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -25,18 +26,17 @@ async function setup() {
   projects.create(join(directory, 'project'), '分页定位');
   return { projects, content: new ContentService(projects) };
 }
-
 it('filters before pagination, reaches shots beyond the old preview and retains parent IDs/CAS', async () => {
   const f = await setup();
   const scene = f.content.saveScene({
     title: '走廊',
-    authoringIR: { schemaVersion: 1, kind: 'scene', prompt: '私有场次正文' },
+    ...{ prompt: '私有场次正文' },
   });
   const shots = Array.from({ length: 45 }, (_, index) =>
     f.content.saveShot({
       sceneId: scene.id,
       title: `镜头${index}`,
-      authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '私有镜头正文' },
+      ...{ prompt: '私有镜头正文' },
     }),
   );
   const read = (options: Record<string, unknown>) =>
@@ -72,11 +72,10 @@ it('filters before pagination, reaches shots beyond the old preview and retains 
   f.content.saveShot({
     sceneId: scene.id,
     title: '新增',
-    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '新镜头' },
+    ...{ prompt: '新镜头' },
   });
   expect(() => read({ offset: 7, expectedRevision: first.revision })).toThrow('revision');
 });
-
 it('advances byte-bounded pages by the actual count without losing documents', async () => {
   const f = await setup();
   const docs = Array.from({ length: 28 }, (_, i) =>
@@ -108,12 +107,11 @@ it('advances byte-bounded pages by the actual count without losing documents', a
   expect([...new Set(seen)].sort()).toEqual(docs.map((d) => d.id).sort());
   expect(read({}).resources.length).toBeLessThanOrEqual(20);
 });
-
 it('exposes and validates paginated lookup through the authorized system tool', async () => {
   const f = await setup();
   const scene = f.content.saveScene({
     title: '实际场次',
-    authoringIR: { schemaVersion: 1, kind: 'scene', prompt: '完整正文不注入目录' },
+    ...{ prompt: '完整正文不注入目录' },
   });
   const conversation = f.content.createConversation({ scopeType: 'project' });
   const service = new AgentSystemToolService(

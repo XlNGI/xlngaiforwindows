@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { AgentExecutionStore } from '@ai-video/persistence';
 import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
-import { reconcileTaskOutputAllocations } from './agent-task-deliverables.js';
+import { reconcileTaskOutputAllocations, saveTaskPlan } from './agent-task-deliverables.js';
 import {
   CREATION_BINDING_TOOLS,
   compatibleCreationTools,
@@ -36,7 +36,62 @@ function executeBusiness(
   write: (args: Record<string, unknown>) => unknown,
 ): string {
   const store = new AgentExecutionStore(db);
-  const { outputKey, outputIndex, outputId: suppliedOutputId, ...args } = input;
+  const {
+    outputKey: suppliedOutputKey,
+    outputIndex,
+    outputId: suppliedOutputId,
+    deliverable,
+    ...args
+  } = input;
+  let outputKey = suppliedOutputKey;
+  let inlinePlan: Record<string, unknown> | undefined;
+  if (deliverable !== undefined) {
+    if (
+      !['document.submit_draft', 'novel.chapter.write_draft'].includes(tool) ||
+      args.documentId ||
+      (tool === 'novel.chapter.write_draft' && args.action !== 'create_chapter') ||
+      !deliverable ||
+      typeof deliverable !== 'object' ||
+      Array.isArray(deliverable)
+    )
+      throw new Error(
+        'INLINE_DELIVERABLE_INVALID: Only one explicitly declared new document/chapter may combine registration with its first save.',
+      );
+    const declaration = deliverable as Record<string, unknown>;
+    if (
+      Object.keys(declaration).some(
+        (k) => !['key', 'description', 'origin', 'sourceRequirementIds'].includes(k),
+      ) ||
+      (outputKey !== undefined && outputKey !== declaration.key) ||
+      suppliedOutputId !== undefined ||
+      (outputIndex !== undefined && outputIndex !== 0)
+    )
+      throw new Error(
+        'INLINE_DELIVERABLE_INVALID: Use a stable single-output key and slot zero, without a separate outputId.',
+      );
+    const generation = db
+      .prepare(
+        'SELECT generation_id FROM agent_task_generations WHERE task_id=? ORDER BY ordinal DESC LIMIT 1',
+      )
+      .get(taskId) as { generation_id: string } | undefined;
+    if (!generation) throw new Error('INLINE_DELIVERABLE_INVALID: Active task generation missing.');
+    inlinePlan = saveTaskPlan(
+      db,
+      projectId,
+      generation.generation_id,
+      [
+        {
+          ...declaration,
+          toolName: tool,
+          minimumCount: 1,
+          intent: 'create',
+          ...(tool === 'document.submit_draft' ? { documentKind: args.documentKind } : {}),
+        },
+      ],
+      taskId,
+    );
+    outputKey = declaration.key;
+  }
   let outputId = suppliedOutputId;
   if (outputKey !== undefined) {
     if (!CREATES.includes(tool) || typeof outputKey !== 'string')
@@ -53,7 +108,11 @@ function executeBusiness(
     outputId = matches[0]!.outputId;
   }
   let key: string | undefined;
-  if (tool === 'document.submit_draft' && args.documentId) {
+  if (tool === 'novel.chapter.write_draft' && args.action !== 'create_chapter') {
+    if (outputId !== undefined)
+      throw new Error('outputId is only valid for creating a planned output.');
+    key = `chapter:${keyPart(args.chapterId)}:${keyPart(args.expectedChapterRowVersion)}:${keyPart(args.baseVersionId)}:${keyPart(args.expectedDocumentRowVersion)}`;
+  } else if (tool === 'document.submit_draft' && args.documentId) {
     key = `document:${keyPart(args.documentId)}:${keyPart(args.baseVersionId)}:${keyPart(args.expectedDocumentRowVersion)}`;
   } else if (tool === 'scene.update_shot_prompts' || tool === 'scene.update_shot_timings') {
     const targets = (args.shots as Array<Record<string, unknown>>).map((s) => [
@@ -114,6 +173,21 @@ function executeBusiness(
   if (outputId !== undefined && !CREATES.includes(tool))
     throw new Error('outputId is only valid for creating a planned output.');
   const serialize = (value: unknown) => unifiedAgentToolRegistry.serializeResult(value);
+  const commit = () => {
+    const value = write(args);
+    return inlinePlan
+      ? {
+          ...(value as Record<string, unknown>),
+          inlinePlan,
+          deliveryState: {
+            saved: true,
+            contentReview: 'pending',
+            instruction:
+              'The committed receipt synchronizes saved facts and the declared output. Required readback/semantic review remain pending; do not add a checkpoint solely to register this save.',
+          },
+        }
+      : value;
+  };
   // Historical tasks have artifacts but no operation binding. Preserve them and require
   // explicit current IDs; never infer independent output identity from a title/body.
   const alreadyBound =
@@ -146,8 +220,8 @@ function executeBusiness(
     ? store.execute(
         { projectId, taskId, operationKey: key, toolName: tool },
         args,
-        () => write(args),
+        commit,
         serialize,
       )
-    : store.withTaskScope(taskId, () => serialize(write(args)));
+    : store.withTaskScope(taskId, () => serialize(commit()));
 }

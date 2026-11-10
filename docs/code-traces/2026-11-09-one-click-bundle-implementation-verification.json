@@ -1,0 +1,679 @@
+{
+  "recordedAt": "2026-11-09T14:48:47.280Z",
+  "baseCommit": "5ced12067bddd1e7478c4c5d89a676bebdf90f88",
+  "workingTreeUncommitted": true,
+  "status": "P1-P6-engineering-and-offline-verified; P7-not-accepted",
+  "sourceFingerprint": "daf9c8a3f45d180f31a367cd3898a0eca72f20d12ec12aa8dc1dca2f0ab7d795",
+  "source": [
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "046f4fdf4834ff83d185e5811a63c1ed62410157001140ebbf0ca2fa655416f1"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/llm_stream.rs",
+      "sha256": "fdd0c9f6c093bf76fc993f1e84f0676a3ff4a7848e48d5bdf762881d8058b0fa"
+    },
+    {
+      "path": "apps/desktop/src/AgentDeliveryFeedback.tsx",
+      "sha256": "9195336a2a125f5ea74ec393956a5d54756e88dcdadd5b326507df378ff95714"
+    },
+    {
+      "path": "apps/desktop/src/App.tsx",
+      "sha256": "9be9528bf900f97c32972f29c70b994b78361902fbc97cb23592ed83fe320034"
+    },
+    {
+      "path": "apps/desktop/src/CharacterSceneWorkspace.test.tsx",
+      "sha256": "6770e658859e517dbd054a19b270ce192218e8e2783bdd3a8dec2f069b130b80"
+    },
+    {
+      "path": "apps/desktop/src/CharacterSceneWorkspace.tsx",
+      "sha256": "b2f594c54ea214364d79bc196c9d3dcfaef0940dde3a780e0a44458b7ab90ceb"
+    },
+    {
+      "path": "apps/desktop/src/ChatPanel.progress.test.tsx",
+      "sha256": "3a7800e02a4cb38e2f68b6d3dcc832e7c0ea9086d509a5db2d9f596fa3521fe6"
+    },
+    {
+      "path": "apps/desktop/src/ChatPanel.tsx",
+      "sha256": "723f0d480c877f520c28cafafbe9eac7411beb5353bcd2b1977212af0b34bb09"
+    },
+    {
+      "path": "apps/desktop/src/ProductionPanel.scene-bindings.test.tsx",
+      "sha256": "33eceb4124ce9753d8efd9f5157c3ee0460660621ba652a719c21bcb2aeb669b"
+    },
+    {
+      "path": "apps/desktop/src/ProductionPanel.test.tsx",
+      "sha256": "3c478d892b1e0145eb06450908c0e3ae859f0f841b969aaa06b3808dd0eabadd"
+    },
+    {
+      "path": "apps/desktop/src/ProductionPanel.tsx",
+      "sha256": "2c781f16743ab167adc342dba5bf5f4219d94daba5fdb21421191c3ddb9d4e69"
+    },
+    {
+      "path": "apps/desktop/src/ShotSpeechPanel.test.tsx",
+      "sha256": "3b52c0f4ea571532cddefda78f3ef35f83597c82eb4b4529e65f646546681af6"
+    },
+    {
+      "path": "apps/desktop/src/ShotSpeechPanel.tsx",
+      "sha256": "0348480544b5897563af20de1c55755e4e29b2188576ffcdb9c91a777ce1518f"
+    },
+    {
+      "path": "apps/desktop/src/ShotWorkspace.tsx",
+      "sha256": "6a052a9af53f17d9fea6d179394e9e518bea6099244f4f090b03b54968545e6a"
+    },
+    {
+      "path": "apps/desktop/src/use-document-workspace.test.ts",
+      "sha256": "602edadafc68a2bfd73593a09a8ae049079f43f0a6f20e88c29785b7fd8b278a"
+    },
+    {
+      "path": "apps/desktop/src/use-document-workspace.ts",
+      "sha256": "481170f1972bf84f0853e87c5162bccc8045048a49351d6b42d6915e609e9201"
+    },
+    {
+      "path": "apps/worker/package.json",
+      "sha256": "6240bbcca4f1a73b0e2c4816667ac0d9d1465df8b7c7b500e002b16427be36e8"
+    },
+    {
+      "path": "apps/worker/scripts/validate-conversation-quality.mjs",
+      "sha256": "69acf29a770e40ed3331a80f2c43b4443738ea9e0b9926550da5a8d9f7a17a81"
+    },
+    {
+      "path": "apps/worker/scripts/validate-m7-sidecar.mjs",
+      "sha256": "6bd1cc68501de4826ce620baea3a22e0396b8d9cd4425315e883cb26a6dd14c7"
+    },
+    {
+      "path": "apps/worker/scripts/validate-production-bundle-sidecar.mjs",
+      "sha256": "612d69b063236bbf9f01ac6c33d25127773776ff47456b2b10e9440964b2ad86"
+    },
+    {
+      "path": "apps/worker/src/agent-business-execution.ts",
+      "sha256": "2e778a4e4d663f49db82cef07716c0eb02577ddaedaf1c73a62f9bd175f5c45e"
+    },
+    {
+      "path": "apps/worker/src/agent-context-budget.test.ts",
+      "sha256": "b82ab34f06cf76025628abe959c52e709d69022c2f07f3fffa3337626bb59c9c"
+    },
+    {
+      "path": "apps/worker/src/agent-context-budget.ts",
+      "sha256": "ff07bba545826d41fbcddea98569aed4f7061d5306933430351f5442f6fa9740"
+    },
+    {
+      "path": "apps/worker/src/agent-context-manager.test.ts",
+      "sha256": "3583fd6ad9ac6c29c36d26694bf96ede151b7dceb5f24dad8bd1f35a1d24e607"
+    },
+    {
+      "path": "apps/worker/src/agent-context-manager.ts",
+      "sha256": "08f4ff0a080f0319bbc1f8d792b5c93bfbfce872254e13134eb7e9f614610a70"
+    },
+    {
+      "path": "apps/worker/src/agent-context-results.ts",
+      "sha256": "3387e5d6fa0f95cfca6a2fdcece129d3c1b4daf5b48ef64db6ba2d1610b4afde"
+    },
+    {
+      "path": "apps/worker/src/agent-delivery-capabilities.ts",
+      "sha256": "c2ffd942be6b95dc492f32c94cda6b5c9611ca1198de14378b1f385891cbc848"
+    },
+    {
+      "path": "apps/worker/src/agent-delivery-feedback.ts",
+      "sha256": "1da740256c95a2a118ceae303c8fd114b6e7bb73700d5f6fa0ba0f5cb778f3e7"
+    },
+    {
+      "path": "apps/worker/src/agent-draft-submission-service.ts",
+      "sha256": "62d24d07a541b8537a5aeb1d866e3bee1437e98a27e8bb006bb2ee33892e8099"
+    },
+    {
+      "path": "apps/worker/src/agent-generation-preparation.ts",
+      "sha256": "90a650261dccfaa319fde83ed9956e05c8d25133ac4355c03ee40b5b663d2abc"
+    },
+    {
+      "path": "apps/worker/src/agent-pipeline-remediation.test.ts",
+      "sha256": "ae19c8840128116d974980d56992a5fb608d545b2f5c6155385605fcf4322f2b"
+    },
+    {
+      "path": "apps/worker/src/agent-prepared-arguments.test.ts",
+      "sha256": "667d5781c3fa1a31ebfceb91ca901cc8ad29273d759d838ff9dc7b62911083a1"
+    },
+    {
+      "path": "apps/worker/src/agent-prepared-arguments.ts",
+      "sha256": "cf43a7dba49fab3af0e1fcd5e8a0c360e1e8efca800f36227ec1992b74b103b0"
+    },
+    {
+      "path": "apps/worker/src/agent-provider-loop-service.test.ts",
+      "sha256": "6f3f89db7c8feeda4900e7f617a8e0fcf09ee6f7b524d496e3477fa22091a356"
+    },
+    {
+      "path": "apps/worker/src/agent-provider-loop-service.ts",
+      "sha256": "4ece2786b23b2b7e5c93e149ee3bb844794ef35b73fc43ecf80351d5d01188e2"
+    },
+    {
+      "path": "apps/worker/src/agent-provider-tool-gateway.ts",
+      "sha256": "452eb547a7990f7db0fef91789520e8f0464c6607c6b08122bdbbb87bd4785f3"
+    },
+    {
+      "path": "apps/worker/src/agent-saved-production-receipts.ts",
+      "sha256": "fdffd8483fd80d75fe5147909feda57f9342ffc6c1cad437d869674008cf1b2b"
+    },
+    {
+      "path": "apps/worker/src/agent-system-tool-service.ts",
+      "sha256": "eb9b9c1eaad90a057d77641404e55c2607e9842d8bc9d220f475ec0d0d526639"
+    },
+    {
+      "path": "apps/worker/src/agent-task-artifacts.ts",
+      "sha256": "6bb11da68314852d95a3aab97553843ccac970669d13e4ba8ba115f689fd1937"
+    },
+    {
+      "path": "apps/worker/src/agent-task-checkpoint-schema.ts",
+      "sha256": "d5986979d6f96f509b682141a1c16fefde633af53b4b67f177f012ff8dc2df1a"
+    },
+    {
+      "path": "apps/worker/src/agent-task-checkpoints.ts",
+      "sha256": "1fea549133a56456996153fea3e5ff10f6568565d07c77645d5bcb2948dbb11d"
+    },
+    {
+      "path": "apps/worker/src/agent-task-criteria.ts",
+      "sha256": "7e6e5d23db79a5ce0dc70b9c56c886652903c5df847959ba586601e053aa7e58"
+    },
+    {
+      "path": "apps/worker/src/agent-task-deliverables.test.ts",
+      "sha256": "cb2316fd83323a28fd5cd9abf7ed73934f654d55bfc4b7087c3466b73e52304f"
+    },
+    {
+      "path": "apps/worker/src/agent-task-deliverables.ts",
+      "sha256": "352db51e8c486ed9e6517590c8eabd28d6fbb630214724b512d3830405894cfc"
+    },
+    {
+      "path": "apps/worker/src/agent-task-inspection.test.ts",
+      "sha256": "5cd9e1215fe06de7e15ef6599b97aa1797128692c817509ef41efb2ed2578943"
+    },
+    {
+      "path": "apps/worker/src/agent-task-inspection.ts",
+      "sha256": "8f5b33dc56489ddc24a8636a6f917a83106a1cce1d58c5a4abf59f135d27c52d"
+    },
+    {
+      "path": "apps/worker/src/agent-task-repair.test.ts",
+      "sha256": "ddecadaa4b32407cf7c6ac97c2eb8f165a123805f127ffe930de6286eb02b331"
+    },
+    {
+      "path": "apps/worker/src/agent-task-repair.ts",
+      "sha256": "8b9f1fc140ca819c0f1e637dc40af615deaa33b01703ef97c1c702fd0155d01d"
+    },
+    {
+      "path": "apps/worker/src/agent-task-review.ts",
+      "sha256": "527fdcd5fd93eb33b2054810d389302cd5c77b6807001b5e733a6f71c3a163b3"
+    },
+    {
+      "path": "apps/worker/src/agent-tool-definitions.ts",
+      "sha256": "47ab2ded0f76e4702bd7288649f620cc22ebfe83f1508b49be4cd972f0082fac"
+    },
+    {
+      "path": "apps/worker/src/content-service.ts",
+      "sha256": "ab3c33b503ba37e5bda293e5d8469980a95d7a3b08f4f57e2aedc43b3ffad2bb"
+    },
+    {
+      "path": "apps/worker/src/document-workflow-service.ts",
+      "sha256": "4069764cde4868a6ab83b11a2b564942cac605e4f5a0108176a8ddcc1bc79ed1"
+    },
+    {
+      "path": "apps/worker/src/domain-tool-gateway.ts",
+      "sha256": "2b37960b40cf44381b3a0f4038073f5515f178ce700f31cfdf65bce1b5945045"
+    },
+    {
+      "path": "apps/worker/src/generation-service.test.ts",
+      "sha256": "cdb64826237d8d09d59fc42b724a783d4bb1f53ccb50434c9192970b2279e62d"
+    },
+    {
+      "path": "apps/worker/src/handler.ts",
+      "sha256": "7d666121d532fa2676d55330f665345ed41aa303754eb27e81db569a45bd5922"
+    },
+    {
+      "path": "apps/worker/src/library-search-service.ts",
+      "sha256": "620f1bf458465d3532f87893b236cc3bdaaddfb7860cc773192102ae253eda36"
+    },
+    {
+      "path": "apps/worker/src/media-review-service.test.ts",
+      "sha256": "840d923a10a85114d6ceb11eb61380313ad51c980c277ea133159ee4f2667f82"
+    },
+    {
+      "path": "apps/worker/src/native-provider-bridge.test.ts",
+      "sha256": "8335fa2c38140d48cd27093e9188de96e6a52708f2a3c134f6b186c23c844898"
+    },
+    {
+      "path": "apps/worker/src/native-provider-bridge.ts",
+      "sha256": "15d8c6a40a9e8a25125cf6b4f5279d55ca5ef8b78b3019ccb980a58e31666f6b"
+    },
+    {
+      "path": "apps/worker/src/production-authoring-guidance.ts",
+      "sha256": "fe4d944eedca0ec0dce46c080a07743edd8f4c41a24add1d40543c50b07999e8"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-loop.test.ts",
+      "sha256": "38e934c77dbedeeb8211d4f8640e4605a72ba7a4a5e9d2e190ac7a4b445fa18e"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-schema.ts",
+      "sha256": "2cc1836d984998abb8cef54644e5b28d7c87b5868ca952fffc42e087f95bac7b"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-service.test.ts",
+      "sha256": "9c8cc4d16b741b11618f00938e8f3993b4d41e8869e4670de00643d8e2775f29"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-service.ts",
+      "sha256": "3c71a2b4b05c8c4d08cdb0490a42135e93be62f0fad532557806772cac6e5910"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-state.test.ts",
+      "sha256": "06fe2be9c6ae2241d4f0b46b9dfd561198681b20ef22cf25965708af836f0080"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-state.ts",
+      "sha256": "abbf1285badb1f9e89aae57b80ed2d78f95a319b4360bc2417fbb4343b85baeb"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-timing.ts",
+      "sha256": "a543485b67f9864067c36008fb3e20f1dc8a50bba4de5baaa83692afefe9b60e"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-validation.test.ts",
+      "sha256": "507c0ea3a0b559892801ef7133fb200f6aaddd85ab3f490c238ced5b33623fc7"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-validation.ts",
+      "sha256": "9a897c4fdf4003a8de6d688d24aa8c56631a8dc4bd34775e2cf82e3506fb4276"
+    },
+    {
+      "path": "apps/worker/src/production-skill-service.ts",
+      "sha256": "618b1ee587681aedc87b3f68f4968aecfbee8668dec226dcda2a43a41ae7b125"
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.test.ts",
+      "sha256": "6756aac9d3b3aa8030bbdf48d54e67397f01d852e6a92b96b23d131841f5b075"
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.ts",
+      "sha256": "2342875b1ec3f516ca54650b4c422ac12ffcd7cfea0b090885fc06c31b7b1e7f"
+    },
+    {
+      "path": "apps/worker/src/production-voice-contract.test.ts",
+      "sha256": "86985185711038d6807c8b37871db5d2ad83324626b51c58803b30e868b73a97"
+    },
+    {
+      "path": "apps/worker/src/project-ir-validation.ts",
+      "sha256": "566c2d8c83678c8e7477a04a7c9d4d518b7cfcd37c489a0eb13b06b1bc9c7e2b"
+    },
+    {
+      "path": "apps/worker/src/project-resource-map.ts",
+      "sha256": "b51a158ba3aff5466616e33091df44fa96af1ebd4ee8f0866f45b30c6cd61f65"
+    },
+    {
+      "path": "apps/worker/src/provider-request-ledger.ts",
+      "sha256": "92e81148f76bb4058c90ebd75833bacc6d8568183188ca61abb3c37405d835ee"
+    },
+    {
+      "path": "apps/worker/src/request-validation.ts",
+      "sha256": "a483fa37cae60046a613a00f4df8c9f30ac67c4f9e96e479a1b0cf95bab174ab"
+    },
+    {
+      "path": "apps/worker/src/scene-structure-submission-service.ts",
+      "sha256": "43bd96a1ea51d2f5e0bb208194bebe21a3cbf4c2f4d86594bbf44ef8a03957ab"
+    },
+    {
+      "path": "apps/worker/src/shot-prompt-service.ts",
+      "sha256": "046f8cccc1cf65a0d361b578b02c1e3fd9f4a2906336441fc5c8c5b7ce4f3e73"
+    },
+    {
+      "path": "apps/worker/src/shot-timing-service.test.ts",
+      "sha256": "0781d389ece4e5a50b82624fbb1648737e33fd4c75fa69273f8620e9012e72a2"
+    },
+    {
+      "path": "apps/worker/src/shot-timing-service.ts",
+      "sha256": "a2e7b5238d6ee8457a88a6a57b13509b011e2c8a2a9e1193ec8a1d91ce052e7b"
+    },
+    {
+      "path": "apps/worker/src/test-fixtures/conversation-quality-20261109.json",
+      "sha256": "d2d4b489b79a8cb943307fcaab528bbae5c6de7fe7df52e860357ada29b65871"
+    },
+    {
+      "path": "apps/worker/src/test-fixtures/production-bundle-fixture.ts",
+      "sha256": "221a609c68f2fe10ecd60f1110a0138dbba459dd93601510e62b75d95fdbd9e3"
+    },
+    {
+      "path": "packages/contracts/src/index.ts",
+      "sha256": "bb96c2bc99fadb6dde8a644c03726c5472f8f186d54ce056484dbf27d5f9fcef"
+    },
+    {
+      "path": "packages/contracts/src/production-bundle.test.ts",
+      "sha256": "3c2f94791e7ff5bc4ae4990e5b575bdfe419aae1f0c5a7f76e2f94f4b0319553"
+    },
+    {
+      "path": "packages/contracts/src/production-bundle.ts",
+      "sha256": "8a1b0b555806cc30118cb74eb1d0c05484fb2f1c30630ccb251aa498f2f1e898"
+    },
+    {
+      "path": "packages/contracts/src/production-skills.test.ts",
+      "sha256": "661704ce286ebf0b4189ebd218fb35a672ebfabcb53178eb5d6e73059d82a0e4"
+    },
+    {
+      "path": "packages/contracts/src/production-skills.ts",
+      "sha256": "a6ba820cce9c7da94e17a71d55069f8adbbfa6c36f52e7af3102c4b5c876e3f7"
+    },
+    {
+      "path": "packages/contracts/src/project-ir.ts",
+      "sha256": "b3fca866e08cc76b165ee5acb62b1a15c473d2b6fd7580f930bf2cb408c62788"
+    },
+    {
+      "path": "packages/persistence/src/agent-context-store.ts",
+      "sha256": "52783a906c4634400b08d770893f2189eb1d53e4c75a374e67431a9a03d8949c"
+    },
+    {
+      "path": "packages/persistence/src/agent-execution-store.ts",
+      "sha256": "495daefcabbe71d78770454232236476022e726a75695495928bf7a3b0fab52b"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "apps/worker/dist/index.js",
+      "sha256": "efa916cae96cbebc96b1ca99263a7249ef95a15ef70adbd035d535554567a46d"
+    },
+    {
+      "path": "apps/worker/dist/production-bundle-service.js",
+      "sha256": "461abe877aff9e3e88cec3dbcde7271bd0e7b617502456badf5387544584b601"
+    },
+    {
+      "path": "apps/worker/dist/production-bundle-validation.js",
+      "sha256": "9b3619047476f95ce43544f2cdd373b764103f61924186891aabdb60fd0e4fee"
+    },
+    {
+      "path": "apps/worker/dist-sidecar/index.cjs",
+      "sha256": "60570e7117a0da6ddfd46a9fcf17e17497c062902b562ca6d55d603140b02833"
+    },
+    {
+      "path": "apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+      "sha256": "58bc7ad4ef247ed6c774b36d537fdd5c03e5cd3929685a02dd5e11c014a19ae4"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "046f4fdf4834ff83d185e5811a63c1ed62410157001140ebbf0ca2fa655416f1"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/llm_stream.rs",
+      "sha256": "fdd0c9f6c093bf76fc993f1e84f0676a3ff4a7848e48d5bdf762881d8058b0fa"
+    },
+    {
+      "path": "apps/desktop/dist/index.html",
+      "sha256": "07923ef7ef750e54c9219956ab100bad1239c8af40deafb015ba74b2f58ca17f"
+    },
+    {
+      "path": "apps/desktop/dist/assets/index-BAMBwcLn.js",
+      "sha256": "a8e4e35a4e9e61bfa84cb293a5fbaddee45527f009688447eaaa1accf75d11b5"
+    },
+    {
+      "path": "apps/desktop/dist/assets/index-CqGcZlAD.css",
+      "sha256": "809bf420e6e2095e324ac9616bd0e993fc4424f6b3f52f6398cb8d2b30104f35"
+    }
+  ],
+  "sidecar": {
+    "executableSha256": "58bc7ad4ef247ed6c774b36d537fdd5c03e5cd3929685a02dd5e11c014a19ae4",
+    "validation": "offline-scripted-native-host",
+    "realProviderValidation": false,
+    "installedInstanceUpdated": false,
+    "reports": [
+      {
+        "protocol": "openai-responses",
+        "taskId": "f1b5be1c-5e2b-4a0a-970b-3c26ef84bca8",
+        "status": "completed",
+        "counts": {
+          "character": 2,
+          "scene": 1,
+          "prop": 1,
+          "voice": 2,
+          "plan": 0,
+          "shot": 1,
+          "storyScene": 1
+        },
+        "timing": {
+          "businessSaved": true,
+          "readbackVerified": true,
+          "counts": {
+            "voice": 2,
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "storyScene": 1,
+            "shot": 1
+          },
+          "requestedAt": "2026-11-09T14:46:16.618Z",
+          "preparationMs": 12,
+          "taskCreatedAt": "2026-11-09T14:46:16.630Z",
+          "elapsedMs": 4007
+        },
+        "independentReopenReadback": true,
+        "lostAcknowledgementReplay": true,
+        "multipart": true,
+        "mediaJobs": 0,
+        "paidRequests": 0,
+        "elapsedMs": 5606.7697
+      },
+      {
+        "protocol": "openai-chat-completions",
+        "taskId": "2accb642-c183-4142-a7bc-94bbbb90548b",
+        "status": "completed",
+        "counts": {
+          "character": 2,
+          "scene": 1,
+          "prop": 1,
+          "voice": 2,
+          "plan": 0,
+          "shot": 1,
+          "storyScene": 1
+        },
+        "timing": {
+          "businessSaved": true,
+          "readbackVerified": true,
+          "counts": {
+            "voice": 2,
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "storyScene": 1,
+            "shot": 1
+          },
+          "requestedAt": "2026-11-09T14:46:21.496Z",
+          "preparationMs": 9,
+          "taskCreatedAt": "2026-11-09T14:46:21.505Z",
+          "elapsedMs": 3595
+        },
+        "independentReopenReadback": true,
+        "lostAcknowledgementReplay": true,
+        "multipart": true,
+        "mediaJobs": 0,
+        "paidRequests": 0,
+        "elapsedMs": 4429.4592
+      }
+    ]
+  },
+  "realProviderValidation": {
+    "passed": false,
+    "attempted": false,
+    "blocker": "Known provider 403 insufficient_user_quota; do not retry paid requests until resolved.",
+    "originalInputValidation": false,
+    "realModelLatencyMeasured": false
+  },
+  "installedInstanceUpdated": false,
+  "realProjectModified": false,
+  "mediaGenerated": false,
+  "monitorResumed": false,
+  "priorFailures": [
+    {
+      "stage": "initial full suite",
+      "case": "prose-only prop edit must clear old visual IR",
+      "resolution": "Narrow independent-field retention to voice audition/default voice bindings; original assertions preserved.",
+      "log": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-full-test.log"
+    },
+    {
+      "stage": "final full suite attempt 1",
+      "case": "restored voice draft enabled video submission before scene bindings finished loading",
+      "resolution": "Gate submission on binding read/error state; add delayed-read regression.",
+      "log": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-full-test-ui-failure.log"
+    },
+    {
+      "stage": "new focused boundary tests",
+      "case": "timing protection flag not persistable; direct publication SQL rejected by domain trigger",
+      "resolution": "Add typed optional timing.locked and Agent protection; publish fixtures through selfPublish."
+    }
+  ],
+  "checks": {
+    "focusedWorker": {
+      "command": "pnpm --filter @ai-video/worker test -- production-bundle-validation.test.ts production-bundle-service.test.ts production-bundle-loop.test.ts shot-timing-service.test.ts",
+      "passed": 41
+    },
+    "focusedUI": {
+      "command": "pnpm --filter @ai-video/desktop test -- ChatPanel.progress.test.tsx ShotSpeechPanel.test.tsx CharacterSceneWorkspace.test.tsx use-document-workspace.test.ts",
+      "passed": 35
+    },
+    "productionUI": {
+      "command": "pnpm --filter @ai-video/desktop test -- ProductionPanel.scene-bindings.test.tsx ProductionPanel.test.tsx",
+      "passed": 75,
+      "note": "Before adding the additional delayed-read regression, which is included in final full suite."
+    },
+    "typecheck": {
+      "command": "pnpm typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "command": "pnpm lint",
+      "exitCode": 0
+    },
+    "format": {
+      "command": "pnpm format:check",
+      "exitCode": 0
+    },
+    "build": {
+      "command": "pnpm build",
+      "exitCode": 0,
+      "note": "Existing Vite chunk-size advisory."
+    },
+    "rust": {
+      "command": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib",
+      "passed": 205,
+      "ignored": 6,
+      "failed": 0,
+      "note": "Rust source unchanged since this session’s successful run."
+    },
+    "sidecarBuild": {
+      "command": "pnpm worker:sidecar",
+      "exitCode": 0
+    },
+    "m7": {
+      "command": "pnpm --filter @ai-video/worker validate:m7-sidecar",
+      "exitCode": 0
+    },
+    "sidecar": {
+      "command": "pnpm --filter @ai-video/worker validate:production-bundle-sidecar",
+      "exitCode": 0
+    },
+    "fullSuite": {
+      "command": "pnpm test",
+      "exitCode": 0,
+      "passed": 2707,
+      "failed": 0,
+      "testFiles": 231,
+      "byPackage": {
+        "context": 8,
+        "contracts": 55,
+        "llm": 32,
+        "desktop": 813,
+        "generationAdapters": 80,
+        "persistence": 101,
+        "worker": 1618
+      }
+    },
+    "documentation": {
+      "command": "pnpm exec prettier --check --ignore-path <empty-ignore> <8 updated docs/evidence files>",
+      "exitCode": 0,
+      "files": 8,
+      "relativeLinks": 81,
+      "brokenLinks": 0
+    },
+    "diff": {
+      "command": "git diff --check",
+      "exitCode": 0
+    }
+  },
+  "limits": {
+    "partBytes": 262144,
+    "bundleBytes": 8388608,
+    "objects": 1000,
+    "parts": 128,
+    "repairRevisions": 12,
+    "repeatedErrors": 3,
+    "taskTurns": 128,
+    "taskElapsedMs": 3600000,
+    "inputTokens": 2000000,
+    "outputTokens": 256000
+  },
+  "measurementLimits": [
+    "Offline scripted durations prove local mechanisms only, not LLM reading/generation latency or content quality.",
+    "Real UI first-visible milestone requires P7 entry-point acceptance.",
+    "No production install or installed app restart performed."
+  ],
+  "sourceScope": "Fingerprint includes the pre-existing dirty workspace and this implementation; it is not a claim that all changes originated in this task.",
+  "logs": [
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-full-test.log",
+      "sha256": "a18f24f16056732cd36634df67afbe39f1123bbda96ca3562ed0cf8dffe10d38"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-full-test-ui-failure.log",
+      "sha256": "3b2b5d0d8845c0051fde13f009cdc94e147be4f7f270b062ce1661253f857f33"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-test.log",
+      "sha256": "99207797c3ae4680dc389926f97614fd01e432eb1e5366f20c2fff98dae44167"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-focused.log",
+      "sha256": "4e15e88f9510d6f4d527d762c7552ece17f67b50fba7971ed4fff27af1c1aeba"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-ui.log",
+      "sha256": "d3574f116ce777f41c4a1641b6f4372b85bcbdf97ea942b9316873188f401722"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-production-ui-retest.log",
+      "sha256": "a2a217816a7d3b6b8f58c3b0295f1efac49b9b7a354388fd62c38b0e32f72de8"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-typecheck.log",
+      "sha256": "2a9b468da736120b337daa2049b21af7c223e6b98d69b8aafbf7c7e875fe4580"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-lint.log",
+      "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-format.log",
+      "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-build.log",
+      "sha256": "a0d365a711caa0e027147df0ed5dc1396fb4e9d1c4f7a2b046ccecdcebbf6661"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-rust-test.log",
+      "sha256": "bd1569002fc3f2c62d135f3076e1f0959cdff5ef515266ee7865917bb06f6ee9"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-sidecar-build.log",
+      "sha256": "3d9eb60d364e599a3b2c32282f012da29160af74671aaa83389b71ffa2b0ad26"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-m7.log",
+      "sha256": "75757197ef103dc7d1de1c7eb8411446f373428f307bd27125c9bb85201f27e3"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-final-sidecar-validation.log",
+      "sha256": "53cca16270c07d3d64cb4f441ddf9344637084bd1785b05ad5421e546bbc0a24"
+    }
+  ]
+}

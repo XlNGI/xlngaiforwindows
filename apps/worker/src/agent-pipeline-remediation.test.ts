@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import type { ProductionAuthoringIR } from '@ai-video/contracts';
+import type { PromptRecord } from '@ai-video/contracts';
 import {
   validateToolArguments,
   createFauxCore,
@@ -11,6 +11,8 @@ import {
 } from '@earendil-works/pi-ai';
 import { AgentContextStore, AgentExecutionStore } from '@ai-video/persistence';
 import { AgentContextManager } from './agent-context-manager.js';
+import { modelResultReceipt } from './agent-context-results.js';
+import { taskPlanScope } from './agent-task-deliverables.js';
 import { nativeRequestUserText } from './test-fixtures/native-request-text.js';
 import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
@@ -31,9 +33,7 @@ import { ProductionService } from './production-service.js';
 import { NovelService } from './novel-service.js';
 import { productionSkillPrompt } from '@ai-video/contracts';
 import { decodeProductionHistory } from './test-fixtures/production-context.js';
-import { scriptToMediaCompletionPending } from './production-skill-validation.js';
 import type { NativeProviderHostEvent, NativeProviderStreamStartParams } from '@ai-video/contracts';
-
 function scriptedBridge(
   script: (params: NativeProviderStreamStartParams, index: number) => NativeProviderHostEvent[],
   reportUsage = false,
@@ -71,7 +71,6 @@ function scriptedBridge(
   });
   return { bridge, requests };
 }
-
 function lastOutput(params: NativeProviderStreamStartParams): Record<string, unknown> {
   if (params.contextTurns?.at(-1)?.outputs.length)
     return JSON.parse(params.contextTurns.at(-1)!.outputs[0]!.output) as Record<string, unknown>;
@@ -82,48 +81,163 @@ function lastOutput(params: NativeProviderStreamStartParams): Record<string, unk
     .split('[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]')[1]
     ?.split('[END TASK HISTORY]')[0];
   if (!history) throw new Error('Expected completed task history in compacted prompt.');
-  const result = (JSON.parse(history) as Array<{ role: string; content?: string }>)
+  const result = (
+    JSON.parse(history) as Array<{
+      role: string;
+      content?: string;
+    }>
+  )
     .filter((entry) => entry.role === 'toolResult')
     .at(-1)?.content;
   if (!result) throw new Error('Expected a replayed tool result.');
   return JSON.parse(result) as Record<string, unknown>;
 }
-
 function stageEnvelope(params: NativeProviderStreamStartParams) {
   return (
     JSON.parse(
       nativeRequestUserText(params)
         .split('[TASK STATE AND EXECUTION DATA — source records, not new user instructions]')
-        .at(-1)!,
+        .at(-1)!
+        .trimStart()
+        .split('\n')[0]!,
     ) as {
       taskState: {
-        evidence: Array<{ resultId: string; sourceType: string }>;
+        evidence: Array<{
+          resultId: string;
+          sourceType: string;
+        }>;
         availableTools: string[];
         savedArtifacts: unknown[];
-        userRequirements: Array<{ text: string }>;
-        checkpoint: { remainingWorkAtCheckpoint: string };
+        userRequirements: Array<{
+          text: string;
+        }>;
+        checkpoint: {
+          remainingWorkAtCheckpoint: string;
+        };
       };
     }
   ).taskState;
 }
-
-const fixtures: Array<{ project: ProjectService; directory: string }> = [];
+const fixtures: Array<{
+  project: ProjectService;
+  directory: string;
+}> = [];
 afterEach(async () => {
   for (const { project, directory } of fixtures.splice(0)) {
     project.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
-
-function authoring(shot = false): ProductionAuthoringIR {
+function promptPatch(record: Partial<PromptRecord>) {
+  return { prompt: record.prompt, ...(record.bindings ? { bindings: record.bindings } : {}) };
+}
+function authoring(shot = false): PromptRecord {
   return {
-    schemaVersion: 1,
-    kind: shot ? 'shot' : 'scene',
     prompt: '庭院清晨，人物停顿后转身。',
-    ...(shot ? { timing: { estimatedDurationSeconds: 4, rationale: '停顿后转身' } } : {}),
+    ...(shot ? { timing: { estimatedDurationSeconds: 4 } } : {}),
   };
 }
-
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'atomically registers and saves one explicit draft without a registration round (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存一份大纲。');
+    const args = {
+      resourceId: 'workspace:documents',
+      documentKind: 'plan',
+      title: '大纲',
+      contentMarkdown: '# 大纲\n完整剧情与人物动机。',
+      deliverable: { key: 'outline', origin: 'model_inference' },
+    };
+    const saved = await run.invoke('document.submit_draft', args);
+    expect(saved, JSON.stringify(saved)).toMatchObject({
+      status: 'draft_saved',
+      inlinePlan: { status: 'task_plan_saved' },
+      deliveryState: { saved: true, contentReview: 'pending' },
+    });
+    const replay = await run.invoke('document.submit_draft', args);
+    expect(replay).toMatchObject({ documentId: saved.documentId, execution: { replayed: true } });
+    const state = await run.invoke('conversation.task.checkpoint', { operation: 'state' });
+    expect(state.pendingActions).toEqual([]);
+    expect(
+      f.project.access(false, (db, p) =>
+        taskPlanScope(db, p.id, run.prepared.stream.generationId, run.agent.taskId),
+      ),
+    ).toEqual([expect.objectContaining({ key: 'outline', targetIds: [saved.documentId] })]);
+    const before = f.project.access(false, (db) =>
+      db.prepare('SELECT count(*) n FROM agent_execution_outputs').get(),
+    );
+    const failed = await run.invoke('document.submit_draft', {
+      ...args,
+      resourceId: 'workspace:missing',
+      deliverable: { key: 'rollback' },
+    });
+    expect(failed.status).not.toBe('draft_saved');
+    expect(
+      f.project.access(false, (db) =>
+        db.prepare('SELECT count(*) n FROM agent_execution_outputs').get(),
+      ),
+    ).toEqual(before);
+  },
+);
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'saves a chapter once, directly reads its current draft and preserves real CAS conflicts (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存第一章，并核对当前草稿。');
+    const args = {
+      resourceId: 'workspace:novel',
+      action: 'create_chapter',
+      title: '第一章',
+      contentMarkdown: '甲收到信件，决定在清晨离开。',
+      deliverable: { key: 'chapter' },
+    };
+    const saved = await run.invoke('novel.chapter.write_draft', args);
+    expect(saved, JSON.stringify(saved)).toMatchObject({ status: 'draft_saved' });
+    expect(typeof saved.chapterId).toBe('string');
+    expect(await run.invoke('novel.chapter.write_draft', args)).toMatchObject({
+      documentId: saved.documentId,
+      execution: { replayed: true },
+    });
+    const read = await run.invoke('library.read', {
+      artifact: { documentId: saved.documentId, expectedVersionId: saved.documentVersionId },
+      readMode: 'source',
+    });
+    expect(read).toMatchObject({
+      status: 'read',
+      content: args.contentMarkdown,
+      candidateNote: '未审核候选资料，不能当作已发布权威',
+    });
+    const row = f.project.access(false, (db) =>
+      db.prepare('SELECT row_version FROM novel_chapters WHERE id=?').get(saved.chapterId),
+    ) as {
+      row_version: number;
+    };
+    const update = {
+      resourceId: saved.resourceId,
+      action: 'rewrite_chapter',
+      chapterId: saved.chapterId,
+      title: args.title,
+      contentMarkdown: '完整新候选，不能因版本冲突覆盖用户修改。',
+      expectedChapterRowVersion: row.row_version - 1,
+      expectedDocumentRowVersion: saved.documentRowVersion,
+      baseVersionId: saved.documentVersionId,
+    };
+    const stale = await run.invoke('novel.chapter.write_draft', update);
+    expect(JSON.stringify(stale)).toContain('CHAPTER_CAS_CONFLICT');
+    expect(f.workflow.getDocument(String(saved.documentId)).currentVersion?.contentMarkdown).toBe(
+      args.contentMarkdown,
+    );
+    const corrected = await run.invoke('novel.chapter.write_draft', {
+      ...update,
+      expectedChapterRowVersion: row.row_version,
+    });
+    expect(JSON.stringify(corrected)).toContain('active writing task');
+    expect(f.workflow.getDocument(String(saved.documentId)).currentVersion?.contentMarkdown).toBe(
+      args.contentMarkdown,
+    );
+  },
+);
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'keeps one structure output identity when Runtime selects staged creation (%s)',
   async (protocol) => {
@@ -133,7 +247,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       operation: 'plan',
       deliverables: [{ key: 'episode', toolName: 'scene.submit_structure', minimumCount: 1 }],
     });
-    const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
+    const outputId = (
+      plan.outputBindings as Array<{
+        outputId: string;
+      }>
+    )[0]!.outputId;
     const args = {
       operation: 'begin',
       resourceId: 'workspace:shots',
@@ -159,7 +277,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       ],
     });
     expect(
-      (revised.outputBindings as Array<{ outputId: string }>)[0]?.outputId,
+      (
+        revised.outputBindings as Array<{
+          outputId: string;
+        }>
+      )[0]?.outputId,
       JSON.stringify(revised),
     ).toBe(outputId);
     expect(
@@ -175,8 +297,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       scenes: [
         {
           title: '不得重复创建',
-          authoringIR: authoring(),
-          shots: [{ title: '镜头', authoringIR: authoring(true) }],
+          ...authoring(),
+          shots: [{ title: '镜头', ...authoring(true) }],
         },
       ],
     });
@@ -188,7 +310,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(f.content.listScenes()).toHaveLength(0);
   },
 );
-
 it.each(
   (['openai-responses', 'openai-chat-completions'] as const).flatMap((protocol) =>
     [false, true].map((planBeforeSave) => ({ protocol, planBeforeSave })),
@@ -228,7 +349,10 @@ it.each(
     });
     const savedAnalysis = analysis ?? (await run.invoke('document.submit_draft', analysisArgs));
     expect(savedAnalysis.status).toBe('draft_saved');
-    const bindings = plan.outputBindings as Array<{ key: string; outputId: string }>;
+    const bindings = plan.outputBindings as Array<{
+      key: string;
+      outputId: string;
+    }>;
     if (analysis) expect(bindings.find((b) => b.key === 'analysis')).toBeUndefined();
     // The completed output remains internally bound for replay compatibility;
     // it must not be offered as new creation work to the model.
@@ -238,7 +362,9 @@ it.each(
         (
           db
             .prepare('SELECT id FROM agent_execution_outputs WHERE task_id=? AND plan_key=?')
-            .get(run.agent.taskId, 'analysis') as { id: string }
+            .get(run.agent.taskId, 'analysis') as {
+            id: string;
+          }
         ).id,
     );
     const remainingOutput = bindings.find((b) => b.key === 'remaining-plans')!.outputId;
@@ -274,103 +400,21 @@ it.each(
     expect(docs, JSON.stringify(docs)).toHaveLength(2);
   },
 );
-
-it.each(['openai-responses', 'openai-chat-completions'] as const)(
-  'saves requested supporting plans in a production task without replacing real production outputs (%s)',
-  async (protocol) => {
-    const f = await setup(protocol);
-    const run = f.prepare('先保存剧情分析、分镜表和提示词文档，再完成真实场镜。');
-    f.project.access(true, (db) =>
-      db
-        .prepare(
-          `UPDATE agent_tasks SET request_snapshot_json=json_set(request_snapshot_json,'$.productionSkillId','script-to-media') WHERE id=?`,
-        )
-        .run(run.agent.taskId),
-    );
-    const plan = await run.invoke('conversation.task.checkpoint', {
-      operation: 'plan',
-      deliverables: [
-        {
-          key: 'supporting',
-          toolName: 'document.submit_draft',
-          documentKind: 'plan',
-          minimumCount: 3,
-        },
-      ],
-    });
-    const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
-    const reconstructed = new AgentContextManager(
-      f.project,
-      run.prepared.stream,
-      run.agent.taskId,
-      '先保存剧情分析、分镜表和提示词文档，再完成真实场镜。',
-    );
-    const requestAfterHistoryClearing = reconstructed.prepare(
-      f.generations.runtime(run.prepared.stream),
-      {
-        messages: [],
-      },
-    ).request;
-    expect(requestAfterHistoryClearing.prompt).toContain(outputId);
-    expect(requestAfterHistoryClearing.prompt).toContain('creationBinding');
-    const unknown = await run.invoke('document.submit_draft', {
-      resourceId: 'workspace:documents',
-      documentKind: 'plan',
-      outputId: 'invented',
-      title: '剧情分析',
-      contentMarkdown: '待保存',
-    });
-    expect(JSON.stringify(unknown)).toContain(outputId);
-    expect(JSON.stringify(unknown)).toContain('OUTPUT_ID_INVALID');
-    for (const [outputIndex, title] of ['剧情分析', '分镜表', '完整提示词'].entries()) {
-      const args = {
-        resourceId: 'workspace:documents',
-        documentKind: 'plan',
-        outputId,
-        outputIndex,
-        title,
-        contentMarkdown: `# ${title}\n蓝衣，保留原对白；共6镜60秒。`,
-      };
-      const saved = await run.invoke('document.submit_draft', args);
-      expect(saved, JSON.stringify(saved)).toMatchObject({
-        status: 'draft_saved',
-        reviewRequired: false,
-      });
-      expect(f.workflow.getDocument(String(saved.documentId)).currentVersion?.contentMarkdown).toBe(
-        args.contentMarkdown,
-      );
-      expect(await run.invoke('document.submit_draft', args)).toMatchObject({
-        documentId: saved.documentId,
-        execution: { replayed: true },
-      });
-    }
-    const pending = f.project.access(false, (db, p) =>
-      scriptToMediaCompletionPending(db, p.id, run.prepared.stream.generationId, run.agent.taskId),
-    );
-    expect(pending?.[0]).toMatchObject({
-      missingStructure: true,
-      semanticReview: { ready: false },
-    });
-    expect(pending?.[0]?.unreviewedArtifacts).toHaveLength(3);
-    const invalidMaterial = await run.invoke('document.submit_draft', {
-      resourceId: 'workspace:characters',
-      documentKind: 'plan',
-      outputId,
-      outputIndex: 0,
-      title: '不能冒充角色',
-      contentMarkdown: '资料',
-    });
-    expect(invalidMaterial.status).not.toBe('draft_saved');
-  },
-);
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'creates the first scene in an empty short-drama workspace without an episode resource (%s)',
   async (protocol) => {
     const f = await setup(protocol);
     const run = f.prepare('保存第一场和镜头。');
     const context = await run.invoke('project.get_context', {});
-    expect((context.structure as { domains: { shortDrama: unknown } }).domains.shortDrama).toEqual({
+    expect(
+      (
+        context.structure as {
+          domains: {
+            shortDrama: unknown;
+          };
+        }
+      ).domains.shortDrama,
+    ).toEqual({
       enabled: false,
       sceneCount: 0,
       shotCount: 0,
@@ -383,8 +427,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       scenes: [
         {
           title: '第一场',
-          authoringIR: authoring(),
-          shots: [{ title: '第一镜', authoringIR: authoring(true) }],
+          ...authoring(),
+          shots: [{ title: '第一镜', ...authoring(true) }],
         },
       ],
     };
@@ -402,7 +446,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(f.content.listShots(f.content.listScenes()[0]!.id)).toHaveLength(1);
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'reuses an identical saved draft across new call IDs and persists only one artifact (%s)',
   async (protocol) => {
@@ -413,13 +456,13 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       documentKind: 'character',
       title: '沈砚舟｜完整角色设定板提示词',
       contentMarkdown: '# 沈砚舟\n同一人物的完整角色设定板。',
-      contentIR: { schemaVersion: 1, kind: 'character', data: { source: '原稿', age: 28 } },
+      bindings: { schemaVersion: 1 as const },
     };
     const first = await run.invoke('document.submit_draft', draft);
     expect(first.status).toBe('draft_saved');
     const replay = await run.invoke('document.submit_draft', {
       ...draft,
-      contentIR: { schemaVersion: 1, kind: 'character', data: { age: 28, source: '原稿' } },
+      bindings: { schemaVersion: 1 as const },
     });
     expect(replay).toMatchObject({
       ...first,
@@ -452,7 +495,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'requires CAS when a replay adds metadata and retains the complete rejected submission (%s)',
   async (protocol) => {
@@ -467,7 +509,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const first = await run.invoke('document.submit_draft', draft);
     const candidate = {
       ...draft,
-      contentIR: { schemaVersion: 1, kind: 'character', data: { sourceBasis: '剧本当前草稿' } },
+      bindings: { schemaVersion: 1 as const },
     };
     const conflict = await run.invoke('document.submit_draft', candidate);
     expect(JSON.stringify(conflict)).toContain('AGENT_BUSINESS_OPERATION_CONFLICT');
@@ -478,7 +520,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     ])
       expect(JSON.stringify(conflict)).toContain(String(value));
     expect(
-      f.workflow.getDocument(String(first.documentId)).currentVersion?.contentIR,
+      f.workflow.getDocument(String(first.documentId)).currentVersion?.bindings,
     ).toBeUndefined();
     f.project.access(false, (db) => {
       const rejected = new AgentContextStore(db)
@@ -506,8 +548,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const updated = await run.invoke('document.submit_draft', update);
     expect(updated).toMatchObject({ status: 'draft_saved', documentId: first.documentId });
     expect(updated.documentVersionId).not.toBe(first.documentVersionId);
-    expect(f.workflow.getDocument(String(first.documentId)).currentVersion?.contentIR).toEqual(
-      candidate.contentIR,
+    expect(f.workflow.getDocument(String(first.documentId)).currentVersion?.bindings).toEqual(
+      candidate.bindings,
     );
     const replay = await run.invoke('document.submit_draft', candidate);
     expect(replay).toMatchObject({
@@ -528,7 +570,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'keeps draft validation and distinct content, titles and parent tasks independent (%s)',
   async (protocol) => {
@@ -543,7 +584,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const first = await run.invoke('document.submit_draft', draft);
     const invalid = await run.invoke('document.submit_draft', {
       ...draft,
-      contentIR: { schemaVersion: 1, kind: 'scene', data: {} },
+      bindings: { schemaVersion: 1 as const },
     });
     expect(JSON.stringify(invalid)).toContain('AGENT_BUSINESS_OPERATION_CONFLICT');
     const otherBody = await run.invoke('document.submit_draft', {
@@ -576,7 +617,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(independent.documentId).not.toBe(first.documentId);
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'delivers automatic completion repair instructions to the Native request through ContextManager (%s)',
   async (protocol) => {
@@ -613,7 +653,10 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         });
       if (index === 3) {
         const state = stageEnvelope(params) as unknown as {
-          executionDirective: { source: string; instruction: string };
+          executionDirective: {
+            source: string;
+            instruction: string;
+          };
         };
         expect(state.executionDirective).toMatchObject({ source: 'runtime-continuation' });
         expect(state.executionDirective.instruction).toContain('character');
@@ -669,7 +712,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(f.workflow.getTask({ taskId: run.agent.taskId }).documents).toHaveLength(1);
   },
 );
-
 it('keeps failed delivery checks visibly unfinished across history clearing and restart', async () => {
   const f = await setup();
   const prompt = '保存角色草稿，原文对白不得丢失。';
@@ -719,7 +761,6 @@ it('keeps failed delivery checks visibly unfinished across history clearing and 
   expect(completed.prompt).toContain('"pendingSteps":[]');
   expect(completed.prompt).not.toContain('Task is unfinished');
 });
-
 it('externalizes a large task-state page and restores every requirement through authorized range reads', async () => {
   const f = await setup();
   const prompt = '完整原始要求，保留所有约束。'.repeat(2400);
@@ -751,20 +792,27 @@ it('externalizes a large task-state page and restores every requirement through 
     text += part.content as string;
     offset = part.nextOffset as number | null;
   }
-  const complete = JSON.parse(text) as { taskGoal: string; records: unknown[] };
+  const complete = JSON.parse(text) as {
+    taskGoal: string;
+    records: unknown[];
+  };
   expect(complete.taskGoal).toBe(prompt);
-  expect(complete.records).toContainEqual({
-    kind: 'userRequirement',
-    id: 'original',
-    text: prompt,
-    source: 'current-user-request',
-  });
-  expect(complete.records).toContainEqual({
-    kind: 'userRequirement',
-    id: 'earlier',
-    text: '更早确认的重要决定。'.repeat(1000),
-    source: 'user-supplement',
-  });
+  expect(complete.records).toContainEqual(
+    expect.objectContaining({
+      kind: 'userRequirement',
+      id: 'original',
+      text: prompt,
+      source: 'current-user-request',
+    }),
+  );
+  expect(complete.records).toContainEqual(
+    expect.objectContaining({
+      kind: 'userRequirement',
+      id: 'earlier',
+      text: '更早确认的重要决定。'.repeat(1000),
+      source: 'user-supplement',
+    }),
+  );
   const restored = new AgentContextManager(
     f.project,
     run.prepared.stream,
@@ -793,7 +841,43 @@ it('externalizes a large task-state page and restores every requirement through 
   });
   expect(part.content).toContain('"taskGoal":');
 });
-
+it('bounds serialized result ranges and exposes each page directly to the model', async () => {
+  const f = await setup();
+  const run = f.prepare('读取本任务保存的完整结果。');
+  const content = '\u0000'.repeat(18000) + '完整结尾😀';
+  const result = f.project.access(true, (db, p) =>
+    new AgentContextStore(db).putResult(
+      p.id,
+      run.agent.taskId,
+      'range-fixture',
+      'fixture',
+      content,
+    ),
+  );
+  let restored = '',
+    offset: number | null = 0;
+  while (offset !== null) {
+    const page = await run.invoke('conversation.task.checkpoint', {
+      operation: 'result',
+      resultId: result.id,
+      expectedHash: result.contentHash,
+      resultOffset: offset,
+      resultLimit: 16384,
+    });
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(48 * 1024);
+    expect(page.status).toBe('task_result_read');
+    const receipt = modelResultReceipt({
+      ...result,
+      toolName: 'conversation.task.checkpoint',
+      content: JSON.stringify(page),
+    });
+    expect(JSON.parse(receipt)).toEqual(page);
+    restored += page.content as string;
+    expect(page.endOffset).toBeGreaterThan(offset);
+    offset = page.nextOffset as number | null;
+  }
+  expect(restored).toBe(content);
+});
 it.each(['begin', 'put_scene', 'put_shots', 'finalize', 'checkpoint'])(
   'declares operation-specific stage requirements (%s)',
   (operation) => {
@@ -808,7 +892,6 @@ it.each(['begin', 'put_scene', 'put_shots', 'finalize', 'checkpoint'])(
     }).toThrow();
   },
 );
-
 it('uses a trusted observed zero stage version when omitted and omits unknown optional dates', async () => {
   const f = await setup();
   const run = f.prepare('生成场次');
@@ -827,9 +910,12 @@ it('uses a trusted observed zero stage version when omitted and omits unknown op
     sceneIndex: 0,
     scene: {
       title: '庭院',
-      sceneDocumentId: f.setting.id,
-      characterDocumentIds: [],
-      authoringIR: setupInstruction,
+      ...setupInstruction,
+      bindings: {
+        schemaVersion: 1,
+        sceneDocumentIds: [f.setting.id],
+        characterDocumentIds: [],
+      },
     },
   });
   expect(saved, JSON.stringify(saved)).toMatchObject({
@@ -843,12 +929,11 @@ it('uses a trusted observed zero stage version when omitted and omits unknown op
     stageId: state.stageId,
     sceneIndex: 0,
     shotOffset: 0,
-    shots: [{ title: '镜头', authoringIR: authoring(true) }],
+    shots: [{ title: '镜头', ...authoring(true) }],
   });
   expect(JSON.stringify(result)).toContain('STAGE_VERSION_REQUIRED');
   expect(f.content.listScenes()).toHaveLength(0);
 });
-
 it('paginates every resumable scene stage instead of truncating the list at twenty', async () => {
   const f = await setup();
   const run = f.prepare('生成大型场次计划');
@@ -871,7 +956,6 @@ it('paginates every resumable scene stage instead of truncating the list at twen
       episodeTitle: `页面 ${page + 1}`,
       sceneShotCounts: [1],
     });
-
   const first = await run.invoke('scene.structure.stage', {
     operation: 'get',
     resourceId: 'workspace:shots',
@@ -904,13 +988,24 @@ it('paginates every resumable scene stage instead of truncating the list at twen
   expect(
     new Set(
       [first, second, third].flatMap((page) =>
-        (page.stages as Array<{ stageId: string }>).map((stage) => stage.stageId),
+        (
+          page.stages as Array<{
+            stageId: string;
+          }>
+        ).map((stage) => stage.stageId),
       ),
     ).size,
   ).toBe(3);
-
-  const firstStage = (first.stages as Array<{ stageId: string }>)[0]!;
-  const secondStage = (second.stages as Array<{ stageId: string }>)[0]!;
+  const firstStage = (
+    first.stages as Array<{
+      stageId: string;
+    }>
+  )[0]!;
+  const secondStage = (
+    second.stages as Array<{
+      stageId: string;
+    }>
+  )[0]!;
   let state = await run.invoke('scene.structure.stage', {
     operation: 'get',
     resourceId: 'workspace:shots',
@@ -924,9 +1019,12 @@ it('paginates every resumable scene stage instead of truncating the list at twen
     sceneIndex: 0,
     scene: {
       title: '已完成页场次',
-      sceneDocumentId: f.setting.id,
-      characterDocumentIds: [],
-      authoringIR: authoring(),
+      ...authoring(),
+      bindings: {
+        schemaVersion: 1,
+        sceneDocumentIds: [f.setting.id],
+        characterDocumentIds: [],
+      },
     },
   });
   state = await run.invoke('scene.structure.stage', {
@@ -936,35 +1034,43 @@ it('paginates every resumable scene stage instead of truncating the list at twen
     expectedRowVersion: state.rowVersion,
     sceneIndex: 0,
     shotOffset: 0,
-    shots: [{ title: '已完成页镜头', authoringIR: authoring(true) }],
+    shots: [{ title: '已完成页镜头', ...authoring(true) }],
   });
   expect(state).toMatchObject({ status: 'scene_structure_saved', complete: true });
-
   const secondAfterCompletion = await run.invoke('scene.structure.stage', {
     operation: 'get',
     resourceId: 'workspace:shots',
     pageSize: 1,
     pageOffset: first.nextPageOffset,
   });
-  expect((secondAfterCompletion.stages as Array<{ stageId: string }>)[0]?.stageId).toBe(
-    secondStage.stageId,
-  );
-  expect((secondAfterCompletion.stages as Array<{ complete: boolean }>)[0]?.complete).toBe(false);
+  expect(
+    (
+      secondAfterCompletion.stages as Array<{
+        stageId: string;
+      }>
+    )[0]?.stageId,
+  ).toBe(secondStage.stageId);
+  expect(
+    (
+      secondAfterCompletion.stages as Array<{
+        complete: boolean;
+      }>
+    )[0]?.complete,
+  ).toBe(false);
 });
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'continues paged structure lookup with real CAS through Native/Pi without replaying the user request (%s)',
   async (protocol) => {
     const f = await setup(protocol, 64000);
     const scene = f.content.saveScene({
       title: '目标场次',
-      authoringIR: { ...authoring(), kind: 'scene' },
+      ...authoring(),
     });
     const shots = Array.from({ length: 25 }, (_, index) =>
       f.content.saveShot({
         sceneId: scene.id,
         title: `目标镜头${index}`,
-        authoringIR: { ...authoring(true), kind: 'shot' },
+        ...authoring(true),
       }),
     );
     const prompt =
@@ -978,7 +1084,13 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       let args: Record<string, unknown> = { kind: 'shot', parentId: `scene:${scene.id}`, limit: 7 };
       if (index > 0) {
         const map = lastOutput(params).resourceMap as {
-          resources: Array<{ id: string; rowVersion: number; locator: { sceneId: string } }>;
+          resources: Array<{
+            id: string;
+            rowVersion: number;
+            locator: {
+              sceneId: string;
+            };
+          }>;
           nextOffset?: number;
           revision: string;
         };
@@ -1044,7 +1156,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     );
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'compacts old versioned library text through Native/Pi and retains real SQLite sources (%s)',
   async (protocol) => {
@@ -1093,7 +1204,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           limit: 1,
         });
       if (index < 6) {
-        const result = lastOutput(params) as { sources: Array<{ sourceHandle: string }> };
+        const result = lastOutput(params) as {
+          sources: Array<{
+            sourceHandle: string;
+          }>;
+        };
         return tool('library.read', {
           sourceHandle: result.sources[0]!.sourceHandle,
           readMode: 'source',
@@ -1149,7 +1264,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(f.content.getDocument(large.id).currentVersion?.contentMarkdown).toBe(body);
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'stops an unchanged library read loop before another Native request and preserves its SQLite audit (%s)',
   async (protocol) => {
@@ -1164,8 +1278,13 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const { bridge, requests } = scriptedBridge((params, index) => {
       const common = { projectSessionId: params.projectSessionId };
       if (index === 1)
-        handle = (lastOutput(params) as { sources: Array<{ sourceHandle: string }> }).sources[0]!
-          .sourceHandle;
+        handle = (
+          lastOutput(params) as {
+            sources: Array<{
+              sourceHandle: string;
+            }>;
+          }
+        ).sources[0]!.sourceHandle;
       // A broken model would keep reading forever; the fifth send must be the last.
       if (index > 4) throw new Error('Read loop reached another Provider request');
       const name = index === 0 ? 'library.search' : 'library.read';
@@ -1227,8 +1346,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     ).toEqual({ count: 4 });
   },
 );
-
-it('rejects duplicate authored text in both tool Schema and direct Worker parsing', () => {
+it('rejects retired creative fields in both tool schema and direct Worker parsing', () => {
   const tool = SYSTEM_AGENT_TOOLS.find((t) => t.name === 'scene.submit_structure')!;
   const base = {
     resourceId: 'workspace:shots',
@@ -1237,14 +1355,17 @@ it('rejects duplicate authored text in both tool Schema and direct Worker parsin
     scenes: [
       {
         title: '场次',
-        sceneDocumentId: 'setting',
-        characterDocumentIds: [],
-        authoringIR: authoring(),
-        shots: [{ title: '镜头', authoringIR: authoring(true) }],
+        ...authoring(),
+        shots: [{ title: '镜头', ...authoring(true) }],
+        bindings: {
+          schemaVersion: 1,
+          sceneDocumentIds: ['setting'],
+          characterDocumentIds: [],
+        },
       },
     ],
   };
-  for (const field of ['videoPrompt', 'prompt']) {
+  for (const field of ['videoPrompt', 'camera']) {
     const args = structuredClone(base);
     if (field === 'videoPrompt') Reflect.set(args.scenes[0]!, field, '重复正文');
     else Reflect.set(args.scenes[0]!.shots[0]!, field, '重复正文');
@@ -1263,7 +1384,6 @@ it('rejects duplicate authored text in both tool Schema and direct Worker parsin
     ).toThrow('unsupported field');
   }
 });
-
 it.each([
   ['openai-responses', true],
   ['openai-responses', false],
@@ -1278,7 +1398,7 @@ it.each([
       f.content.saveShot({
         sceneId: scene.id,
         title: `镜头${i}`,
-        authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '原文' },
+        prompt: '原文',
       }),
     );
     const discoveryShots = Array.from({ length: 16 }, (_, i) =>
@@ -1296,7 +1416,7 @@ it.each([
         .map((shot) => ({
           shotId: shot.id,
           expectedRowVersion: shot.rowVersion,
-          authoringIR: authoring(true),
+          ...promptPatch(authoring(true)),
         })),
     });
     const run = f.prepare('更新已有镜头的制作提示词');
@@ -1396,10 +1516,10 @@ it.each([
     if (!finalStop) expect(result.error).toContain('Provider failed after 25 requests');
     expect(requests).toHaveLength(25);
     expect(result.assistantMessage.attempt?.usage).toMatchObject({
-      inputTokens: 55_000,
-      cachedInputTokens: 3_000,
+      inputTokens: 55000,
+      cachedInputTokens: 3000,
       outputTokens: 250,
-      totalTokens: 55_250,
+      totalTokens: 55250,
     });
     // New targets keep the task moving beyond 24 requests before output repair;
     // their policies and frozen context must remain byte-identical.
@@ -1424,13 +1544,13 @@ it.each([
     for (const shot of shots) {
       expect(production.read({ kind: 'shot', id: shot.id })).toMatchObject({
         rowVersion: shot.rowVersion + 1,
-        authoringIR: authoring(true),
+        ...authoring(),
+        timing: shot.timing,
         issues: [],
       });
     }
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'stops a provider repeating the same tool load without business writes (%s)',
   async (protocol) => {
@@ -1484,7 +1604,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
   },
 );
-
 it('does not complete a rejected scene write, and records failure instead of tool success', async () => {
   const f = await setup();
   const run = f.prepare('创建场次');
@@ -1496,10 +1615,13 @@ it('does not complete a rejected scene write, and records failure instead of too
       scenes: [
         {
           title: '场次',
-          sceneDocumentId: 'missing',
-          characterDocumentIds: [],
-          authoringIR: authoring(),
-          shots: [{ title: '镜头', authoringIR: authoring(true) }],
+          ...authoring(),
+          shots: [{ title: '镜头', ...authoring(true) }],
+          bindings: {
+            schemaVersion: 1,
+            sceneDocumentIds: ['missing'],
+            characterDocumentIds: [],
+          },
         },
       ],
     }),
@@ -1527,10 +1649,13 @@ it('does not complete a rejected scene write, and records failure instead of too
     scenes: [
       {
         title: '场次',
-        sceneDocumentId: f.setting.id,
-        characterDocumentIds: [],
-        authoringIR: authoring(),
-        shots: [{ title: '镜头', authoringIR: authoring(true) }],
+        ...authoring(),
+        shots: [{ title: '镜头', ...authoring(true) }],
+        bindings: {
+          schemaVersion: 1,
+          sceneDocumentIds: [f.setting.id],
+          characterDocumentIds: [],
+        },
       },
     ],
   });
@@ -1540,7 +1665,6 @@ it('does not complete a rejected scene write, and records failure instead of too
     f.loop.completeProviderStep({ ...run.prepared.stream, finishReason: 'stop' }),
   ).not.toThrow();
 });
-
 it.each(['schema', 'stage'] as const)(
   'keeps an unfinished %s submission from becoming read-only completion',
   async (kind) => {
@@ -1578,7 +1702,6 @@ it.each(['schema', 'stage'] as const)(
     ).toThrow('原始请求仍未完成');
   },
 );
-
 it.each([
   ['openai-responses', 'schema'],
   ['openai-responses', 'business'],
@@ -1629,10 +1752,13 @@ it.each([
           scenes: [
             {
               title: '场次',
-              sceneDocumentId: kind === 'business' ? 'missing' : f.setting.id,
-              characterDocumentIds: [],
-              authoringIR: authoring(),
-              shots: [{ title: '镜头', authoringIR: shot }],
+              ...authoring(),
+              shots: [{ title: '镜头', ...shot }],
+              bindings: {
+                schemaVersion: 1,
+                sceneDocumentIds: [kind === 'business' ? 'missing' : f.setting.id],
+                characterDocumentIds: [],
+              },
             },
           ],
         });
@@ -1676,7 +1802,6 @@ it.each([
     expect(f.content.listScenes()).toHaveLength(0);
   },
 );
-
 it('does not hide a second unfinished stage behind another saved stage in the same task', async () => {
   const f = await setup();
   const run = f.prepare('创建多个场次');
@@ -1684,7 +1809,11 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
     operation: 'plan',
     deliverables: [{ key: 'scenes', toolName: 'scene.submit_structure', minimumCount: 2 }],
   });
-  const outputId = (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId;
+  const outputId = (
+    plan.outputBindings as Array<{
+      outputId: string;
+    }>
+  )[0]!.outputId;
   await run.invoke('scene.structure.stage', {
     resourceId: 'workspace:shots',
     outputId,
@@ -1703,10 +1832,13 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
     scenes: [
       {
         title: '第一场',
-        sceneDocumentId: f.setting.id,
-        characterDocumentIds: [],
-        authoringIR: authoring(),
-        shots: [{ title: '镜头', authoringIR: authoring(true) }],
+        ...authoring(),
+        shots: [{ title: '镜头', ...authoring(true) }],
+        bindings: {
+          schemaVersion: 1,
+          sceneDocumentIds: [f.setting.id],
+          characterDocumentIds: [],
+        },
       },
     ],
   });
@@ -1717,7 +1849,6 @@ it('does not hide a second unfinished stage behind another saved stage in the sa
   ).toThrow('TASK_DELIVERABLES_PENDING');
   expect(f.workflow.getTask({ taskId: run.agent.taskId }).task.status).toBe('running');
 });
-
 it('keeps an explicit checkpoint resumable until the full request is complete', async () => {
   const f = await setup();
   const run = f.prepare('创作第一场并保留续作进度');
@@ -1737,9 +1868,12 @@ it('keeps an explicit checkpoint resumable until the full request is complete', 
     sceneIndex: 0,
     scene: {
       title: '村口',
-      sceneDocumentId: f.setting.id,
-      characterDocumentIds: [],
-      authoringIR: authoring(),
+      ...authoring(),
+      bindings: {
+        schemaVersion: 1,
+        sceneDocumentIds: [f.setting.id],
+        characterDocumentIds: [],
+      },
     },
   });
   const checkpoint = await run.invoke('scene.structure.stage', {
@@ -1766,7 +1900,6 @@ it('keeps an explicit checkpoint resumable until the full request is complete', 
       .events.some((e) => e.eventType === 'agent.task.completed'),
   ).toBe(false);
 });
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'repairs saved scene text through the authorized tool under its original creation obligation (%s)',
   async (protocol) => {
@@ -1784,16 +1917,23 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
     const saved = await run.invoke('scene.submit_structure', {
       resourceId: 'workspace:shots',
-      outputId: (plan.outputBindings as Array<{ outputId: string }>)[0]!.outputId,
+      outputId: (
+        plan.outputBindings as Array<{
+          outputId: string;
+        }>
+      )[0]!.outputId,
       resolution: 'resolved',
       episodeTitle: '本集',
       scenes: [
         {
           title: '庭院',
-          sceneDocumentId: f.setting.id,
-          characterDocumentIds: [],
-          authoringIR: authoring(),
-          shots: [{ title: '结尾', authoringIR: authoring(true) }],
+          ...authoring(),
+          shots: [{ title: '结尾', ...authoring(true) }],
+          bindings: {
+            schemaVersion: 1,
+            sceneDocumentIds: [f.setting.id],
+            characterDocumentIds: [],
+          },
         },
       ],
     });
@@ -1829,7 +1969,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         {
           shotId,
           expectedRowVersion: read.rowVersion,
-          authoringIR: { ...(read.authoring as ProductionAuthoringIR), prompt: '结尾对白。' },
+          ...promptPatch(read.authoring as PromptRecord),
+          prompt: '结尾对白。',
         },
       ],
     };
@@ -1854,7 +1995,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     ).toEqual({ n: 1 });
   },
 );
-
 async function setup(
   protocol: NativeProviderStreamStartParams['protocol'] = 'openai-chat-completions',
   contextWindowTokens?: number,
@@ -1956,7 +2096,6 @@ async function setup(
     prepare,
   };
 }
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'corrects a rejected new script from its complete pending body after handoff without audit scanning (%s)',
   async (protocol) => {
@@ -1972,7 +2111,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const rejected = {
       ...draft,
       baseVersionId: source.id,
-      contentIR: { schemaVersion: 1, kind: 'plan', data: { detail: '保留手写伏笔' } },
+      bindings: { schemaVersion: 1 as const },
     };
     const { bridge, requests } = scriptedBridge((params, index) => {
       const common = { projectSessionId: params.projectSessionId };
@@ -2089,7 +2228,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     ).toEqual({ n: 0 });
   },
 );
-
 it.each([
   ['openai-responses', 'correct'],
   ['openai-chat-completions', 'correct'],
@@ -2182,7 +2320,9 @@ it.each([
             limit: 1,
           });
         case 5: {
-          const sources = lastOutput(params).sources as Array<{ sourceHandle: string }>;
+          const sources = lastOutput(params).sources as Array<{
+            sourceHandle: string;
+          }>;
           return tool('library.read', {
             sourceHandle: sources[0]!.sourceHandle,
             readMode: 'source',
@@ -2316,7 +2456,6 @@ it.each([
     expect(reads).toEqual({ n: 1 });
   },
 );
-
 it.each([
   ['openai-responses', 'schema'],
   ['openai-chat-completions', 'schema'],
@@ -2407,7 +2546,6 @@ it.each([
     ).toBe('已保存的对白必须保留。');
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'finishes a long task across durable context stages without repeating saves (%s)',
   async (protocol) => {
@@ -2417,13 +2555,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       f.content.saveShot({
         sceneId: scene.id,
         title: `第${i + 1}镜`,
-        authoringIR: {
-          schemaVersion: 1,
-          kind: 'shot',
-          prompt: `第${i + 1}镜独有的原始正文。${'转身后按原位停顿。'.repeat(240)}`,
-          timing: { estimatedDurationSeconds: 8, rationale: '保留完整动作' },
-          references: { sceneDocumentIds: [f.setting.id] },
-          data: { manual: { locked: `手动字段${i}` } },
+        prompt: `第${i + 1}镜独有的原始正文。${'转身后按原位停顿。'.repeat(240)}`,
+        timing: { estimatedDurationSeconds: 8 },
+        bindings: {
+          schemaVersion: 1 as const,
+          sceneDocumentIds: [f.setting.id],
         },
       }),
     );
@@ -2464,10 +2600,9 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         expect(nativeRequestUserText(params)).toContain('checkpointId');
         expect(stageEnvelope(params).savedArtifacts.length).toBeGreaterThan(0);
         // Bodies of completed shots leave the working stage; source audit stays intact.
-        if (cursor > 10)
-          expect(JSON.stringify(params)).not.toContain(shots[0]!.authoringIR!.prompt);
+        if (cursor > 10) expect(JSON.stringify(params)).not.toContain(shots[0]!.prompt);
         if (read) {
-          expect(params.systemInstruction).not.toContain(shots[cursor]!.authoringIR!.prompt);
+          expect(params.systemInstruction).not.toContain(shots[cursor]!.prompt);
           expect(stageEnvelope(params).evidence.length).toBeGreaterThan(0);
         }
         expectFresh = false;
@@ -2522,7 +2657,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
             {
               shotId: shot.id,
               expectedRowVersion: shot.rowVersion,
-              authoringIR: { ...shot.authoringIR, prompt: shot.authoringIR!.prompt + '补充衔接。' },
+              ...promptPatch(shot),
+              prompt: shot.prompt + '补充衔接。',
             },
           ],
         });
@@ -2587,23 +2723,26 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           'SELECT tool_name,status,result_summary_json FROM agent_tool_calls WHERE generation_id=? ORDER BY rowid',
         )
         .all(run.prepared.stream.generationId),
-    ) as Array<{ tool_name: string; status: string; result_summary_json: string }>;
+    ) as Array<{
+      tool_name: string;
+      status: string;
+      result_summary_json: string;
+    }>;
     expect(audit.filter((row) => row.status === 'failed')).toEqual([]);
     expect(audit.filter((row) => row.tool_name === 'scene.update_shot_prompts')).toHaveLength(30);
     expect(audit.filter((row) => row.tool_name === 'production.read')).toHaveLength(60);
     expect(audit.filter((row) => row.tool_name === 'conversation.task.checkpoint')).toHaveLength(
       checkpoints,
     );
-    expect(
-      audit.some((row) => row.result_summary_json.includes(shots[0]!.authoringIR!.prompt)),
-    ).toBe(true);
+    expect(audit.some((row) => row.result_summary_json.includes(shots[0]!.prompt!))).toBe(true);
     const current = new ProductionService(f.project);
     for (const shot of shots) {
       const saved = current.read({ kind: 'shot', id: shot.id });
       expect(saved.rowVersion).toBe(shot.rowVersion + 1);
-      expect(saved.authoringIR).toEqual({
-        ...shot.authoringIR,
-        prompt: shot.authoringIR!.prompt + '补充衔接。',
+      expect(saved).toMatchObject({
+        bindings: shot.bindings,
+        timing: shot.timing,
+        prompt: shot.prompt + '补充衔接。',
       });
     }
     const recovery = f.prepare('只核对上次交接，不改写');
@@ -2621,7 +2760,13 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       targetGenerationId: run.prepared.stream.generationId,
       receiptOffset: 20,
     });
-    expect((receipts.savedProductionReceipts as { receipts: unknown[] }).receipts).toHaveLength(10);
+    expect(
+      (
+        receipts.savedProductionReceipts as {
+          receipts: unknown[];
+        }
+      ).receipts,
+    ).toHaveLength(10);
     expect(receipts.checkpoint).toBeUndefined();
     let evidenceContentOffset = 0;
     let evidenceJson = '';
@@ -2633,7 +2778,10 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         evidenceContentOffset,
       });
       expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(65536);
-      const evidence = page.evidence as { resultJson: string; nextContentOffset?: number };
+      const evidence = page.evidence as {
+        resultJson: string;
+        nextContentOffset?: number;
+      };
       evidenceJson += evidence.resultJson;
       evidenceContentOffset = evidence.nextContentOffset ?? 0;
     } while (evidenceContentOffset);
@@ -2644,7 +2792,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
   },
   30000,
 );
-
 it.each([
   ['openai-responses', false],
   ['openai-chat-completions', false],
@@ -2658,14 +2805,12 @@ it.each([
     const shot = f.content.saveShot({
       sceneId: scene.id,
       title: '第11镜',
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
-        prompt: '完整镜头正文'.repeat(100),
-        references: { sceneDocumentIds: [f.setting.id] },
-        timing: { estimatedDurationSeconds: 8, rationale: '保留动作' },
-        data: { manual: { locked: '保留左手' } },
+      prompt: '完整镜头正文'.repeat(100),
+      bindings: {
+        schemaVersion: 1 as const,
+        sceneDocumentIds: [f.setting.id],
       },
+      timing: { estimatedDurationSeconds: 8 },
     });
     const run = f.prepare('继续修第11镜，保留原文和手动设置。');
     let step = 0;
@@ -2711,30 +2856,33 @@ it.each([
             envelope.evidence[0]!.resultId,
           ),
         );
-        expect((JSON.parse(stored!.content) as { authoring: unknown }).authoring).toEqual(
-          shot.authoringIR,
-        );
-        expect(params.systemInstruction).not.toContain(shot.authoringIR!.prompt);
+        expect(
+          (
+            JSON.parse(stored!.content) as {
+              authoring: unknown;
+            }
+          ).authoring,
+        ).toEqual({ prompt: shot.prompt, bindings: shot.bindings, timing: shot.timing });
+        expect(params.systemInstruction).not.toContain(shot.prompt);
         expect(envelope.availableTools).toContain('scene.update_shot_prompts');
         saveArgs = {
           shots: [
             {
               shotId: shot.id,
               expectedRowVersion: shot.rowVersion,
-              authoringIR: { ...shot.authoringIR, prompt: shot.authoringIR!.prompt + '剪辑接点。' },
+              ...promptPatch(shot),
+              prompt: shot.prompt + '剪辑接点。',
             },
           ],
         };
         if (conflict)
           current = f.content.saveShot({
-            shotId: shot.id,
-            sceneId: scene.id,
+            sceneId: shot.sceneId,
             title: shot.title,
+            shotId: shot.id,
             expectedRowVersion: shot.rowVersion,
-            authoringIR: {
-              ...shot.authoringIR!,
-              prompt: shot.authoringIR!.prompt + '用户并发补充。',
-            },
+            ...promptPatch(shot),
+            prompt: shot.prompt + '用户并发补充。',
           });
         return tool('scene.update_shot_prompts', saveArgs);
       }
@@ -2749,10 +2897,8 @@ it.each([
             {
               shotId: shot.id,
               expectedRowVersion: current.rowVersion,
-              authoringIR: {
-                ...current.authoringIR,
-                prompt: current.authoringIR!.prompt + '剪辑接点。',
-              },
+              ...promptPatch(current),
+              prompt: current.prompt + '剪辑接点。',
             },
           ],
         };
@@ -2764,7 +2910,7 @@ it.each([
         expect(params.continuation).toBeUndefined();
         const envelope = stageEnvelope(params);
         expect(envelope.savedArtifacts).toHaveLength(1);
-        expect(params.systemInstruction).not.toContain(shot.authoringIR!.prompt);
+        expect(params.systemInstruction).not.toContain(shot.prompt);
         return tool('scene.update_shot_prompts', saveArgs);
       }
       return [
@@ -2795,9 +2941,10 @@ it.each([
     expect(generation.status, generation.error).toBe('complete');
     const saved = new ProductionService(f.project).read({ kind: 'shot', id: shot.id });
     expect(saved.rowVersion).toBe(current.rowVersion + 1);
-    expect(saved.authoringIR).toEqual({
-      ...current.authoringIR,
-      prompt: current.authoringIR!.prompt + '剪辑接点。',
+    expect(saved).toMatchObject({
+      bindings: current.bindings,
+      timing: current.timing,
+      prompt: current.prompt + '剪辑接点。',
     });
     const counts = f.project.access(false, (db) => ({
       receipts: db.prepare('SELECT COUNT(*) AS n FROM agent_write_receipts').get(),
@@ -2811,7 +2958,6 @@ it.each([
     expect(counts.reads).toEqual({ n: conflict ? 4 : 2 });
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'keeps a committed checkpoint when cancelled before the next stage (%s)',
   async (protocol) => {
@@ -2880,7 +3026,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     });
   },
 );
-
 it('rejects checkpoint-only loops, cross-conversation recovery and saves into another generation', async () => {
   const f = await setup();
   const run = f.prepare('核对当前目录');
@@ -2928,7 +3073,6 @@ it('rejects checkpoint-only loops, cross-conversation recovery and saves into an
     }),
   ).toMatchObject({ status: 'rejected' });
 });
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'saves every target once after many production reads without losing shared media evidence (%s)',
   async (protocol) => {
@@ -2984,23 +3128,17 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       f.content.saveShot({
         sceneId: scene.id,
         title: `第${i + 11}镜`,
-        authoringIR: {
-          schemaVersion: 1,
-          kind: 'shot',
-          prompt: `镜头${i}原始完整要求。`.repeat(120),
-          references: {
-            characterDocumentIds: documents.slice(0, 2).map((d) => d.id),
-            sceneDocumentIds: [f.setting.id],
-            propDocumentIds: [documents[3]!.id],
-          },
-          timing: { estimatedDurationSeconds: 8, rationale: '保留时长' },
-          data: { manual: { instruction: `保留手动事实${i}` } },
+        prompt: `镜头${i}原始完整要求。`.repeat(120),
+        bindings: {
+          schemaVersion: 1 as const,
+          characterDocumentIds: documents.slice(0, 2).map((d) => d.id),
+          sceneDocumentIds: [f.setting.id],
+          propDocumentIds: [documents[3]!.id],
         },
+        timing: { estimatedDurationSeconds: 8 },
       }),
     );
-    const revised = shots.map(
-      (shot, i) => `${shot.authoringIR!.prompt}第${i + 11}镜完成衔接修订。`,
-    );
+    const revised = shots.map((shot, i) => `${shot.prompt}第${i + 11}镜完成衔接修订。`);
     const run = f.prepare(
       `继续修订第11至17镜，完整保留引用、时长与手动内容。${'user requirement '.repeat(4900)}`,
     );
@@ -3038,7 +3176,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
             {
               shotId: shot.id,
               expectedRowVersion: shot.rowVersion,
-              authoringIR: { ...shot.authoringIR, prompt: revised[index - 15] },
+              ...promptPatch(shot),
+              prompt: revised[index - 15],
             },
           ],
         });
@@ -3088,7 +3227,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
               firstWrite.prompt
                 .split('[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]\n')[1]!
                 .split('\n[END TASK HISTORY]')[0]!,
-            ) as Array<{ role: string; callId: string; content: string }>
+            ) as Array<{
+              role: string;
+              callId: string;
+              content: string;
+            }>
           )
             .filter((entry) => entry.role === 'toolResult')
             .map((entry) => ({ callId: entry.callId, output: entry.content }));
@@ -3099,7 +3242,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           'SELECT provider_call_id,result_summary_json,tool_name FROM agent_tool_calls WHERE generation_id=? ORDER BY created_at,tool_ordinal',
         )
         .all(run.prepared.stream.generationId),
-    ) as Array<{ provider_call_id: string; result_summary_json: string; tool_name: string }>;
+    ) as Array<{
+      provider_call_id: string;
+      result_summary_json: string;
+      tool_name: string;
+    }>;
     for (const entry of audit.filter((entry) => entry.tool_name === 'production.read'))
       expect(decoded.get(entry.provider_call_id)).toEqual(JSON.parse(entry.result_summary_json));
     const receipts = f.workflow.getTask({ taskId: run.agent.taskId }).savedProductionReceipts!
@@ -3112,22 +3259,25 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const persisted = f.content.listShots(scene.id);
     shots.forEach((shot, i) =>
       expect(persisted.find((saved) => saved.id === shot.id)).toMatchObject({
+        bindings: shot.bindings,
+        timing: shot.timing,
         rowVersion: shot.rowVersion + 1,
-        authoringIR: { ...shot.authoringIR, prompt: revised[i] },
+        prompt: revised[i],
       }),
     );
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'reads and saves one shot once, then inspects exact durable receipts after a final provider failure (%s)',
   async (protocol) => {
-    const f = await setup(protocol, 28000);
+    // Expanded authoring/review contracts need room as well as the unchanged long user input/output.
+    // Budget rejection at insufficient windows remains covered by AgentContextBudget regressions.
+    const f = await setup(protocol, 30000);
     const scene = f.content.saveScene({ title: '场次', sceneDocumentId: f.setting.id });
     const shot = f.content.saveShot({
       sceneId: scene.id,
       title: '镜头七',
-      authoringIR: { ...authoring(true), kind: 'shot' },
+      ...authoring(true),
     });
     const savedPrompt = `另两影作背景剪影。${'composition '.repeat(1200)}`;
     const run = f.prepare(`只修改镜头七，保留所有要求。${'user requirement '.repeat(1600)}`);
@@ -3166,7 +3316,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
             {
               shotId: shot.id,
               expectedRowVersion: shot.rowVersion,
-              authoringIR: { schemaVersion: 1, kind: 'shot', prompt: savedPrompt },
+              prompt: savedPrompt,
             },
           ],
         });
@@ -3243,8 +3393,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const continuation = f.prepare('继续：先核对已保存结果');
     const inspected = await continuation.invoke('conversation.task.route', {
       decision: 'inspect',
+      rationale: '核对指定任务的实际保存结果。',
       targetGenerationId: run.prepared.stream.generationId,
-      rationale: '先核对已保存修改',
     });
     expect(inspected).toMatchObject({
       targetStatus: 'failed',
@@ -3253,12 +3403,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(f.content.listShots(scene.id)).toHaveLength(1);
     expect(f.content.listShots(scene.id)[0]).toMatchObject({
       rowVersion: shot.rowVersion + 1,
-      authoringIR: { prompt: savedPrompt },
+      prompt: savedPrompt,
     });
     expect(task.providerSteps.at(-1)?.status).toBe('failed');
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'persists local budget diagnostics without counting or sending a provider request (%s)',
   async (protocol) => {
@@ -3311,7 +3460,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     );
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'recovers Native and bridge JSON failures into one saved scene without repeating reads or saved parts (%s)',
   async (protocol) => {
@@ -3338,7 +3486,9 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       const base = { resourceId: 'workspace:shots' };
       if (index === 0) return tool('library.search', { query: '庭院', sourceTypes: ['document'] });
       if (index === 1) {
-        const sources = lastOutput(params).sources as Array<{ sourceHandle: string }>;
+        const sources = lastOutput(params).sources as Array<{
+          sourceHandle: string;
+        }>;
         return tool('library.read', { sourceHandle: sources[0]!.sourceHandle, readMode: 'source' });
       }
       if (index === 2) return tool('tools.load', { names: ['scene.submit_structure'] });
@@ -3390,9 +3540,12 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           sceneIndex: 0,
           scene: {
             title: '庭院',
-            sceneDocumentId: f.setting.id,
-            characterDocumentIds: [],
-            authoringIR: authoring(),
+            ...authoring(),
+            bindings: {
+              schemaVersion: 1,
+              sceneDocumentIds: [f.setting.id],
+              characterDocumentIds: [],
+            },
           },
         });
       }
@@ -3432,7 +3585,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           expectedRowVersion: lastOutput(params).rowVersion,
           sceneIndex: 0,
           shotOffset: 0,
-          shots: [{ title: '转身', authoringIR: authoring(true) }],
+          shots: [{ title: '转身', ...authoring(true) }],
         });
       if (index === 11)
         return tool('scene.structure.stage', {
@@ -3484,7 +3637,9 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       db
         .prepare('SELECT tool_name FROM agent_tool_calls WHERE generation_id=?')
         .all(run.prepared.stream.generationId),
-    ) as Array<{ tool_name: string }>;
+    ) as Array<{
+      tool_name: string;
+    }>;
     expect(tools.filter((item) => item.tool_name === 'library.read')).toHaveLength(1);
     expect(tools.some((item) => item.tool_name === 'scene.submit_structure')).toBe(false);
     const failedRequests = f.project.access(false, (db) =>
@@ -3495,9 +3650,8 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(failedRequests).toHaveLength(3);
   },
 );
-
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
-  'recovers IR schema/JSON syntax failures without shrinking batches, preserving saved scenes and prompt text (%s)',
+  'recovers binding schema/JSON syntax failures without shrinking batches, preserving saved scenes and prompt text (%s)',
   async (protocol) => {
     const f = await setup(protocol);
     const run = f.prepare('生成原创短剧场次，保留提示词全文');
@@ -3509,12 +3663,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const prompts = ['抬头说："谁在那里？"\n门外没有回答。', '推门，停顿。', '回望走廊。'];
     const shot = (index: number) => ({
       title: `镜头${index + 1}`,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
-        prompt: prompts[index],
-        references: { characterDocumentIds: [actor.id], sceneDocumentIds: [f.setting.id] },
-        data: { camera: { movement: '自由扩展字段' } },
+      prompt: prompts[index],
+      bindings: {
+        schemaVersion: 1 as const,
+        characterDocumentIds: [actor.id],
+        sceneDocumentIds: [f.setting.id],
       },
     });
     let stageId: unknown;
@@ -3559,11 +3712,11 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
           sceneIndex: index === 2 ? 0 : 1,
           scene: {
             title: index === 2 ? '已完成的第一场' : '第二场',
-            authoringIR: {
-              schemaVersion: 1,
-              kind: 'scene',
-              prompt: '完整场次提示词。',
-              references: { characterDocumentIds: [actor.id], sceneDocumentIds: [f.setting.id] },
+            prompt: '完整场次提示词。',
+            bindings: {
+              schemaVersion: 1 as const,
+              characterDocumentIds: [actor.id],
+              sceneDocumentIds: [f.setting.id],
             },
           },
         });
@@ -3588,12 +3741,18 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
         });
       }
       const stage = params.tools?.find((entry) => entry.name === 'scene.structure.stage');
-      const maxItems = (stage?.parameters.properties as Record<string, { maxItems: number }>).shots!
-        .maxItems;
+      const maxItems = (
+        stage?.parameters.properties as Record<
+          string,
+          {
+            maxItems: number;
+          }
+        >
+      ).shots!.maxItems;
       if (index === 6) {
         const feedback = params.continuation!.outputs[0]!.output;
         expect(feedback).toContain('shots[0].camera');
-        expect(feedback).toContain('authoringIR.data');
+        expect(feedback).toContain('prompt text, bindings and timing');
         expect(feedback).not.toContain('PRIVATE_BODY');
         expect(maxItems).toBe(4);
         return [
@@ -3680,13 +3839,12 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     expect(JSON.stringify(failures)).not.toContain('PRIVATE_BODY');
   },
 );
-
 it('preserves existing scene identity and prompt when a binding update needs output recovery', async () => {
   const f = await setup();
   const scene = f.content.saveScene({
     title: '已有场次',
     sceneDocumentId: f.setting.id,
-    videoPrompt: '保留原有提示词',
+    prompt: '保留原有提示词',
     characterBindings: [],
   });
   const run = f.prepare('修订已有场次的绑定');
@@ -3735,9 +3893,12 @@ it('preserves existing scene identity and prompt when a binding update needs out
             sceneId: scene.id,
             expectedRowVersion: scene.rowVersion,
             title: scene.title,
-            sceneDocumentId: null,
-            characterDocumentIds: [],
             shots: [],
+            bindings: {
+              schemaVersion: 1,
+              sceneDocumentIds: [],
+              characterDocumentIds: [],
+            },
           },
         ],
       });
@@ -3770,10 +3931,9 @@ it('preserves existing scene identity and prompt when a binding update needs out
   expect(result.status).toBe('complete');
   expect(requests).toHaveLength(6);
   expect(f.content.listScenes()).toEqual([
-    expect.objectContaining({ id: scene.id, videoPrompt: '保留原有提示词' }),
+    expect.objectContaining({ id: scene.id, prompt: '保留原有提示词' }),
   ]);
 });
-
 it.each([
   [
     'INVALID_TOOL_ARGUMENTS: scene.submit_structure returned invalid object JSON (18610 bytes); finishReason=tool_calls. No tool was executed.',
@@ -3835,7 +3995,6 @@ it.each([
     expect(failures).toHaveLength(count === 2 ? 2 : 0);
   },
 );
-
 it('stops an identical malformed output while preserving the already saved scene stage', async () => {
   const f = await setup();
   const run = f.prepare('生成庭院镜头');
@@ -3872,7 +4031,7 @@ it('stops an identical malformed output while preserving the already saved scene
         stageId: state.stageId,
         expectedRowVersion: state.rowVersion,
         sceneIndex: 0,
-        scene: { title: '庭院', authoringIR: authoring() },
+        scene: { title: '庭院', ...authoring() },
       });
     }
     if (index === 4)
@@ -3930,13 +4089,14 @@ it('stops an identical malformed output while preserving the already saved scene
   );
   expect(stages).toHaveLength(1);
   const [savedScene] = JSON.parse(stages[0]!.scenes_json) as Array<{
-    scene?: { title?: string };
+    scene?: {
+      title?: string;
+    };
     shots: Array<Record<string, unknown> | null>;
   }>;
   expect(savedScene!.scene?.title).toBe('庭院');
   expect(savedScene!.shots).toEqual([null]);
 });
-
 it('stops output recovery before sending another request when cancelled at the repair boundary', async () => {
   const f = await setup();
   const run = f.prepare('生成庭院镜头');
@@ -3977,7 +4137,6 @@ it('stops output recovery before sending another request when cancelled at the r
   expect(requests).toHaveLength(1);
   expect(f.content.listScenes()).toHaveLength(0);
 });
-
 it.each([
   ['stage', false, false],
   ['submit', false, false],
@@ -3986,7 +4145,7 @@ it.each([
   ['stage', true, true],
   ['submit', true, true],
 ] as const)(
-  'saves modern scene IR with optional setting and authoritative explicit references (%s, %s, %s)',
+  'saves ordinary scene text and explicit bindings without inheriting scene cast into shots (%s, %s, %s)',
   async (mode, withSceneBinding, explicitScopes) => {
     const f = await setup();
     const actor = f.content.saveDocument({
@@ -3997,21 +4156,20 @@ it.each([
     const run = f.prepare('保存一场一镜，引用只绑定本镜出镜资料');
     const scene = {
       title: '庭院',
-      characterDocumentIds: [actor.id],
-      ...(withSceneBinding ? { sceneDocumentId: f.setting.id } : {}),
-      authoringIR: {
-        ...authoring(),
-        ...(explicitScopes
-          ? { references: { characterDocumentIds: [], sceneDocumentIds: [] } }
-          : {}),
+      ...authoring(),
+      bindings: {
+        schemaVersion: 1 as const,
+        characterDocumentIds: explicitScopes ? [] : [actor.id],
+        sceneDocumentIds: withSceneBinding && !explicitScopes ? [f.setting.id] : [],
       },
     };
-    const references = {
+    const bindings = {
+      schemaVersion: 1 as const,
       characterDocumentIds: [actor.id],
       sceneDocumentIds: [f.setting.id],
       propDocumentIds: [],
     };
-    const shots = [{ title: '一镜', authoringIR: { ...authoring(true), references } }];
+    const shots = [{ title: '一镜', ...authoring(true), bindings }];
     let result;
     if (mode === 'stage') {
       let state = await run.invoke('scene.structure.stage', {
@@ -4041,9 +4199,8 @@ it.each([
     expect(result.status, JSON.stringify(result)).toBe('scene_structure_saved');
     const savedScene = f.content.listScenes()[0]!;
     expect(f.content.listScenes()).toHaveLength(1);
-    expect(f.content.listShots(savedScene.id)[0]?.authoringIR?.references).toEqual(references);
-    // Compatibility IDs fill omitted scopes, never replace explicit IR scopes
-    // or leak the full scene cast into individual shots.
+    expect(f.content.listShots(savedScene.id)[0]?.bindings).toEqual(bindings);
+    // Scene cast and shot cast are independently bound.
     expect(savedScene.characterBindings).toEqual(
       explicitScopes ? [] : [{ characterDocumentId: actor.id }],
     );
@@ -4054,7 +4211,6 @@ it.each([
     });
   },
 );
-
 it('resumes staged authoring across a cancelled task and saves one editable draft with real IDs without approval', async () => {
   const f = await setup();
   const first = f.prepare('生成两镜');
@@ -4076,9 +4232,12 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
     sceneIndex: 0,
     scene: {
       title: '庭院',
-      sceneDocumentId: f.setting.id,
-      characterDocumentIds: [],
-      authoringIR: authoring(),
+      ...authoring(),
+      bindings: {
+        schemaVersion: 1,
+        sceneDocumentIds: [f.setting.id],
+        characterDocumentIds: [],
+      },
     },
   };
   state = await first.invoke('scene.structure.stage', setupArgs);
@@ -4107,7 +4266,7 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
   state = await second.invoke('scene.structure.stage', { ...base, operation: 'get', stageId });
   const shots = [0, 1].map((index) => ({
     title: `镜头${index + 1}`,
-    authoringIR: authoring(true),
+    ...authoring(true),
   }));
   state = await second.invoke('scene.structure.stage', {
     ...base,
@@ -4147,7 +4306,6 @@ it('resumes staged authoring across a cancelled task and saves one editable draf
   f.loop.completeProviderStep({ ...second.prepared.stream, finishReason: 'stop' });
   expect(f.workflow.getTask({ taskId: second.agent.taskId }).task.outcome).not.toBe('read-only');
 });
-
 it('keeps an earlier scene saved when a later staged scene is incomplete or fails', async () => {
   const f = await setup();
   const run = f.prepare('依次生成两场');
@@ -4169,13 +4327,16 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
       sceneIndex,
       scene: {
         title: `场次${sceneIndex + 1}`,
-        sceneDocumentId: f.setting.id,
-        characterDocumentIds: [],
-        authoringIR: authoring(),
+        ...authoring(),
+        bindings: {
+          schemaVersion: 1,
+          sceneDocumentIds: [f.setting.id],
+          characterDocumentIds: [],
+        },
       },
     });
   };
-  const putShot = async (sceneIndex: number, shotInstruction: ProductionAuthoringIR) => {
+  const putShot = async (sceneIndex: number, shotInstruction: PromptRecord) => {
     state = await run.invoke('scene.structure.stage', {
       ...base,
       operation: 'put_shots',
@@ -4183,10 +4344,9 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
       expectedRowVersion: state.rowVersion,
       sceneIndex,
       shotOffset: 0,
-      shots: [{ title: `镜头${sceneIndex + 1}`, authoringIR: shotInstruction }],
+      shots: [{ title: `镜头${sceneIndex + 1}`, ...shotInstruction }],
     });
   };
-
   await putScene(0);
   await putShot(0, authoring(true));
   expect(state).toMatchObject({
@@ -4209,7 +4369,6 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
     sceneIds: [firstSceneId],
   });
   expect(f.content.listScenes()).toHaveLength(1);
-
   await expect(
     run.invoke('scene.structure.stage', {
       ...base,
@@ -4218,12 +4377,11 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
       expectedRowVersion: checkpoint.rowVersion,
       sceneIndex: 1,
       shotOffset: 0,
-      shots: [{ title: '坏镜头', authoringIR: { ...authoring(true), unknown: true } }],
+      shots: [{ title: '坏镜头', ...authoring(true), unknown: true }],
     }),
   ).resolves.toMatchObject({ status: 'rejected' });
   expect(f.content.listScenes()).toHaveLength(1);
   expect(f.content.listShots(firstSceneId)).toHaveLength(1);
-
   state = await run.invoke('scene.structure.stage', {
     ...base,
     operation: 'put_shots',
@@ -4231,7 +4389,7 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
     expectedRowVersion: checkpoint.rowVersion,
     sceneIndex: 1,
     shotOffset: 0,
-    shots: [{ title: '镜头2', authoringIR: authoring(true) }],
+    shots: [{ title: '镜头2', ...authoring(true) }],
   });
   expect(state).toMatchObject({
     status: 'scene_structure_saved',
@@ -4241,7 +4399,6 @@ it('keeps an earlier scene saved when a later staged scene is incomplete or fail
   expect(f.content.listScenes()).toHaveLength(2);
   expect(f.content.listShots(firstSceneId)).toHaveLength(1);
 });
-
 it('completes a request larger than one page in the same task without duplicates', async () => {
   const f = await setup();
   const counts = Array<number>(14).fill(8);
@@ -4281,9 +4438,12 @@ it('completes a request larger than one page in the same task without duplicates
         sceneIndex,
         scene: {
           title: `场${absoluteScene + 1}`,
-          sceneDocumentId: f.setting.id,
-          characterDocumentIds: [],
-          authoringIR: authoring(),
+          ...authoring(),
+          bindings: {
+            schemaVersion: 1,
+            sceneDocumentIds: [f.setting.id],
+            characterDocumentIds: [],
+          },
         },
       });
       for (let shotOffset = 0; shotOffset < pageCounts[sceneIndex]!; shotOffset += 4) {
@@ -4298,7 +4458,7 @@ it('completes a request larger than one page in the same task without duplicates
             { length: Math.min(4, pageCounts[sceneIndex]! - shotOffset) },
             (_, offset) => ({
               title: `场${absoluteScene + 1}镜${shotOffset + offset + 1}`,
-              authoringIR: authoring(true),
+              ...authoring(true),
             }),
           ),
         });
@@ -4317,23 +4477,25 @@ it('completes a request larger than one page in the same task without duplicates
   expect(scenes.reduce((sum, scene) => sum + f.content.listShots(scene.id).length, 0)).toBe(112);
   expect(new ChangeSetService(f.project).list({ includeTerminal: true })).toHaveLength(14);
 });
-
 it('shares create/update validation, retains binding text, rejects conflicting text and preflights total/rendered limits', async () => {
   const f = await setup();
   const run = f.prepare('修订绑定');
   const current = f.content.saveScene({
     title: '旧场次',
     sceneDocumentId: f.setting.id,
-    videoPrompt: '手写原文标记',
+    prompt: '手写原文标记',
     characterBindings: [],
   });
   const scene = {
     title: current.title,
     sceneId: current.id,
     expectedRowVersion: current.rowVersion,
-    sceneDocumentId: f.setting.id,
-    characterDocumentIds: [],
     shots: [],
+    bindings: {
+      schemaVersion: 1,
+      sceneDocumentIds: [f.setting.id],
+      characterDocumentIds: [],
+    },
   };
   const args = {
     resourceId: 'workspace:shots',
@@ -4353,17 +4515,17 @@ it('shares create/update validation, retains binding text, rejects conflicting t
   const result = await run.invoke(tool.name, args);
   expect(result.status).toBe('scene_structure_saved');
   expect(result).toMatchObject({ applied: true, reviewRequired: false });
-  expect(f.content.listScenes()[0]!.videoPrompt).toBe('手写原文标记');
+  expect(f.content.listScenes()[0]!.prompt).toBe('手写原文标记');
   const shared = {
     title: '新场次',
-    authoringIR: authoring(),
-    shots: [{ title: '镜头', authoringIR: authoring(true) }],
+    ...authoring(),
+    shots: [{ title: '镜头', ...authoring(true) }],
   };
   expect(() =>
     parseEpisodeStructureArguments(
       JSON.stringify({
         episodeTitle: '冲突',
-        scenes: [{ ...shared, videoPrompt: '正文专属不可丢失' }],
+        scenes: [{ ...shared, unexpectedCreativeField: '正文专属不可丢失' }],
       }),
     ),
   ).toThrow('unsupported field');
@@ -4373,7 +4535,7 @@ it('shares create/update validation, retains binding text, rejects conflicting t
     parseEpisodeStructureArguments(
       JSON.stringify({
         episodeTitle: '漏字段',
-        scenes: [{ ...shared, shots: [{ title: '镜头', authoringIR: invalid }] }],
+        scenes: [{ ...shared, shots: [{ title: '镜头', ...invalid }] }],
       }),
     ),
   ).toThrow('prompt');
@@ -4393,12 +4555,11 @@ it('shares create/update validation, retains binding text, rejects conflicting t
     parseEpisodeStructureArguments(
       JSON.stringify({
         episodeTitle: '超长',
-        scenes: [{ ...shared, shots: [{ title: '镜头', authoringIR: huge }] }],
+        scenes: [{ ...shared, shots: [{ title: '镜头', ...huge }] }],
       }),
     ),
   ).toThrow('20000');
 });
-
 it.each(['document.submit_draft', 'tools.load'])(
   'allows distinct Pi argument repairs for %s and records them without charging tool calls',
   async (operation) => {
@@ -4477,13 +4638,19 @@ it.each(['document.submit_draft', 'tools.load'])(
           "SELECT summary FROM agent_task_events WHERE task_id=? AND event_type='tool_validation_failed'",
         )
         .all(run.agent.taskId),
-    ) as Array<{ summary: string }>;
+    ) as Array<{
+      summary: string;
+    }>;
     expect(rows).toHaveLength(4);
     expect(
       rows.every((row) => row.summary.length < 2000 && !row.summary.includes('PRIVATE_BODY')),
     ).toBe(true);
     expect(
-      (JSON.parse(rows[0]!.summary) as { argumentBytes: number }).argumentBytes,
+      (
+        JSON.parse(rows[0]!.summary) as {
+          argumentBytes: number;
+        }
+      ).argumentBytes,
     ).toBeGreaterThan(100000);
     expect(
       f.project.access(false, (db) =>
@@ -4499,7 +4666,6 @@ it.each(['document.submit_draft', 'tools.load'])(
     expect(f.workflow.listDocuments()).toHaveLength(1); // Only the fixture setting.
   },
 );
-
 it('shows actual request/status candidates, inspects cancelled artifacts without a success dependency and deduplicates snapshots', async () => {
   const f = await setup();
   const prompt = `【本会话要求约束】\n${'固定约束'.repeat(1000)}\n\n【用户本次请求】\n重新生成场次`;
@@ -4512,7 +4678,9 @@ it('shows actual request/status candidates, inspects cancelled artifacts without
         (
           db
             .prepare('SELECT version FROM llm_generations WHERE id=?')
-            .get(first.prepared.stream.generationId) as { version: number }
+            .get(first.prepared.stream.generationId) as {
+            version: number;
+          }
         ).version,
     );
   const version = readVersion();
@@ -4526,19 +4694,24 @@ it('shows actual request/status candidates, inspects cancelled artifacts without
   expect(f.generations.runtime(second.prepared.stream).context).toContain('cancelled');
   const result = await second.invoke('conversation.task.route', {
     decision: 'inspect',
+    rationale: '核对指定任务的实际保存结果。',
     targetGenerationId: first.prepared.stream.generationId,
-    rationale: '查询上一轮取消结果',
   });
   expect(result).toMatchObject({
     status: 'inspected',
     targetStatus: 'cancelled',
     targetRequest: '重新生成场次',
+    inspectionSummary: {
+      taskId: first.agent.taskId,
+      status: 'cancelled',
+      saved: { scenes: 0, shots: 0 },
+    },
+    historyPage: { offset: 0, complete: true },
     dependencyEstablished: false,
     artifacts: [],
   });
   expect(splitConversationRequest(prompt).request).toBe('重新生成场次');
 });
-
 it('records distinct real requests under one authorization step, excludes raw data and fences cancellation/session changes', async () => {
   const f = await setup();
   const run = f.prepare('检查请求');
@@ -4563,7 +4736,11 @@ it('records distinct real requests under one authorization step, excludes raw da
     db
       .prepare('SELECT generation_id,stage,metadata_json FROM llm_provider_requests WHERE id=?')
       .get('request-2'),
-  ) as { generation_id: string; stage: string; metadata_json: string };
+  ) as {
+    generation_id: string;
+    stage: string;
+    metadata_json: string;
+  };
   expect(owned.generation_id).toBe(identity.generationId);
   expect(owned.stage).toBe('sent');
   expect(owned.metadata_json).not.toContain('999');
@@ -4579,7 +4756,11 @@ it('records distinct real requests under one authorization step, excludes raw da
   );
   const rows = f.project.access(false, (db) =>
     db.prepare('SELECT id,stage,metadata_json FROM llm_provider_requests ORDER BY id').all(),
-  ) as Array<{ id: string; stage: string; metadata_json: string }>;
+  ) as Array<{
+    id: string;
+    stage: string;
+    metadata_json: string;
+  }>;
   expect(rows.map((row) => [row.id, row.stage])).toEqual([
     ['request-1', 'complete'],
     ['request-2', 'cancelled'],
@@ -4595,7 +4776,6 @@ it('records distinct real requests under one authorization step, excludes raw da
   for (const stage of ['native_queued', 'tool_arguments', 'complete'])
     expect(metadata.firstSeen[stage]).toEqual(expect.any(String));
 });
-
 it('keeps the old prefix and unique constraints intact while shortening later repeated reads', () => {
   const body = JSON.stringify(authoring()).repeat(100);
   const history = [

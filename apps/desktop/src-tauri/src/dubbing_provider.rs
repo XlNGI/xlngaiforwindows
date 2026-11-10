@@ -52,6 +52,17 @@ struct SpeechParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VoiceDesignParams {
+    project_root: String,
+    provider_profile_id: String,
+    prompt: String,
+    preview_text: String,
+    output_relative_path: String,
+    operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SubmitParams {
     project_root: String,
     provider_profile_id: String,
@@ -194,6 +205,13 @@ fn operation_id<'a>(id: Option<&'a str>, request_id: &'a str) -> Result<&'a str,
 
 pub(crate) fn handle(method: &str, params: &Value, request_id: &str) -> Result<Value, Value> {
     match method {
+        "provider.dubbing.voiceDesign" => {
+            let params: VoiceDesignParams = decode(params)?;
+            validate_voice_design(&params)?;
+            let operation =
+                Operation::register(operation_id(params.operation_id.as_deref(), request_id)?)?;
+            voice_design(&params, &operation.cancellation)
+        }
         "provider.dubbing.speech" => {
             let params: SpeechParams = decode(params)?;
             validate_speech(&params)?;
@@ -263,6 +281,22 @@ fn validate_speech(params: &SpeechParams) -> Result<(), Value> {
     {
         return Err(invalid(
             "MiniMax model, voice, text, speed, pitch or emotion is unsupported",
+        ));
+    }
+    validate_relative(&params.output_relative_path, true, ".mp3")
+}
+
+fn validate_voice_design(params: &VoiceDesignParams) -> Result<(), Value> {
+    validate_profile(&params.provider_profile_id)?;
+    if params.prompt.trim().is_empty()
+        || params.prompt.len() > 48 * 1024
+        || params.prompt.contains('\0')
+        || params.preview_text.trim().is_empty()
+        || params.preview_text.chars().count() > 500
+        || params.preview_text.contains('\0')
+    {
+        return Err(invalid(
+            "Voice description or preview text is invalid (preview maximum: 500 characters)",
         ));
     }
     validate_relative(&params.output_relative_path, true, ".mp3")
@@ -513,6 +547,198 @@ fn speech(params: &SpeechParams, cancellation: &DubbingCancellation) -> Result<V
         value["providerTaskId"] = json!(trace);
     }
     Ok(value)
+}
+
+fn voice_design(
+    params: &VoiceDesignParams,
+    cancellation: &DubbingCancellation,
+) -> Result<Value, Value> {
+    let project = ProjectFiles::open(&params.project_root)?;
+    let mut output = project.output(&params.output_relative_path, ".mp3")?;
+    let payload = serde_json::to_vec(&json!({
+        "prompt": params.prompt,
+        "preview_text": params.preview_text,
+    }))
+    .map_err(|_| invalid("Voice design request could not be prepared"))?;
+    let credentials = secret(&params.provider_profile_id)?;
+    let mut reader = Cursor::new(&payload);
+    let response = provider_http::request_dubbing_file(DubbingHttpRequest {
+        target: DubbingHttpTarget::VoiceDesign,
+        secret: Some(
+            credentials
+                .as_str()
+                .map_err(|_| invalid("Provider credential is invalid"))?,
+        ),
+        idempotency_key: None,
+        body: Some(DubbingHttpBody {
+            reader: &mut reader,
+            size: payload.len() as u32,
+            content_type: "application/json",
+        }),
+        output: None,
+        response_limit: (AUDIO_LIMIT * 2) as usize + JSON_LIMIT,
+        cancellation,
+    })
+    .map_err(|error| transport_error(error, cancellation, true))?;
+    let credential = credentials.as_str().unwrap_or_default();
+    let body = parse_voice_design_response(response, credential)?;
+    let (voice_id, hex) = voice_design_response(&body, credential)?;
+    decode_hex_to_file(hex, &mut output, cancellation)?;
+    output.file.sync_all().map_err(|_| {
+        host_error(
+            "PROVIDER_FAILED",
+            "Voice preview could not be committed",
+            false,
+        )
+    })?;
+    let mime = inspect_media(&mut output.file, MediaKind::Audio)?;
+    if mime != "audio/mpeg" {
+        return Err(host_error(
+            "PROVIDER_FAILED",
+            "MiniMax did not return MP3 preview audio",
+            false,
+        ));
+    }
+    let size = output
+        .file
+        .metadata()
+        .map_err(|_| invalid("Voice preview is unavailable"))?
+        .len();
+    output.committed = true;
+    Ok(
+        json!({ "relativePath": params.output_relative_path, "mime": mime, "sizeBytes": size, "voiceId": voice_id }),
+    )
+}
+
+fn parse_voice_design_response(
+    response: provider_http::RawHttpResponse,
+    credential: &str,
+) -> Result<Value, Value> {
+    if !(200..=299).contains(&response.status) {
+        if let Ok(body) = serde_json::from_slice::<Value>(&response.body) {
+            if body
+                .pointer("/base_resp/status_code")
+                .and_then(Value::as_i64)
+                .is_some_and(|status| status != 0)
+            {
+                let mut error = voice_design_response(&body, credential).unwrap_err();
+                error["providerStatus"] = json!(response.status);
+                return Err(error);
+            }
+        }
+    }
+    parse_response(response, "MiniMax")
+}
+
+fn voice_design_response<'a>(
+    body: &'a Value,
+    credential: &str,
+) -> Result<(&'a str, &'a str), Value> {
+    let status = body
+        .pointer("/base_resp/status_code")
+        .and_then(Value::as_i64);
+    if status != Some(0) {
+        let (code, reason) = match status {
+            Some(1001) => ("PROVIDER_FAILED", "供应商处理超时，请先核对生成记录"),
+            Some(1002 | 1039) => ("RATE_LIMITED", "请求频率或用量达到限制"),
+            Some(1004) => ("AUTHENTICATION_FAILED", "鉴权失败，请检查此连接的 API Key"),
+            Some(1008) => ("PROVIDER_FAILED", "账户余额不足"),
+            Some(1013) => ("PROVIDER_FAILED", "供应商内部服务错误"),
+            Some(1027) => ("PROVIDER_FAILED", "生成结果无效，请检查音色描述与试音文本"),
+            Some(2013) => ("PROVIDER_FAILED", "请求参数无效，请检查音色描述与试音文本"),
+            Some(_) => ("PROVIDER_FAILED", "供应商拒绝了音色设计请求"),
+            None => (
+                "PROVIDER_FAILED",
+                "供应商响应缺少有效的状态码，无法确认生成结果",
+            ),
+        };
+        let status_text = status
+            .map(|value| format!("（错误码 {value}）"))
+            .unwrap_or_default();
+        let detail = body
+            .pointer("/base_resp/status_msg")
+            .and_then(Value::as_str)
+            .map(|value| voice_design_diagnostic(value, credential))
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("；供应商说明：{value}"))
+            .unwrap_or_default();
+        let mut error = host_error(
+            code,
+            format!("MiniMax 音色设计失败{status_text}：{reason}{detail}"),
+            false,
+        );
+        if let Some(status) = status {
+            error["providerErrorCode"] = json!(status.to_string());
+        }
+        return Err(error);
+    }
+    let voice_id = body
+        .get("voice_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+        .ok_or_else(|| {
+            host_error(
+                "PROVIDER_FAILED",
+                "MiniMax returned no valid designed voice ID",
+                false,
+            )
+        })?;
+    let hex = body
+        .get("trial_audio")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            host_error(
+                "PROVIDER_FAILED",
+                "MiniMax returned no voice preview",
+                false,
+            )
+        })?;
+    Ok((voice_id, hex))
+}
+
+fn voice_design_diagnostic(value: &str, credential: &str) -> String {
+    // Only a bounded diagnostic crosses IPC. Never forward response bodies, credentials or URLs.
+    let value = if credential.is_empty() {
+        value.to_owned()
+    } else {
+        value.replace(credential, "[CREDENTIAL]")
+    };
+    let mut redact_next = false;
+    value
+        .split_whitespace()
+        .take(100)
+        .map(|word| {
+            let normalized = word.to_ascii_lowercase();
+            let sensitive = [
+                "bearer",
+                "token",
+                "api_key",
+                "apikey",
+                "authorization",
+                "secret",
+            ]
+            .iter()
+            .any(|marker| normalized.contains(marker));
+            let redacted = if redact_next
+                || sensitive
+                || normalized.contains("http://")
+                || normalized.contains("https://")
+                || normalized.starts_with("sk-")
+                || (word.is_ascii() && word.len() > 64)
+            {
+                "[REDACTED]".to_owned()
+            } else {
+                word.chars().filter(|c| !c.is_control()).collect()
+            };
+            redact_next = sensitive && !word.contains(['=', ':']);
+            redacted
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(300)
+        .collect()
 }
 
 fn decode_hex_to_file(
@@ -840,6 +1066,107 @@ mod tests {
 
     fn speech_params() -> Value {
         json!({ "projectRoot": "E:/fixture", "providerProfileId": PROFILE, "model": "speech-2.8-hd", "voiceId": "Chinese (Mandarin)_Lyrical_Voice", "text": "固定角色的声音", "speed": 1, "pitch": 0, "outputRelativePath": "cache/dubbing/test/out.mp3" })
+    }
+
+    #[test]
+    fn voice_design_uses_description_and_validates_preview_without_truncating() {
+        let value = json!({ "projectRoot": "E:/fixture", "providerProfileId": PROFILE,
+            "prompt": "清晰温柔的青年女声", "previewText": "中".repeat(500),
+            "outputRelativePath": "cache/dubbing/test/design.mp3" });
+        assert!(validate_voice_design(&decode::<VoiceDesignParams>(&value).unwrap()).is_ok());
+        for (field, changed) in [
+            ("prompt", json!(" ")),
+            ("prompt", json!("x".repeat(48 * 1024 + 1))),
+            ("previewText", json!("中".repeat(501))),
+            ("previewText", json!("\0")),
+            ("outputRelativePath", json!("../outside.mp3")),
+            ("providerProfileId", json!("custom")),
+        ] {
+            let mut changed_value = value.clone();
+            changed_value[field] = changed;
+            assert!(
+                validate_voice_design(&decode::<VoiceDesignParams>(&changed_value).unwrap())
+                    .is_err(),
+                "{field}"
+            );
+        }
+        let mut injected = value;
+        injected["voiceId"] = json!("existing-voice");
+        assert!(decode::<VoiceDesignParams>(&injected).is_err());
+    }
+
+    #[test]
+    fn voice_design_requires_real_provider_id_and_trial_audio() {
+        let value = json!({ "base_resp": { "status_code": 0 }, "voice_id": "ttv-designed", "trial_audio": "494433" });
+        assert_eq!(
+            voice_design_response(&value, "").unwrap(),
+            ("ttv-designed", "494433")
+        );
+        for changed in [
+            json!({ "base_resp": { "status_code": 0 }, "trial_audio": "494433" }),
+            json!({ "base_resp": { "status_code": 0 }, "voice_id": "placeholder" }),
+            json!({ "base_resp": { "status_code": 0 }, "voice_id": "bad\nvoice", "trial_audio": "494433" }),
+            json!({ "base_resp": { "status_code": 1001 }, "voice_id": "ttv-designed", "trial_audio": "494433" }),
+        ] {
+            assert!(voice_design_response(&changed, "").is_err());
+        }
+    }
+
+    #[test]
+    fn voice_design_reports_supplier_codes_and_redacts_diagnostics() {
+        for (status, code, reason) in [
+            (1004, "AUTHENTICATION_FAILED", "鉴权失败"),
+            (1008, "PROVIDER_FAILED", "账户余额不足"),
+            (1002, "RATE_LIMITED", "请求频率或用量达到限制"),
+            (2013, "PROVIDER_FAILED", "请求参数无效"),
+            (9999, "PROVIDER_FAILED", "供应商拒绝"),
+        ] {
+            let body = json!({ "base_resp": {
+                "status_code": status,
+                "status_msg": "invalid prompt; Bearer hidden-token api_key=private-key url=https://example.com?secret=abc actual-key"
+            }, "trial_audio": "PRIVATE_AUDIO" });
+            let error = voice_design_response(&body, "actual-key").unwrap_err();
+            let http_error = parse_voice_design_response(
+                provider_http::RawHttpResponse {
+                    status: 400,
+                    body: serde_json::to_vec(&body).unwrap(),
+                    content_type: Some("application/json".to_owned()),
+                    location: None,
+                    retry_after: None,
+                },
+                "actual-key",
+            )
+            .unwrap_err();
+            assert_eq!(http_error["providerErrorCode"], status.to_string());
+            assert_eq!(http_error["providerStatus"], 400);
+            assert_eq!(error["code"], code);
+            assert_eq!(error["providerErrorCode"], status.to_string());
+            assert_eq!(error["retryable"], false);
+            let message = error["message"].as_str().unwrap();
+            assert!(message.contains(reason));
+            assert!(message.contains("invalid prompt"));
+            for hidden in [
+                "hidden-token",
+                "private-key",
+                "https://",
+                "actual-key",
+                "PRIVATE_AUDIO",
+            ] {
+                assert!(!message.contains(hidden));
+            }
+        }
+        let error = voice_design_response(&json!({}), "").unwrap_err();
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("缺少有效的状态码"));
+        assert!(error.get("providerErrorCode").is_none());
+        assert_eq!(
+            voice_design_diagnostic(&"中".repeat(1000), "")
+                .chars()
+                .count(),
+            300
+        );
     }
 
     #[test]

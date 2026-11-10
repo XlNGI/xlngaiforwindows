@@ -10,6 +10,91 @@ afterEach(() => {
 });
 
 describe('CharacterSceneWorkspace', () => {
+  it('edits audition text on the voice document without exposing image or audio generation', () => {
+    const onSampleTextChange = vi.fn();
+    render(
+      <CharacterSceneWorkspace
+        title="客服音色"
+        kind="voice"
+        content="平稳清晰的中性音色"
+        sampleText="订单正常"
+        writable
+        assets={[]}
+        versions={[]}
+        onContentChange={vi.fn()}
+        onRestoreVersion={vi.fn()}
+        onSampleTextChange={onSampleTextChange}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: '试音文本' }), {
+      target: { value: '您的订单正常。' },
+    });
+    expect(onSampleTextChange).toHaveBeenCalledWith('您的订单正常。');
+    expect(screen.queryByText('角色声音')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /生成.*图/ })).not.toBeInTheDocument();
+    expect(callWorker).not.toHaveBeenCalled();
+  });
+  it('edits the bound voice prompt and audition text directly on the character page', () => {
+    const onDefaultVoiceChange = vi.fn();
+    const onGenerateVoice = vi.fn();
+    const voicePrompt = {
+      document: { id: 'voice-1' },
+      content: '平稳清晰的中性音色',
+      sampleText: '您的订单正常。',
+      loading: false,
+      error: '',
+      writable: true,
+      dirty: false,
+      setContent: vi.fn(),
+      setSampleText: vi.fn(),
+      save: vi.fn(),
+      reset: vi.fn(),
+      retry: vi.fn(),
+    } as unknown as NonNullable<Parameters<typeof CharacterSceneWorkspace>[0]['voicePrompt']>;
+    const props = {
+      projectId: 'project',
+      documentId: 'character',
+      title: '客服',
+      kind: 'character' as const,
+      content: '客服视觉',
+      writable: true,
+      assets: [],
+      versions: [],
+      defaultVoiceId: 'voice-1',
+      voiceDocuments: [{ id: 'voice-1', title: '客服音色' }],
+      onDefaultVoiceChange,
+      voicePrompt,
+      onGenerateVoice,
+      onContentChange: vi.fn(),
+      onRestoreVersion: vi.fn(),
+    };
+    const { rerender } = render(<CharacterSceneWorkspace {...props} />);
+    const voice = screen.getByRole('region', { name: '角色音色提示词' });
+    fireEvent.click(within(voice).getByRole('button', { name: '生成音色' }));
+    expect(onGenerateVoice).toHaveBeenCalledOnce();
+    expect(within(voice).getByRole('region', { name: '音色描述预览' })).toHaveTextContent(
+      '平稳清晰的中性音色',
+    );
+    fireEvent.click(within(voice).getByRole('region', { name: '音色描述预览' }));
+    fireEvent.change(within(voice).getByRole('textbox', { name: '音色描述' }), {
+      target: { value: '轻柔而坚定' },
+    });
+    expect(voicePrompt.setContent).toHaveBeenCalledWith('轻柔而坚定');
+    fireEvent.click(within(voice).getByRole('region', { name: '试音文本预览' }));
+    fireEvent.change(within(voice).getByRole('textbox', { name: '试音文本' }), {
+      target: { value: '请稍候。' },
+    });
+    expect(voicePrompt.setSampleText).toHaveBeenCalledWith('请稍候。');
+    expect(screen.getByRole('region', { name: '提示词预览' })).toHaveTextContent('客服视觉');
+    expect(screen.queryByRole('button', { name: '查看音色样本' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('默认音色样本'), { target: { value: '' } });
+    expect(onDefaultVoiceChange).toHaveBeenCalledWith(undefined);
+    rerender(<CharacterSceneWorkspace {...props} voicePrompt={{ ...voicePrompt, dirty: true }} />);
+    expect(screen.getByLabelText('默认音色样本')).toBeDisabled();
+    rerender(<CharacterSceneWorkspace {...props} writable={false} />);
+    expect(screen.getByLabelText('默认音色样本')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '生成音色' })).toBeDisabled();
+  });
   it('shows only a compact audio add control for a saved character', async () => {
     vi.mocked(callWorker).mockResolvedValue([]);
     render(

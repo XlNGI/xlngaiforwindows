@@ -1,0 +1,430 @@
+{
+  "recordedAt": "2026-11-09T10:59:16.226Z",
+  "overallResult": "not_completed",
+  "scope": "Isolated real text-model runs and evidence-driven repair. No business-project writes, no installed-app restart, no media generation.",
+  "externalBlocker": {
+    "code": "insufficient_user_quota",
+    "httpStatus": 403,
+    "provider": "ergou-gpt-chat",
+    "model": "gpt-5.6-terra",
+    "requiredUserAction": "Restore available quota for the original provider before another complete real-model verification.",
+    "automaticPaidRetriesAfterFailure": 0,
+    "providerOrAccountSwitched": false
+  },
+  "realRuns": [
+    {
+      "label": "A: frozen pre-follow-up baseline",
+      "observedAt": "2026-11-09T10:50:33.063Z",
+      "taskId": "fbd3e4e0-848d-481d-aa47-579111f1d864",
+      "generationId": "61b39b6d-d523-4301-957a-d9b677294478",
+      "projectId": "2a5fc663-0bdc-4d3b-88b8-407d1962f8ad",
+      "status": "failed",
+      "createdAt": "2026-11-09T09:34:39.818Z",
+      "completedAt": "2026-11-09T10:46:42.144Z",
+      "elapsedMs": 4322326,
+      "error": {
+        "code": "failed",
+        "message": "Provider HTTP 403 (insufficient_user_quota): Not enough quota to pre-consume for this request: ＄0.003608 remaining, ＄0.004944 required (request id: 202611091046437907436438268d9d6hTcJZtdO)"
+      },
+      "saved": {
+        "scenes": 4,
+        "shots": 8,
+        "materialDocuments": {},
+        "lastSavedAt": "2026-11-09T10:43:23.742Z",
+        "materialDocumentCount": 0,
+        "boundShotCount": 0
+      },
+      "review": {
+        "available": true,
+        "readyToSubmit": true,
+        "approved": false,
+        "currentTargetCount": 12,
+        "acceptedTargetCount": 1,
+        "pendingTargetCount": 11,
+        "openIssueCount": 1
+      },
+      "usage": {
+        "turns": 216,
+        "inputTokens": 25496204,
+        "outputTokens": 187581,
+        "instruction": "Cumulative input includes repeated/cached input; it is not one context window or a cost estimate."
+      },
+      "metrics": {
+        "completedRequests": 216,
+        "modelElapsedSeconds": 4270.809,
+        "meanModelSeconds": 19.77226388888889,
+        "meanFirstByteSeconds": 9.025219077102793,
+        "modelOutputSeconds": 2336.2564265000015,
+        "toolElapsedSeconds": 0.027,
+        "toolElapsedSecondsIsValidMeasurement": false,
+        "modelElapsedIncludesTransportAndProviderWait": true
+      },
+      "tools": {
+        "total": 182,
+        "failed": 38,
+        "failureCategories": {
+          "AGENT_TOOL_ARGUMENTS_INVALID": 15,
+          "TASK_REPAIR_REQUIRED": 5,
+          "TASK_REVIEW_TARGET_INVALID": 1,
+          "TASK_REVIEW_REQUIREMENTS_INVALID": 5,
+          "TASK_REVIEW_EVIDENCE_UNRELATED": 1,
+          "TASK_REVIEW_UNRESOLVED": 2,
+          "TASK_REVIEW_ISSUE_INVALID": 2,
+          "TASK_REVIEW_INVALID": 2,
+          "TASK_REVIEW_SCOPE_INVALID": 4,
+          "TASK_REVIEW_NOT_READY": 1
+        }
+      },
+      "frozenBuild": {
+        "workerTreeHash": "ee8fe9f56e08c4ad31338cea560e48ebd566ca716d3ac1776defaa1fed5a0469",
+        "workerFileCount": 426
+      },
+      "evidence": [
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/latest-status.json",
+          "sha256": "bf70c8e3485d4d6276b79da45a84dd3df6eddfe98485e4550d1a77aaf9dea934"
+        },
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/app-data/terminal-export.json",
+          "sha256": "2811c7821a53b1c0afe7b53eb8afe57a6f4c81ae6c322c06ca0026bcff49ffe6"
+        },
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/build-manifest.json",
+          "sha256": "9a7ddc77c1fbf25de67e45051512a9da444ffd12d84f6a1109b2a18cf37ed40f"
+        }
+      ],
+      "fullClosedLoopPassed": false
+    },
+    {
+      "label": "B: revision 7, same full input",
+      "observedAt": "2026-11-09T10:50:33.025Z",
+      "taskId": "6f4e9f1c-0621-4dba-9fac-eea5d591ea90",
+      "generationId": "f9a56b04-d1bc-4273-b8b7-8871b530878a",
+      "projectId": "994f8be3-abde-4b24-97f7-11f5090c6bc8",
+      "status": "failed",
+      "createdAt": "2026-11-09T10:23:10.290Z",
+      "completedAt": "2026-11-09T10:46:56.138Z",
+      "elapsedMs": 1425848,
+      "error": {
+        "code": "failed",
+        "message": "Provider HTTP 403 (insufficient_user_quota): Not enough quota to pre-consume for this request: ＄0.003556 remaining, ＄0.004352 required (request id: 202611091046577787631248268d9d6T7MVvCwP)"
+      },
+      "saved": {
+        "scenes": 4,
+        "shots": 12,
+        "materialDocuments": {},
+        "lastSavedAt": "2026-11-09T10:46:39.475Z",
+        "materialDocumentCount": 0,
+        "boundShotCount": 0
+      },
+      "review": {
+        "available": true,
+        "readyToSubmit": false,
+        "approved": false,
+        "currentTargetCount": 16,
+        "acceptedTargetCount": 0,
+        "pendingTargetCount": 16,
+        "openIssueCount": 0
+      },
+      "usage": {
+        "turns": 82,
+        "inputTokens": 7600993,
+        "outputTokens": 42236,
+        "instruction": "Cumulative input includes repeated/cached input; it is not one context window or a cost estimate."
+      },
+      "metrics": {
+        "completedRequests": 82,
+        "modelElapsedSeconds": 1411.965,
+        "meanModelSeconds": 17.21908536585366,
+        "meanFirstByteSeconds": 9.773609448148148,
+        "modelOutputSeconds": 619.2608605999991,
+        "toolElapsedSeconds": 0.012,
+        "toolElapsedSecondsIsValidMeasurement": false,
+        "modelElapsedIncludesTransportAndProviderWait": true
+      },
+      "tools": {
+        "total": 69,
+        "failed": 4,
+        "failureCategories": {
+          "AGENT_TOOL_ARGUMENTS_INVALID": 3,
+          "TASK_REVIEW_NOT_READY": 1
+        }
+      },
+      "frozenBuild": {
+        "workerTreeHash": "fe4d263ea51a1d8597eddf4461e27eb6a26ae69f092b8c6a68410d5d5b362e82",
+        "workerFileCount": 426,
+        "packageTreeHash": "a1901c1a24410cbe09d99efbb2b1b93a8a7e9da671cc82d2043ee342e59c64ba",
+        "packageFileCount": 240
+      },
+      "evidence": [
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-repaired-20261109/latest-status.json",
+          "sha256": "cf4968e0d6eec029eea711016fe3f47115db8b3153bab7afc5058209268fee3d"
+        },
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-repaired-20261109/app-data/terminal-export.json",
+          "sha256": "4fea4c2086722239a005e5420fc4c11d2e90be722774fdd3b4f707a90520d431"
+        },
+        {
+          "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-repaired-20261109/build-manifest.json",
+          "sha256": "5221202555ac7b2a137f03d7fce132e4ed1f329abaddf95e7fc3f3ff51333789"
+        }
+      ],
+      "fullClosedLoopPassed": false
+    }
+  ],
+  "independentContentReview": {
+    "status": "not_passed",
+    "evidence": {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-repaired-20261109/content-integrity.json",
+      "sha256": "9614ab5ad123928690423fbb4ead7b6fe49881dc6cab62817107de0ba044ec33"
+    },
+    "quickCheck": "ok",
+    "foreignKeyErrors": 0,
+    "mediaJobs": 0,
+    "mediaForms": 0,
+    "sceneDurations": [
+      {
+        "sceneId": "0631e502-9397-4eb4-9c13-9150367a618a",
+        "sceneSeconds": 38,
+        "shotSeconds": 38
+      },
+      {
+        "sceneId": "24fa3a05-b77c-41d8-b3c7-4fe6440b8cca",
+        "sceneSeconds": 137,
+        "shotSeconds": 137
+      },
+      {
+        "sceneId": "aaa2dfff-f050-4a2b-ae87-33d300ebcafc",
+        "sceneSeconds": 112,
+        "shotSeconds": 112
+      },
+      {
+        "sceneId": "2b283b51-e3ad-4368-86c5-5a272ad8b6c6",
+        "sceneSeconds": 24,
+        "shotSeconds": 24
+      }
+    ],
+    "scenesMissingCompleteOrderedChildText": 4,
+    "shotsMissingSomeExplicitlyRequestedSections": 12,
+    "shotsMissingRelativeSecondsInPrompt": 9,
+    "shotsMissingAudioPlan": 9,
+    "findings": [
+      "Scene bodies remain summaries instead of the required complete child-shot projection.",
+      "All 12 shots lack some explicitly requested prompt sections.",
+      "Nine later shots lack relative-time action flow in prompt and audioPlan.",
+      "The customer-service shot is now 108 seconds, but length alone does not establish natural dialogue, reactions and timing.",
+      "Presence, off-screen voice and mere character mention still require semantic binding review."
+    ]
+  },
+  "finalRepairs": [
+    "Stage-specific pending actions and TASK_PLAN_FINAL_REFERENCES_REQUIRED preserve final bindings while explaining empty initial references.",
+    "Per-target obligation hashes preserve shot acceptance when unrelated future-material plans are added; changing the shot obligation still invalidates it.",
+    "Saved target small-batch review readiness is independent of complete shot-stage readiness; future and unread targets still block stage completion."
+  ],
+  "finalRepairsVerifiedByRealModel": false,
+  "validationHistory": {
+    "previousFirstFullTest": {
+      "failed": 2,
+      "passed": 2651,
+      "reason": "A duplicated generic instruction reduced the 64K fixture output reservation. Moved that workflow guidance into script-to-media only; did not lower the assertion."
+    },
+    "previousValidation": {
+      "packages": {
+        "context": 8,
+        "contracts": 48,
+        "llm": 32,
+        "desktop": 806,
+        "generationAdapters": 80,
+        "persistence": 101,
+        "worker": 1578
+      },
+      "totalPassed": 2653,
+      "workerFiles": 95,
+      "workerFinalFailed": 0,
+      "typecheck": true,
+      "lint": true,
+      "format": true,
+      "explicitDocsFormat": true,
+      "build": true,
+      "diffCheck": true,
+      "sidecarM7": true,
+      "sidecarReopen": {
+        "at": "2026-11-09T10:25:12.813Z",
+        "executable": "E:/p22/xlngaiforwindowsP22/apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+        "isolatedProject": true,
+        "restartedNewChildOnly": true,
+        "documentCount": 5,
+        "projectIdRetained": true,
+        "documentsUnchanged": true,
+        "integrity": {
+          "ok": true,
+          "messages": ["ok"],
+          "schemaVersion": 76
+        },
+        "providerCalls": 0,
+        "userAppRestarted": false
+      }
+    },
+    "currentFirstWorkerAttempt": {
+      "passed": 1578,
+      "failed": 1,
+      "reason": "Worker process loaded the earlier module while its partial-readiness test changed. Fixed final source was then tested in a fresh full run.",
+      "evidence": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-worker.log",
+        "sha256": "3979f061fb08278e4f544f79f300a737bd3eaf5bb3e772db08f8dba4abb2dfc0"
+      }
+    }
+  },
+  "finalValidation": {
+    "focusedTests": {
+      "files": 3,
+      "passed": 125
+    },
+    "worker": {
+      "files": 95,
+      "passed": 1579,
+      "failed": 0,
+      "freshFullRun": true
+    },
+    "earlierSameWorkOtherPackages": {
+      "context": 8,
+      "contracts": 48,
+      "llm": 32,
+      "desktop": 806,
+      "generationAdapters": 80,
+      "persistence": 101,
+      "totalPassed": 1075,
+      "rerunAfterFinalWorkerOnlyChanges": false
+    },
+    "combinedPassed": 2654,
+    "combinedIsOneNewRootTestInvocation": false,
+    "typecheck": true,
+    "lint": true,
+    "format": true,
+    "build": true,
+    "explicitDocsFormat": true,
+    "diffCheck": true,
+    "sidecarBuild": true,
+    "sidecarM7": true,
+    "sidecarReopen": {
+      "at": "2026-11-09T10:54:51.126Z",
+      "executable": "E:/p22/xlngaiforwindowsP22/apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+      "isolatedProject": true,
+      "restartedNewChildOnly": true,
+      "documentCount": 5,
+      "projectIdRetained": true,
+      "documentsUnchanged": true,
+      "integrity": {
+        "ok": true,
+        "messages": ["ok"],
+        "schemaVersion": 76
+      },
+      "providerCalls": 0,
+      "userAppRestarted": false
+    },
+    "logs": [
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-worker-final.log",
+        "sha256": "3b217937371bb66e33f4c342c00a49e55040d94cb588c1f1f1df5e39315a7b35"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-typecheck-final.log",
+        "sha256": "2a9b468da736120b337daa2049b21af7c223e6b98d69b8aafbf7c7e875fe4580"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-lint-final.log",
+        "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-format-final.log",
+        "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-build-final.log",
+        "sha256": "674199a79edb3719a87dbc3d94401c70b94061e2772954e2e41fa53b3f2c29a8"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-sidecar-final.log",
+        "sha256": "8d303d985b4f95ec37dcb874f1fddccfbf0d944704006e77914c0d0449bd1a6e"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-sidecar-smoke-final.log",
+        "sha256": "9b0c8691c82bf3fac6a82e4f8394274e5c45b94a5534a3e5be5207b88cfb6ac8"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-sidecar-reopen-final.log",
+        "sha256": "f9dfcd6d158324895bde7268cf6fe43bee56814a3d5e2248bc898c85a015f62b"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-docs-format-final.log",
+        "sha256": "f20510a9da4717c51c4cffee6d0dd88d6c9a723d0a83711d01216f5b48961283"
+      },
+      {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-real-closed-loop-20261109/phase-feedback-diff-check-final.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "sidecar": {
+    "path": "E:/p22/xlngaiforwindowsP22/apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+    "sha256": "cf9ba5803c73c021c33573e8b060bc95f7fbed0b3f52a548d37f0e5b3956697c"
+  },
+  "sourceFiles": [
+    {
+      "path": "apps/worker/src/agent-context-budget.ts",
+      "sha256": "93b9b3aa8682847f3e1fdcc27aebc2e2f288b6675e4369ffb85aba649c16264c"
+    },
+    {
+      "path": "apps/worker/src/agent-task-checkpoint-schema.ts",
+      "sha256": "9d81a7e4592a375dc5b42b16fa87e0001a66d250868cdf27161fa1ef6c883a29"
+    },
+    {
+      "path": "apps/worker/src/agent-task-deliverables.ts",
+      "sha256": "22e473ec0204c7e1d606977223f7ac0d1adfa16d6eaa663831aae608f936d93e"
+    },
+    {
+      "path": "apps/worker/src/agent-task-repair.ts",
+      "sha256": "8b9f1fc140ca819c0f1e637dc40af615deaa33b01703ef97c1c702fd0155d01d"
+    },
+    {
+      "path": "apps/worker/src/agent-task-review.ts",
+      "sha256": "c597e1748d7fb08ccbf9763c4de138cdebe0c88e81db91d8b07d648ee40afb84"
+    },
+    {
+      "path": "apps/worker/src/production-skill-service.ts",
+      "sha256": "cbb36bf6dce71f15a53ea231f743154fff14b8bbfda1eb4610429f380e937917"
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.test.ts",
+      "sha256": "6756aac9d3b3aa8030bbdf48d54e67397f01d852e6a92b96b23d131841f5b075"
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.ts",
+      "sha256": "7cbe2dc35b072a70291ff0aacce3b491f89fbfa199083b158541a9aa577d9c45"
+    },
+    {
+      "path": "packages/contracts/src/production-skills.ts",
+      "sha256": "58fa0d524dfcbc854557abadb68d20cd55b029b961dbdd98ad61cc202f38e2df"
+    }
+  ],
+  "sourceDb": {
+    "path": "C:/Users/MSI/AppData/Local/Temp/p22-agent-task-tracking-20261109/audit-project.sqlite",
+    "sha256": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2",
+    "unchangedFromBaseline": true
+  },
+  "timingCaution": "Both runs failed, overlap in time and saved different shot counts. No paired speedup, general completion time or P95 is established. Tool timestamps are reused; their near-zero sum is not valid elapsed time. Cumulative input contains repeated/cached tokens and is not a context-window or cost measure.",
+  "concurrency": {
+    "independentReadOnlyToolLimit": 4,
+    "writesAndDependentStages": "sequential",
+    "concurrentModelAuthoringImplemented": false
+  },
+  "notCompleted": [
+    "Autonomous complete execution using the final fixes and original input/model",
+    "Independent full-content acceptance",
+    "All production materials and per-shot bindings",
+    "Final successful task terminal state and full-production reopen verification",
+    "Current installed app loading the new build",
+    "Matched quality-preserving latency comparison"
+  ]
+}

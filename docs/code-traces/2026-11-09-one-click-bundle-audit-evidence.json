@@ -1,0 +1,619 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-09T12:49:29.823Z",
+  "scope": "Static source audit and implementation planning only; no product-source changes, runtime project access, application restart, model or media-provider calls.",
+  "gitHead": "5ced12067bddd1e7478c4c5d89a676bebdf90f88",
+  "worktreeDirty": true,
+  "auditMethod": "Source reading, contract and call-path tracing, read-only text assertions and prior frozen real-run evidence. This is not a new functional test run.",
+  "sourceFiles": [
+    {
+      "path": "apps/desktop/src/App.tsx",
+      "sha256": "8a31ebdf6847f06dc561c95adc07fb87aaf7ea0271ee5fa58ee3161ff2fe95c1",
+      "lineCount": 6132,
+      "anchors": [
+        {
+          "term": "const runProductionSkill = async",
+          "line": 3528
+        },
+        {
+          "term": "const CHARACTER_DOCUMENT_KINDS",
+          "line": 438
+        },
+        {
+          "term": "composeSceneReferenceImagePrompt(documentContent)",
+          "line": 4809
+        }
+      ]
+    },
+    {
+      "path": "packages/contracts/src/production-skills.ts",
+      "sha256": "58fa0d524dfcbc854557abadb68d20cd55b029b961dbdd98ad61cc202f38e2df",
+      "lineCount": 60,
+      "anchors": [
+        {
+          "term": "'script-to-media':",
+          "line": 21
+        },
+        {
+          "term": "严格分两阶段",
+          "line": 25
+        },
+        {
+          "term": "productionSkillPrompt(",
+          "line": 47
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/production-skill-service.ts",
+      "sha256": "cbb36bf6dce71f15a53ea231f743154fff14b8bbfda1eb4610429f380e937917",
+      "lineCount": 17,
+      "anchors": [
+        {
+          "term": "revision:",
+          "line": 13
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-generation-preparation.ts",
+      "sha256": "4162c5b7259ae37261136c64f7144116af137e4a945f7262b085d724cac3cca7",
+      "lineCount": 54,
+      "anchors": [
+        {
+          "term": "prepareAgentGeneration(",
+          "line": 12
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-provider-loop-service.ts",
+      "sha256": "e8d0953406e3b2114c94b58b7fc047ebcb1148bf94d0845e04c8a575320fdf2d",
+      "lineCount": 6346,
+      "anchors": [
+        {
+          "term": "const delivery = assessTaskCompletion",
+          "line": 4244
+        },
+        {
+          "term": "SET status = 'completed', outcome",
+          "line": 2335
+        },
+        {
+          "term": "requireScriptToMediaInitialShotReferencesEmpty(",
+          "line": 2712
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-draft-submission-service.ts",
+      "sha256": "62d24d07a541b8537a5aeb1d866e3bee1437e98a27e8bb006bb2ee33892e8099",
+      "lineCount": 456,
+      "anchors": [
+        {
+          "term": "const phaseError =",
+          "line": 58
+        },
+        {
+          "term": "SCRIPT_TO_MEDIA_SHOTS_NOT_ACCEPTED",
+          "line": 69
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/shot-prompt-service.ts",
+      "sha256": "046f8cccc1cf65a0d361b578b02c1e3fd9f4a2906336441fc5c8c5b7ce4f3e73",
+      "lineCount": 188,
+      "anchors": [
+        {
+          "term": "const bindingError =",
+          "line": 62
+        },
+        {
+          "term": "SCRIPT_TO_MEDIA_MATERIALS_NOT_ACCEPTED",
+          "line": 95
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/scene-structure-submission-service.ts",
+      "sha256": "43bd96a1ea51d2f5e0bb208194bebe21a3cbf4c2f4d86594bbf44ef8a03957ab",
+      "lineCount": 651,
+      "anchors": [
+        {
+          "term": "stage(args:",
+          "line": 40
+        },
+        {
+          "term": "requireScriptToMediaInitialShotReferencesEmpty(",
+          "line": 412
+        },
+        {
+          "term": "Commit at most one complete scene per call",
+          "line": 454
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.ts",
+      "sha256": "7cbe2dc35b072a70291ff0aacce3b491f89fbfa199083b158541a9aa577d9c45",
+      "lineCount": 876,
+      "anchors": [
+        {
+          "term": "requireScriptToMediaInitialShotReferencesEmpty(",
+          "line": 31
+        },
+        {
+          "term": "scriptToMediaCompletionPending(",
+          "line": 123
+        },
+        {
+          "term": "scriptToMediaReviewGate(",
+          "line": 755
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-task-review.ts",
+      "sha256": "c597e1748d7fb08ccbf9763c4de138cdebe0c88e81db91d8b07d648ee40afb84",
+      "lineCount": 902,
+      "anchors": [
+        {
+          "term": "export type ReviewManifest",
+          "line": 12
+        },
+        {
+          "term": "type RequirementAssessment",
+          "line": 39
+        },
+        {
+          "term": "export type TaskReviewState",
+          "line": 78
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-task-deliverables.ts",
+      "sha256": "22e473ec0204c7e1d606977223f7ac0d1adfa16d6eaa663831aae608f936d93e",
+      "lineCount": 1310,
+      "anchors": [
+        {
+          "term": "TASK_PLAN_FINAL_REFERENCES_REQUIRED",
+          "line": 369
+        },
+        {
+          "term": "scriptToMediaReviewGate(db",
+          "line": 1230
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-task-checkpoints.ts",
+      "sha256": "f4913ebf5e2719d55dcdaad6e042f599b967249fa2c35f37ff4b34f20de28ac8",
+      "lineCount": 471,
+      "anchors": [
+        {
+          "term": "scriptToMediaCompletionPending(",
+          "line": 121
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-task-inspection.ts",
+      "sha256": "cc5de4f154bef55655fd21e4c49b27415f985efe764612f08558e4f74fd20303",
+      "lineCount": 216,
+      "anchors": [
+        {
+          "term": "export function inspectAgentTask",
+          "line": 6
+        },
+        {
+          "term": "const saved =",
+          "line": 79
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-delivery-feedback.ts",
+      "sha256": "f8ca4e954632744363fd57c8b7cef38dd144168f2ce28a547a1eb42b656fbc8c",
+      "lineCount": 88,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/agent-saved-production-receipts.ts",
+      "sha256": "63c8994b153e190227d8e4ae7b0813e3ede5020e8a3b951887345081ae093541",
+      "lineCount": 119,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/agent-tool-definitions.ts",
+      "sha256": "1389c5ece3af58df8c5c079c48090fe8a6f9e39ee82294023e6fbad097a07929",
+      "lineCount": 2059,
+      "anchors": [
+        {
+          "term": "production.skill.read",
+          "line": 116
+        },
+        {
+          "term": "Entire IR JSON: <=32768",
+          "line": 61
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-tool-registry.ts",
+      "sha256": "2f88813ec0a58cb43d6247b4df0fae1244106d35a24c8671f64b045251c17ba6",
+      "lineCount": 367,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/agent-provider-tool-gateway.ts",
+      "sha256": "452eb547a7990f7db0fef91789520e8f0464c6607c6b08122bdbbb87bd4785f3",
+      "lineCount": 755,
+      "anchors": [
+        {
+          "term": "providerResponseRejection(",
+          "line": 334
+        },
+        {
+          "term": "Only independent read-only calls may share a response",
+          "line": 347
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-business-execution.ts",
+      "sha256": "2e778a4e4d663f49db82cef07716c0eb02577ddaedaf1c73a62f9bd175f5c45e",
+      "lineCount": 228,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/agent-context-manager.ts",
+      "sha256": "08f4ff0a080f0319bbc1f8d792b5c93bfbfce872254e13134eb7e9f614610a70",
+      "lineCount": 1375,
+      "anchors": [
+        {
+          "term": "const minimumOutput =",
+          "line": 1172
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/agent-context-budget.ts",
+      "sha256": "93b9b3aa8682847f3e1fdcc27aebc2e2f288b6675e4369ffb85aba649c16264c",
+      "lineCount": 1332,
+      "anchors": [
+        {
+          "term": "function outputAllowance(",
+          "line": 13
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/provider-request-ledger.ts",
+      "sha256": "92e81148f76bb4058c90ebd75833bacc6d8568183188ca61abb3c37405d835ee",
+      "lineCount": 270,
+      "anchors": [
+        {
+          "term": "updateModelRequest(",
+          "line": 52
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/change-set-service.ts",
+      "sha256": "57b7233dc16ce08a76613115c81c208002263c8a525072b83985ef65231fa0a2",
+      "lineCount": 1037,
+      "anchors": [
+        {
+          "term": "apply(params:",
+          "line": 257
+        },
+        {
+          "term": "private applyDocument(",
+          "line": 809
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/content-service.ts",
+      "sha256": "edb7d8eab0bdf801caab8a2018ce50ee2524640ba59782c0a65688fdaa6922eb",
+      "lineCount": 1530,
+      "anchors": [
+        {
+          "term": "saveDocument(params:",
+          "line": 148
+        },
+        {
+          "term": "saveShot(params:",
+          "line": 759
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/document-workflow-service.ts",
+      "sha256": "2821e1f2499d5fa5f328cff7b06b54e87c39f1eda51fdc1af18b533ecf9f7814",
+      "lineCount": 3299,
+      "anchors": [
+        {
+          "term": "contentIR: validateProjectContentIR",
+          "line": 365
+        },
+        {
+          "term": "scriptToMediaCompletionPending(",
+          "line": 2004
+        },
+        {
+          "term": "content_ir_json, created_at, state",
+          "line": 2630
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/production-service.ts",
+      "sha256": "c7762f10e70ddbea62aff0fed994cd41b748866dc54cceb68b7afa5fef96ca06",
+      "lineCount": 816,
+      "anchors": [
+        {
+          "term": "savedPrompt = document.currentVersion?.contentMarkdown",
+          "line": 259
+        },
+        {
+          "term": "const previousCast =",
+          "line": 418
+        },
+        {
+          "term": "const prompts =",
+          "line": 333
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/project-ir-validation.ts",
+      "sha256": "feac609071d208b221ed92084b4ba1682c67a67d3ee72878b5f7db3a54c282ad",
+      "lineCount": 39,
+      "anchors": [
+        {
+          "term": "export function validateProductionIRReferences",
+          "line": 5
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/project-resource-map.ts",
+      "sha256": "5b6ebe922d9bef1d18b66b04f4b9122307a69b06c78e3a747cf1dac23c250357",
+      "lineCount": 451,
+      "anchors": [
+        {
+          "term": "export function documentWorkspace",
+          "line": 73
+        }
+      ]
+    },
+    {
+      "path": "apps/worker/src/production-ir-bindings.ts",
+      "sha256": "dcc197a14d68000e5c9f141e776deba39d66ffcaa06b8f34a48bd0a8996b7eb1",
+      "lineCount": 176,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/library-search-service.ts",
+      "sha256": "620f1bf458465d3532f87893b236cc3bdaaddfb7860cc773192102ae253eda36",
+      "lineCount": 600,
+      "anchors": []
+    },
+    {
+      "path": "packages/contracts/src/index.ts",
+      "sha256": "07417a9364877d165bef720538e131ca5ecbbff02ab7badc28b8ef385b1df6b8",
+      "lineCount": 4774,
+      "anchors": [
+        {
+          "term": "export const DOCUMENT_KINDS",
+          "line": 962
+        },
+        {
+          "term": "export interface AgentChangeSetItemDraft",
+          "line": 2052
+        },
+        {
+          "term": "export const SIDECAR_ENVELOPE_MAX_BYTES",
+          "line": 2632
+        }
+      ]
+    },
+    {
+      "path": "packages/contracts/src/project-ir.ts",
+      "sha256": "8d34c710ae058909585385d0a6c0f00569f85a1614403503c738ef657a2ef6cb",
+      "lineCount": 264,
+      "anchors": [
+        {
+          "term": "export type ProjectContentIRKind",
+          "line": 6
+        },
+        {
+          "term": "export interface ProductionIRReferences",
+          "line": 19
+        },
+        {
+          "term": "const MAX_IR_BYTES",
+          "line": 153
+        },
+        {
+          "term": "function validateProjectContentIR",
+          "line": 158
+        }
+      ]
+    },
+    {
+      "path": "packages/contracts/src/voice-reference.ts",
+      "sha256": "00f8965d4024cf5c830597b5d0ccdd8fbd5dc66172b082a9768eb1f48d66ae6d",
+      "lineCount": 65,
+      "anchors": [
+        {
+          "term": "export interface CharacterVoiceReferenceInfo",
+          "line": 1
+        },
+        {
+          "term": "export interface CharacterVoiceReferenceSaveParams",
+          "line": 15
+        }
+      ]
+    },
+    {
+      "path": "packages/contracts/src/dubbing.ts",
+      "sha256": "26d8e0de951747eb6bd5cb9ec889f43c07ee44b9013d87e8286aa14fe74b2d45",
+      "lineCount": 379,
+      "anchors": [
+        {
+          "term": "export type DubbingSpeakerKind",
+          "line": 13
+        },
+        {
+          "term": "export interface DubbingCueInfo",
+          "line": 125
+        }
+      ]
+    },
+    {
+      "path": "packages/persistence/src/agent-context-store.ts",
+      "sha256": "52783a906c4634400b08d770893f2189eb1d53e4c75a374e67431a9a03d8949c",
+      "lineCount": 652,
+      "anchors": [
+        {
+          "term": "putResult(",
+          "line": 254
+        }
+      ]
+    },
+    {
+      "path": "packages/persistence/src/voice-reference-repository.ts",
+      "sha256": "c26ec00bddc51bdf78a2806ab75cfbd44f830c748d73a51e20074ad005dd56ec",
+      "lineCount": 76,
+      "anchors": [
+        {
+          "term": "export class VoiceReferenceRepository",
+          "line": 8
+        },
+        {
+          "term": "JOIN audio_files",
+          "line": 23
+        }
+      ]
+    },
+    {
+      "path": "packages/persistence/src/schema.ts",
+      "sha256": "a47c819eec246224e1debc867f86602acd065c3f9fcdb4d16ea64f895de7b98b",
+      "lineCount": 3069,
+      "anchors": [
+        {
+          "term": "export const CURRENT_SCHEMA_VERSION",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/dubbing/VoiceReferencePanel.tsx",
+      "sha256": "32b82503227794f060e52032cf0d9f68404c96c2a57fb18b9f1500f7fa319277",
+      "lineCount": 212,
+      "anchors": [
+        {
+          "term": "export function VoiceReferencePanel",
+          "line": 9
+        },
+        {
+          "term": "callWorker('audio.import'",
+          "line": 87
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src/use-document-workspace.ts",
+      "sha256": "1d5631a28f13917edef7d54456b81dad5673c3733ea8053878ec77db57d12dd5",
+      "lineCount": 690,
+      "anchors": []
+    },
+    {
+      "path": "apps/worker/src/index.ts",
+      "sha256": "45dbe9f8d4be74eb91b37e609c30a646d645041d02ad0b0ff13ab44a5aeec080",
+      "lineCount": 362,
+      "anchors": [
+        {
+          "term": "Buffer.byteLength(line",
+          "line": 145
+        }
+      ]
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "046f4fdf4834ff83d185e5811a63c1ed62410157001140ebbf0ca2fa655416f1",
+      "lineCount": 7505,
+      "anchors": [
+        {
+          "term": "const SIDECAR_ENVELOPE_MAX_BYTES",
+          "line": 65
+        },
+        {
+          "term": "const MODEL_REQUEST_ENVELOPE_MAX_BYTES",
+          "line": 66
+        }
+      ]
+    }
+  ],
+  "priorRealEvidence": {
+    "path": "docs/code-traces/2026-11-09-one-click-real-closed-loop-verification.json",
+    "sha256": "43e316209f0d58cd0dca9586c4b7d4ce96413f2ba82ed3ca4c07ee7460ed085b",
+    "overallResult": "not_completed",
+    "realRuns": [
+      {
+        "taskId": "fbd3e4e0-848d-481d-aa47-579111f1d864",
+        "status": "failed",
+        "elapsedMs": 4322326,
+        "saved": {
+          "scenes": 4,
+          "shots": 8,
+          "materialDocuments": {},
+          "lastSavedAt": "2026-11-09T10:43:23.742Z",
+          "materialDocumentCount": 0,
+          "boundShotCount": 0
+        },
+        "review": {
+          "available": true,
+          "readyToSubmit": true,
+          "approved": false,
+          "currentTargetCount": 12,
+          "acceptedTargetCount": 1,
+          "pendingTargetCount": 11,
+          "openIssueCount": 1
+        }
+      },
+      {
+        "taskId": "6f4e9f1c-0621-4dba-9fac-eea5d591ea90",
+        "status": "failed",
+        "elapsedMs": 1425848,
+        "saved": {
+          "scenes": 4,
+          "shots": 12,
+          "materialDocuments": {},
+          "lastSavedAt": "2026-11-09T10:46:39.475Z",
+          "materialDocumentCount": 0,
+          "boundShotCount": 0
+        },
+        "review": {
+          "available": true,
+          "readyToSubmit": false,
+          "approved": false,
+          "currentTargetCount": 16,
+          "acceptedTargetCount": 0,
+          "pendingTargetCount": 16,
+          "openIssueCount": 0
+        }
+      }
+    ],
+    "externalBlocker": "insufficient_user_quota",
+    "finalRepairsVerifiedByRealModel": false
+  },
+  "newFunctionalTestsRun": false,
+  "providerCalls": 0,
+  "mediaProviderCalls": 0,
+  "userProjectModified": false
+}

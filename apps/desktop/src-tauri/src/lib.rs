@@ -3000,7 +3000,8 @@ fn worker_request_timeout(request: &serde_json::Value) -> Duration {
         Some(
             "characterVoiceReference.generate"
             | "characterVoiceReference.confirm"
-            | "audio.sample.confirm",
+            | "audio.sample.confirm"
+            | "characterVoiceDesign.confirm",
         ) => VOICE_REFERENCE_WORKER_REQUEST_TIMEOUT,
         Some(
             "media.generation.confirmSubmission"
@@ -3368,6 +3369,7 @@ fn dispatch_host_request(
             | "provider.media.poll"
             | "provider.media.cancel"
             | "provider.dubbing.speech"
+            | "provider.dubbing.voiceDesign"
             | "provider.dubbing.submit"
             | "provider.dubbing.poll"
             | "provider.stream.start"
@@ -3387,7 +3389,10 @@ fn dispatch_host_request(
         None
     };
     match method {
-        "provider.dubbing.speech" | "provider.dubbing.submit" | "provider.dubbing.poll" => {
+        "provider.dubbing.speech"
+        | "provider.dubbing.voiceDesign"
+        | "provider.dubbing.submit"
+        | "provider.dubbing.poll" => {
             let method = method.to_string();
             thread::spawn(move || {
                 let _dispatch = dispatch;
@@ -4157,10 +4162,14 @@ where
             tool_name,
             received_bytes,
             request_body_hash,
+            native_elapsed_ms,
             request_body_bytes,
             wire_context,
         } => {
             let mut value = serde_json::json!({ "type": "request_progress", "stage": stage });
+            if let Some(elapsed) = native_elapsed_ms {
+                value["nativeElapsedMs"] = serde_json::json!(elapsed);
+            }
             if let Some(bytes) = argument_bytes {
                 value["argumentBytes"] = serde_json::json!(bytes);
             }

@@ -7,6 +7,7 @@ import {
 } from './prompt-references';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ImageListParameterField } from './ImageListParameterField';
+import { ImageSizeInput } from './ImageSizeInput';
 import { StructuredAssetDrop } from './assets/StructuredAssetDrop';
 import { useProductionAuthoring } from './use-production-authoring';
 import { ProductionTimingDetails } from './ProductionTimingDetails';
@@ -73,7 +74,7 @@ import {
   sceneReferenceImageParameters,
 } from '@ai-video/contracts';
 import {
-  generationErrorFeedback,
+  generationErrorDisplayText,
   generationStatusLabel,
   generationTaskStatus,
   videoProgressGuidance,
@@ -1316,13 +1317,15 @@ function MediaProductionPanel({
       if (!isCurrent()) return;
       setGenerationStatus(
         completed.mediaState === 'submission_unknown'
-          ? SUBMISSION_UNKNOWN_MESSAGE
+          ? completed.error
+            ? `${completed.error}\n${SUBMISSION_UNKNOWN_MESSAGE}`
+            : SUBMISSION_UNKNOWN_MESSAGE
           : completed.status === 'succeeded'
             ? '图片已保存到本地素材库。'
             : completed.status === 'cancelled'
               ? '已取消图片生成。'
               : completed.error
-                ? generationErrorFeedback(completed.error).userMessage
+                ? generationErrorDisplayText(completed.error)
                 : '生成失败。',
       );
     } catch (reason) {
@@ -1631,13 +1634,17 @@ function MediaProductionPanel({
       if (!isCurrent()) return;
       const submitted = response.job as VideoGenerationJobInfo;
       if (submitted.mediaState === 'submission_unknown') {
-        setGenerationStatus(SUBMISSION_UNKNOWN_MESSAGE);
+        setGenerationStatus(
+          submitted.error
+            ? `${submitted.error}\n${SUBMISSION_UNKNOWN_MESSAGE}`
+            : SUBMISSION_UNKNOWN_MESSAGE,
+        );
         return;
       }
       if (submitted.status === 'failed' || !submitted.providerTaskId) {
         setGenerationStatus(
           submitted.error
-            ? generationErrorFeedback(submitted.error, 'provider').userMessage
+            ? generationErrorDisplayText(submitted.error, 'provider')
             : '视频任务提交失败。',
         );
         return;
@@ -1826,6 +1833,7 @@ function MediaProductionPanel({
       property={adapter!.parameterSchema.properties[field.key]!}
       value={parameters[field.key]}
       required={adapter!.parameterSchema.required.includes(field.key)}
+      offerSizePresets={field.key === 'size' && effectiveCapability.endsWith('_TO_IMAGE')}
       error={errors.find((item) => normalizeErrorPath(item.path) === field.key)?.message}
       onChange={(value) => updateParameter(field.key, value)}
       projectId={projectId}
@@ -1854,9 +1862,13 @@ function MediaProductionPanel({
           ? '请先选择可用的模型。'
           : adapter?.capability === 'TEXT_TO_AUDIO'
             ? undefined
-            : productionAuthoring.loading
-              ? '正在读取制作内容，请稍候；完成后即可提交。'
-              : undefined);
+            : adapter && isVideoCapability(adapter.capability) && sceneId && sceneInputsLoading
+              ? '正在读取场次绑定，请稍候；完成后即可提交。'
+              : adapter && isVideoCapability(adapter.capability) && sceneId && sceneInputsError
+                ? sceneInputsError
+                : productionAuthoring.loading
+                  ? '正在读取制作内容，请稍候；完成后即可提交。'
+                  : undefined);
   const frameConflictContents = frameInputConflict && adapter && (
     <>
       <p>
@@ -2622,9 +2634,8 @@ function MediaProductionPanel({
                             {job.error && (
                               <small className="error-copy">
                                 {job.mediaState === 'submission_unknown'
-                                  ? SUBMISSION_UNKNOWN_MESSAGE
-                                  : generationErrorFeedback(job.error, job.metadata.failureKind)
-                                      .userMessage}
+                                  ? `${job.error}\n${SUBMISSION_UNKNOWN_MESSAGE}`
+                                  : generationErrorDisplayText(job.error, job.metadata.failureKind)}
                               </small>
                             )}
                           </div>
@@ -2735,6 +2746,7 @@ interface ParameterFieldProps {
   property: AdapterParameterProperty;
   value?: AdapterParameters[string];
   required: boolean;
+  offerSizePresets?: boolean;
   error?: string;
   onChange: (value: AdapterParameters[string] | undefined) => void;
   projectId?: string;
@@ -2746,6 +2758,7 @@ function ParameterField({
   property,
   value,
   required,
+  offerSizePresets,
   error,
   onChange,
   projectId,
@@ -2828,7 +2841,18 @@ function ParameterField({
       >
         {label}
         {description}
-        {field.control === 'select' ? (
+        {offerSizePresets &&
+        field.control === 'text' &&
+        property.type === 'string' &&
+        !property.enum?.length ? (
+          <ImageSizeInput
+            id={inputId}
+            label={property.title}
+            value={parameterScalarText(value)}
+            maxLength={property.maxLength}
+            onChange={onChange}
+          />
+        ) : field.control === 'select' ? (
           <select
             id={inputId}
             value={parameterScalarText(value)}

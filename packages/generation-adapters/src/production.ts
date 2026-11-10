@@ -1,24 +1,20 @@
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import {
   productionDefaultsSchema,
-  validateProductionAuthoringIR,
   type AdapterDescriptor,
   type AdapterParameters,
-  type ProductionAuthoringIR,
+  type PromptRecord,
   type ProductionDefaults,
   type ProductionIssue,
 } from '@ai-video/contracts';
-
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 const validateDefaults = ajv.compile(productionDefaultsSchema);
-
 export function parseProductionDefaults(input: unknown): ProductionDefaults {
   if (!validateDefaults(input))
     throw new Error(`项目生成设置无效：${ajv.errorsText(validateDefaults.errors)}`);
   return structuredClone(input as ProductionDefaults);
 }
-
-/** Resolve story timing to a provider-supported duration without changing the authored IR. */
+/** Resolve story timing to a provider-supported duration without changing the saved prompt. */
 export function resolveProductionDuration(
   adapter: AdapterDescriptor,
   seconds: number,
@@ -48,31 +44,32 @@ export function resolveProductionDuration(
       );
   return choices.find(accepts);
 }
-
 /** Compile only the authored prompt and explicit timing/provider fields. */
 export function compileProductionParameters(
-  input: ProductionAuthoringIR,
+  input: PromptRecord,
   adapter: AdapterDescriptor,
   options: {
     prompt?: string;
     estimatedDurationSeconds?: number;
     generation?: ProductionDefaults['generation'];
   } = {},
-): { parameters: AdapterParameters; issues: ProductionIssue[]; notices: ProductionIssue[] } {
-  const ir = validateProductionAuthoringIR(input);
+): {
+  parameters: AdapterParameters;
+  issues: ProductionIssue[];
+  notices: ProductionIssue[];
+} {
+  const record = input;
   const issues: ProductionIssue[] = [];
   const notices: ProductionIssue[] = [];
   const parameters: AdapterParameters = {};
   const properties = adapter.parameterSchema.properties;
-  const prompt = options.prompt ?? ir.prompt;
-
+  const prompt = options.prompt ?? record.prompt;
   if (properties.prompt) parameters.prompt = prompt;
   else if (properties.content) parameters.content = [{ type: 'text', text: prompt }];
   else issues.push({ code: 'NO_PROMPT_MAPPING', message: '当前模型没有已登记的提示词参数。' });
-
   const generation: Record<string, unknown> = { ...options.generation };
   const video = adapter.capability.endsWith('_VIDEO');
-  const storyDuration = options.estimatedDurationSeconds ?? ir.timing?.estimatedDurationSeconds;
+  const storyDuration = options.estimatedDurationSeconds ?? record.timing?.estimatedDurationSeconds;
   if (
     video &&
     properties.duration &&
@@ -87,7 +84,6 @@ export function compileProductionParameters(
       });
     else generation.duration = duration;
   }
-
   const mappings: Record<string, string> = {
     duration: 'duration',
     ratio: 'ratio',
@@ -97,7 +93,6 @@ export function compileProductionParameters(
   };
   if (!properties.watermark && properties.aigc_watermark) mappings.watermark = 'aigc_watermark';
   if (!properties.ratio && properties.aspect_ratio) mappings.ratio = 'aspect_ratio';
-
   if (
     !video &&
     adapter.contractId?.startsWith('cn.qwen.qwen-image') &&
@@ -133,7 +128,6 @@ export function compileProductionParameters(
       delete generation.resolution;
     }
   }
-
   for (const [key, value] of Object.entries(generation)) {
     const field = mappings[key];
     if (!field) continue;
@@ -171,13 +165,11 @@ export function compileProductionParameters(
         message: `Provider 参数 ${field} 不符合所选模型规则：${ajv.errorsText(validate.errors)}`,
       });
   }
-
   const requestedDuration = Number(parameters.duration);
   if (video && storyDuration !== undefined && requestedDuration > storyDuration)
     notices.push({
       code: 'MODEL_DURATION_PADDING',
       message: `内容预计 ${storyDuration} 秒，当前模型请求 ${requestedDuration} 秒。多出的 ${Number((requestedDuration - storyDuration).toFixed(6))} 秒是请求余量；保持原动作节奏，生成后检查并选取完整、自然的片段。`,
     });
-
   return { parameters, issues, notices };
 }

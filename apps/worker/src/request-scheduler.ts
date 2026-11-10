@@ -112,6 +112,7 @@ const backgroundMethods = new Set<WorkerMethod>([
   'task.schedule.cancel',
   'audio.import',
   'audio.sample.confirm',
+  'characterVoiceDesign.confirm',
   'characterVoiceReference.generate',
   'characterVoiceReference.confirm',
   'dubbing.job.submit',

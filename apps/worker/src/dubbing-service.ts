@@ -12,12 +12,14 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import type Database from 'better-sqlite3';
 import {
   DUBBING_CONTRACT_REVISION,
   DUBBING_LIMITS,
+  validatePromptBindings,
   type AudioFileInfo,
   type AudioImportParams,
   type AudioImportResult,
@@ -27,6 +29,9 @@ import {
   type CharacterVoiceReferenceGenerateParams,
   type CharacterVoiceReferencePrepareParams,
   type CharacterVoiceReferenceInfo,
+  type CharacterVoiceDesignPrepareParams,
+  type CharacterVoiceDesignConfirmResult,
+  type NativeVoiceDesignResult,
   type CharacterVoiceSaveParams,
   type DubbingBudgetSnapshot,
   type DubbingCueInfo,
@@ -121,6 +126,24 @@ interface PreparedAudioSampleSubmission {
   emotion?: string;
   expiresAt: string;
 }
+interface FrozenVoiceDesign extends CharacterVoiceDesignPrepareParams {
+  prompt: string;
+  text: string;
+  expectedVoiceProfileRowVersion: number;
+  expectedReferenceRowVersion: number;
+}
+interface PreparedVoiceDesignSubmission {
+  context: { root: string; projectId: string; sessionId: string };
+  providerProfileId: string;
+  modelId: 'speech-2.8-hd' | 'speech-2.8-turbo';
+  text: string;
+  expiresAt: string;
+  design: FrozenVoiceDesign;
+}
+type GeneratedAudioResult = AudioSampleGenerateConfirmResult & {
+  voiceProfile?: VoiceProfileInfo;
+  reference?: CharacterVoiceReferenceInfo;
+};
 export interface DubbingServiceOptions {
   capacity?: ExecutionPool;
   runtime?: FfmpegRuntime;
@@ -299,6 +322,7 @@ export class DubbingService {
   private readonly activeVoiceReferenceCharacters = new Set<string>();
   private readonly preparedVoiceReferences = new Map<string, PreparedVoiceReferenceSubmission>();
   private readonly preparedAudioSamples = new Map<string, PreparedAudioSampleSubmission>();
+  private readonly preparedVoiceDesigns = new Map<string, PreparedVoiceDesignSubmission>();
   private readonly audioSampleGenerations = new Map<
     string,
     { controller: AbortController; done: Promise<void> }
@@ -632,8 +656,12 @@ export class DubbingService {
         expectedVoiceVersionId: string;
         expectedRowVersion: number;
       };
+      voiceDesign?: FrozenVoiceDesign & { voiceId: string };
     },
-  ): AudioImportResult {
+  ): AudioImportResult & {
+    voiceProfile?: VoiceProfileInfo;
+    reference?: CharacterVoiceReferenceInfo;
+  } {
     this.assertCurrent(input.sessionId);
     const id = randomUUID();
     const relativePath = posix.join(
@@ -661,6 +689,27 @@ export class DubbingService {
       return this.access(true, (repo, db) =>
         db.transaction(() => {
           repo.registerAudio(audio);
+          let voiceProfile: VoiceProfileInfo | undefined;
+          let reference: CharacterVoiceReferenceInfo | undefined;
+          if (input.voiceDesign) {
+            const design = input.voiceDesign;
+            this.assertVoiceDesignCurrent(design);
+            voiceProfile = repo.saveVoice({
+              characterDocumentId: design.characterDocumentId,
+              providerProfileId: design.providerProfileId,
+              model: design.modelId,
+              voiceId: design.voiceId,
+              speed: 1,
+              pitch: 0,
+              referenceAudioId: audio.id,
+              expectedRowVersion: design.expectedVoiceProfileRowVersion,
+            });
+            reference = new VoiceReferenceRepository(db, input.projectId).save({
+              characterDocumentId: design.characterDocumentId,
+              audioId: audio.id,
+              expectedRowVersion: design.expectedReferenceRowVersion,
+            });
+          }
           let take: DubbingTakeInfo | undefined;
           if (input.cue) {
             const currentCue = repo.getCue(input.cue.id);
@@ -726,11 +775,12 @@ export class DubbingService {
               job.rowVersion,
             );
           }
-          return { audio, take };
+          return { audio, take, ...(voiceProfile ? { voiceProfile, reference } : {}) };
         })(),
       );
     } catch (error) {
-      rmSync(destination, { force: true });
+      if (input.voiceDesign) renameSync(destination, staged);
+      else rmSync(destination, { force: true });
       throw error;
     }
   }
@@ -1038,6 +1088,175 @@ export class DubbingService {
     return { confirmation };
   }
 
+  private assertVoiceDesignCurrent(
+    input: CharacterVoiceDesignPrepareParams & Partial<FrozenVoiceDesign>,
+  ) {
+    return this.access(true, (repo, db) => {
+      const documents = createRepositories(db).documents;
+      const character = documents.get(input.characterDocumentId);
+      const source = documents.get(input.voiceDocumentId);
+      const characterVersion = character?.currentVersionId
+        ? documents.getVersion(character.currentVersionId)
+        : undefined;
+      const sourceVersion = source?.currentVersionId
+        ? documents.getVersion(source.currentVersionId)
+        : undefined;
+      const bindings = characterVersion?.bindingsJson
+        ? validatePromptBindings(JSON.parse(characterVersion.bindingsJson))
+        : undefined;
+      if (
+        !character ||
+        character.kind !== 'character' ||
+        character.lifecycleStatus !== 'active' ||
+        character.publishedVersionId ||
+        !['draft', 'changes_requested'].includes(characterVersion?.state ?? 'draft') ||
+        character.rowVersion !== input.expectedCharacterRowVersion ||
+        bindings?.voiceDocumentId !== input.voiceDocumentId ||
+        !source ||
+        source.kind !== 'voice' ||
+        source.lifecycleStatus !== 'active' ||
+        source.projectId !== character.projectId ||
+        !sourceVersion ||
+        source.currentVersionId !== input.expectedVoiceDocumentVersionId
+      )
+        throw new DubbingValidationError(
+          'VOICE_DESIGN_SOURCE_CHANGED',
+          '角色或音色提示词已变化，请重新打开音色生成。',
+        );
+      const voice = repo.getVoiceForCharacter(character.id);
+      const reference = new VoiceReferenceRepository(db, character.projectId)
+        .list()
+        .find((item) => item.characterDocumentId === character.id);
+      if (
+        voice?.archivedAt ||
+        (input.expectedVoiceProfileRowVersion !== undefined &&
+          (voice?.rowVersion ?? 0) !== input.expectedVoiceProfileRowVersion) ||
+        (input.expectedReferenceRowVersion !== undefined &&
+          (reference?.rowVersion ?? 0) !== input.expectedReferenceRowVersion)
+      )
+        throw new DubbingValidationError('VOICE_CHANGED', '角色声音已变化，请重新打开音色生成。');
+      return { source: { ...source, currentVersion: sourceVersion }, voice, reference };
+    });
+  }
+
+  prepareVoiceDesign(params: CharacterVoiceDesignPrepareParams): {
+    confirmation: MediaSubmissionConfirmationRequest;
+  } {
+    for (const id of [
+      params.characterDocumentId,
+      params.voiceDocumentId,
+      params.expectedVoiceDocumentVersionId,
+    ])
+      requiredId(id, '音色来源');
+    if (!SPEECH_MODELS.has(params.modelId))
+      throw new DubbingValidationError('INVALID_MODEL', '请选择受支持的后续配音模型。');
+    this.validateConnection(params.providerProfileId, 'speech', params.modelId);
+    const { source, voice, reference } = this.assertVoiceDesignCurrent(params);
+    const prompt = source.currentVersion?.contentMarkdown ?? '';
+    const text = source.currentVersion?.sampleText ?? '';
+    if (
+      !prompt.trim() ||
+      Buffer.byteLength(prompt, 'utf8') > 48 * 1024 ||
+      !text.trim() ||
+      [...text].length > 500 ||
+      prompt.includes('\0') ||
+      text.includes('\0')
+    )
+      throw new DubbingValidationError(
+        'INVALID_VOICE_DESIGN',
+        '请填写音色描述和不超过 500 字的试音文本，描述不得超过 48 KiB。',
+      );
+    const now = Date.now();
+    for (const [token, value] of this.preparedVoiceDesigns)
+      if (Date.parse(value.expiresAt) <= now) this.preparedVoiceDesigns.delete(token);
+    if (this.preparedVoiceDesigns.size >= 32)
+      throw new DubbingValidationError('TOO_MANY_PENDING', '待确认音色任务过多，请稍后重试。');
+    const confirmationToken = randomUUID();
+    const expiresAt = new Date(now + 5 * 60_000).toISOString();
+    this.preparedVoiceDesigns.set(confirmationToken, {
+      context: this.capture(),
+      providerProfileId: params.providerProfileId,
+      modelId: params.modelId,
+      text,
+      expiresAt,
+      design: {
+        ...params,
+        prompt,
+        text,
+        expectedVoiceProfileRowVersion: voice?.rowVersion ?? 0,
+        expectedReferenceRowVersion: reference?.rowVersion ?? 0,
+      },
+    });
+    return {
+      confirmation: {
+        confirmationToken,
+        jobId: confirmationToken,
+        kind: 'audio',
+        draftVersion: 1,
+        providerName: this.settings.getProfile(params.providerProfileId)!.name,
+        modelName: 'MiniMax 音色设计',
+        adapterKey: 'minimax-voice-design-v1',
+        parameterSummary: [
+          { key: '音色描述', value: prompt },
+          { key: '试音文本', value: text },
+          { key: '后续配音模型', value: params.modelId },
+        ],
+        costNotice: {
+          required: true,
+          summary: '按描述设计新音色并合成试听音频，可能产生供应商费用。',
+        },
+        expiresAt,
+      },
+    };
+  }
+
+  async confirmVoiceDesign(params: {
+    confirmationToken: string;
+    approved: boolean;
+  }): Promise<CharacterVoiceDesignConfirmResult> {
+    requiredId(params.confirmationToken, '确认凭据');
+    const pending = this.preparedVoiceDesigns.get(params.confirmationToken);
+    this.preparedVoiceDesigns.delete(params.confirmationToken);
+    if (!pending || Date.parse(pending.expiresAt) <= Date.now())
+      throw new DubbingValidationError('CONFIRMATION_EXPIRED', '音色设计确认已过期，请重新提交。');
+    this.assertCurrent(pending.context.sessionId);
+    if (!params.approved) return { approved: false };
+    this.assertVoiceDesignCurrent(pending.design);
+    this.validateConnection(pending.providerProfileId, 'speech', pending.modelId);
+    if (!this.options.native?.request)
+      throw new DubbingValidationError('NATIVE_UNAVAILABLE', '音色设计服务当前不可用。');
+    if (this.activeVoiceReferenceCharacters.has(pending.design.characterDocumentId))
+      throw new DubbingValidationError('VOICE_BUSY', '该角色已有声音任务正在执行。');
+    const operationId = randomUUID();
+    const controller = new AbortController();
+    this.activeVoiceReferenceCharacters.add(pending.design.characterDocumentId);
+    const operation = Promise.resolve().then(() =>
+      this.runAudioSampleGeneration(operationId, pending, controller.signal),
+    );
+    this.audioSampleGenerations.set(operationId, {
+      controller,
+      done: operation.then(
+        () => undefined,
+        () => undefined,
+      ),
+    });
+    try {
+      const result = await operation;
+      if (!result.approved) return result;
+      if (!result.voiceProfile || !result.reference)
+        throw new DubbingValidationError('INVALID_PROVIDER_OUTPUT', '音色设计结果保存不完整。');
+      return {
+        approved: true,
+        audio: result.audio,
+        voiceProfile: result.voiceProfile,
+        reference: result.reference,
+      };
+    } finally {
+      this.activeVoiceReferenceCharacters.delete(pending.design.characterDocumentId);
+      this.audioSampleGenerations.delete(operationId);
+    }
+  }
+
   async confirmAudioSampleSubmission(
     params: AudioSampleGenerateConfirmParams,
   ): Promise<AudioSampleGenerateConfirmResult> {
@@ -1073,9 +1292,12 @@ export class DubbingService {
 
   private async runAudioSampleGeneration(
     operationId: string,
-    pending: PreparedAudioSampleSubmission,
+    pending: PreparedAudioSampleSubmission | PreparedVoiceDesignSubmission,
     signal: AbortSignal,
-  ): Promise<AudioSampleGenerateConfirmResult> {
+  ): Promise<GeneratedAudioResult> {
+    const design = 'design' in pending ? pending.design : undefined;
+    let designedVoiceId: string | undefined;
+    let completed = false;
     this.assertCurrent(pending.context.sessionId, signal);
     const relativePath = posix.join('cache', 'dubbing', `sample-${operationId}.mp3`);
     const staged = resolveDubbingFile(pending.context.root, relativePath, true);
@@ -1108,26 +1330,30 @@ export class DubbingService {
         async () => {
           this.assertCurrent(pending.context.sessionId, signal);
           this.validateConnection(pending.providerProfileId, 'speech', pending.modelId);
+          if (design) this.assertVoiceDesignCurrent(design);
           submitted = true;
           return (await this.options.native!.request(
-            'provider.dubbing.speech',
+            design ? 'provider.dubbing.voiceDesign' : 'provider.dubbing.speech',
             {
               projectRoot: pending.context.root,
               providerProfileId: pending.providerProfileId,
-              model: pending.modelId,
-              voiceId: pending.voiceId,
-              text: pending.text,
-              speed: pending.speed,
-              pitch: pending.pitch,
-              ...(pending.emotion ? { emotion: pending.emotion } : {}),
+              ...('design' in pending
+                ? { prompt: pending.design.prompt, previewText: pending.text }
+                : {
+                    model: pending.modelId,
+                    voiceId: pending.voiceId,
+                    text: pending.text,
+                    speed: pending.speed,
+                    pitch: pending.pitch,
+                    ...(pending.emotion ? { emotion: pending.emotion } : {}),
+                  }),
               outputRelativePath: relativePath,
               operationId,
             },
             12 * 60_000,
-          )) as NativeDubbingSpeechResult;
+          )) as NativeDubbingSpeechResult | NativeVoiceDesignResult;
         },
       );
-      this.assertCurrent(pending.context.sessionId, signal);
       if (
         !result ||
         result.relativePath !== relativePath ||
@@ -1135,16 +1361,85 @@ export class DubbingService {
         result.sizeBytes !== statSync(staged).size
       )
         throw new DubbingValidationError('INVALID_PROVIDER_OUTPUT', '音频样本结果不完整，未保存。');
+      if (design) {
+        if (
+          !('voiceId' in result) ||
+          typeof result.voiceId !== 'string' ||
+          !result.voiceId.trim() ||
+          result.voiceId.length > 256 ||
+          [...result.voiceId].some(
+            (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          )
+        )
+          throw new DubbingValidationError(
+            'INVALID_PROVIDER_OUTPUT',
+            '供应商没有返回有效的新音色 ID。',
+          );
+        designedVoiceId = result.voiceId;
+        writeFileSync(
+          `${staged}.json`,
+          JSON.stringify({
+            voiceId: designedVoiceId,
+            providerProfileId: pending.providerProfileId,
+            characterDocumentId: design.characterDocumentId,
+            voiceDocumentId: design.voiceDocumentId,
+            sourceVersionId: design.expectedVoiceDocumentVersionId,
+            relativePath,
+          }),
+        );
+      }
+      this.assertCurrent(pending.context.sessionId, signal);
       const metadata = await this.inspectAudio(staged, signal);
       this.assertCurrent(pending.context.sessionId, signal);
       const committed = this.commitAudio(staged, metadata, {
         ...pending.context,
         kind: 'reference',
         name: `音频样本 · ${pending.text.slice(0, 24)}`,
+        ...(design && designedVoiceId
+          ? { voiceDesign: { ...design, voiceId: designedVoiceId } }
+          : {}),
       });
       this.revision += 1;
-      return { approved: true, audio: committed.audio };
+      completed = true;
+      return {
+        approved: true,
+        audio: committed.audio,
+        ...(committed.voiceProfile
+          ? { voiceProfile: committed.voiceProfile, reference: committed.reference }
+          : {}),
+      };
     } catch (error) {
+      if (design) {
+        const host = error instanceof NativeProviderRequestError ? error.hostError : undefined;
+        try {
+          // Persist identifiers and codes only; prompts, credentials and supplier bodies stay out.
+          writeFileSync(
+            `${staged}.error.json`,
+            JSON.stringify({
+              occurredAt: new Date().toISOString(),
+              operationId,
+              providerProfileId: pending.providerProfileId,
+              characterDocumentId: design.characterDocumentId,
+              voiceDocumentId: design.voiceDocumentId,
+              code:
+                host?.code ??
+                (error instanceof DubbingValidationError ? error.code : 'LOCAL_ERROR'),
+              providerErrorCode: host?.providerErrorCode,
+              providerStatus: host?.providerStatus,
+              submitted,
+              resultReceived: Boolean(designedVoiceId),
+            }),
+            { flag: 'wx' },
+          );
+        } catch {
+          // A diagnostic write failure must not replace the original generation error.
+        }
+      }
+      if (design && designedVoiceId)
+        throw new DubbingValidationError(
+          'VOICE_DESIGN_SAVE_FAILED',
+          `音色已生成，但保存或绑定失败：${error instanceof Error ? error.message : '版本发生变化'}。音色 ID：${designedVoiceId}；试听文件保留在项目 ${relativePath}，请勿重复生成。`,
+        );
       const unknown =
         error instanceof NativeProviderRequestError &&
         (['TIMEOUT', 'INTERRUPTED', 'SUBMISSION_UNKNOWN', 'INVALID_ENVELOPE'].includes(
@@ -1169,7 +1464,10 @@ export class DubbingService {
       throw error;
     } finally {
       signal.removeEventListener('abort', cancel);
-      rmSync(staged, { force: true });
+      if (!design || completed || !designedVoiceId) {
+        rmSync(staged, { force: true });
+        if (design) rmSync(`${staged}.json`, { force: true });
+      }
     }
   }
 

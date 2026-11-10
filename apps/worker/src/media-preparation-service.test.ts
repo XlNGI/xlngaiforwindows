@@ -18,26 +18,23 @@ import {
 import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { ProductionService } from './production-service.js';
-
 const directories: string[] = [];
 const projects: ProjectService[] = [];
 const settingsServices: AppSettingsService[] = [];
 const tinyPng =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xn6pAAAAAElFTkSuQmCC';
-const largePngBytes = Buffer.alloc(12_000);
+const largePngBytes = Buffer.alloc(12000);
 Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(largePngBytes);
 const largePng = `data:image/png;base64,${largePngBytes.toString('base64')}`;
 const unboundPngBytes = Buffer.alloc(80, 1);
 Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(unboundPngBytes);
 const unboundPng = `data:image/png;base64,${unboundPngBytes.toString('base64')}`;
-
 afterEach(async () => {
   vi.unstubAllEnvs();
   for (const project of projects.splice(0)) project.close();
   for (const settings of settingsServices.splice(0)) settings.close();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
-
 async function setup(attachments: LlmInputAttachment[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'media-preparation-'));
   directories.push(directory);
@@ -112,7 +109,6 @@ async function setup(attachments: LlmInputAttachment[] = []) {
   };
   return { directory, projectsService, settings, profile, service, identity };
 }
-
 describe('MediaPreparationService', () => {
   it.each(['image', 'video'] as const)(
     'accepts a verified compressed JPEG with the original PNG label for %s without relaxing attachment binding',
@@ -151,7 +147,10 @@ describe('MediaPreparationService', () => {
         createRepositories(db).jobs.get(draft.draftId)!,
       );
       const snapshot = JSON.parse(job.taskSnapshotJson!) as {
-        inputs: Array<{ handle: string; contentType: string }>;
+        inputs: Array<{
+          handle: string;
+          contentType: string;
+        }>;
       };
       expect(snapshot.inputs).toHaveLength(1);
       expect(snapshot.inputs[0]!.contentType).toBe('image/jpeg');
@@ -162,7 +161,6 @@ describe('MediaPreparationService', () => {
       expect(job.providerTaskId).toBeUndefined();
     },
   );
-
   it.each([
     'data:image/png;base64,/9j/',
     'data:image/jpeg;base64,iVBORw0KGgo=',
@@ -177,7 +175,6 @@ describe('MediaPreparationService', () => {
       ).toThrow('parameter images is invalid');
     },
   );
-
   it('prepares one composite scene by default but preserves the reviewed count and prompt', async () => {
     const f = await setup();
     const doc = new ContentService(f.projectsService).saveDocument({
@@ -219,7 +216,10 @@ describe('MediaPreparationService', () => {
         false,
         (db) =>
           JSON.parse(createRepositories(db).jobs.get(draft.draftId)!.taskSnapshotJson!) as {
-            parameters: { prompt: string; n: number };
+            parameters: {
+              prompt: string;
+              n: number;
+            };
           },
       ),
     );
@@ -228,11 +228,9 @@ describe('MediaPreparationService', () => {
     expect(snapshots[1]!.parameters).toMatchObject({ n: 2, prompt: '用户审核：同版式随机变体' });
   });
   it('preserves long Agent-authored prompts through media preparation parsing', () => {
-    const prompt = '当前会话要求：'.padEnd(6_000, '固定约束。');
-
+    const prompt = '当前会话要求：'.padEnd(6000, '固定约束。');
     expect(parseMediaPrepareArguments('image', { prompt }).prompt).toBe(prompt);
   });
-
   it('keeps reference descriptions and timed video prose intact when preparing a local video draft', async () => {
     const f = await setup([{ name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng }]);
     const prompt = `输入图片说明：本次输入一张图，图1为本段首帧及人物外观参考。
@@ -259,7 +257,11 @@ describe('MediaPreparationService', () => {
     const job = f.projectsService.access(false, (db) =>
       createRepositories(db).jobs.get(draft.draftId)!,
     );
-    const snapshot = JSON.parse(job.taskSnapshotJson!) as { parameters: { prompt: string } };
+    const snapshot = JSON.parse(job.taskSnapshotJson!) as {
+      parameters: {
+        prompt: string;
+      };
+    };
     expect(snapshot.parameters.prompt).toBe(prompt);
     expect(job.providerTaskId).toBeUndefined();
   });
@@ -301,7 +303,9 @@ describe('MediaPreparationService', () => {
       createRepositories(db).jobs.get(draft.draftId)!,
     );
     const snapshot = JSON.parse(row.taskSnapshotJson!) as {
-      parameters: { images: string[] };
+      parameters: {
+        images: string[];
+      };
       inputs: unknown[];
     };
     expect(snapshot.parameters.images).toEqual([
@@ -344,7 +348,6 @@ describe('MediaPreparationService', () => {
       sourceDocumentId: document.id,
     });
   });
-
   it('still rejects an unavailable image in the final form before creating a generation job', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
@@ -368,7 +371,6 @@ describe('MediaPreparationService', () => {
       ),
     ).toEqual({ count: 0 });
   });
-
   it('prepares a directly edited shot form from API-valid parameters without rerunning fill', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
@@ -397,7 +399,10 @@ describe('MediaPreparationService', () => {
               task_snapshot_json: string;
             }
           ).task_snapshot_json,
-        ) as { parameters: typeof parameters; productionSource?: unknown },
+        ) as {
+          parameters: typeof parameters;
+          productionSource?: unknown;
+        },
     );
     expect(snapshot.parameters).toEqual(parameters);
     expect(snapshot.productionSource).toBeUndefined();
@@ -415,7 +420,6 @@ describe('MediaPreparationService', () => {
       ),
     ).toEqual({ count: 1 });
   });
-
   it('uses the production source and authored duration when Agent prepares an existing shot', async () => {
     const f = await setup();
     const content = new ContentService(f.projectsService);
@@ -427,11 +431,9 @@ describe('MediaPreparationService', () => {
       sceneId: scene.id,
       title: shot.title,
       expectedRowVersion: shot.rowVersion,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '观察雨中的车站',
-        timing: { estimatedDurationSeconds: 8, rationale: '观察和停顿' },
+        timing: { estimatedDurationSeconds: 8 },
       },
     });
     const context = f.service.selectionContext(
@@ -455,8 +457,13 @@ describe('MediaPreparationService', () => {
       db
         .prepare('SELECT request_json,task_snapshot_json FROM generation_jobs WHERE id=?')
         .get(draft.draftId),
-    ) as { request_json: string; task_snapshot_json: string };
-    const request = JSON.parse(row.request_json) as { duration: number };
+    ) as {
+      request_json: string;
+      task_snapshot_json: string;
+    };
+    const request = JSON.parse(row.request_json) as {
+      duration: number;
+    };
     const snapshot = JSON.parse(row.task_snapshot_json) as {
       productionSource: import('@ai-video/contracts').ProductionSource;
     };
@@ -573,12 +580,19 @@ describe('MediaPreparationService', () => {
     projectsService.access(false, (database) => {
       const saved = createRepositories(database).jobs.get(draft.draftId)!;
       const snapshot = JSON.parse(saved.taskSnapshotJson!) as {
-        contractSnapshot: { parameterSchema: { properties: { images: { maxItems: number } } } };
+        contractSnapshot: {
+          parameterSchema: {
+            properties: {
+              images: {
+                maxItems: number;
+              };
+            };
+          };
+        };
       };
       expect(snapshot.contractSnapshot.parameterSchema.properties.images.maxItems).toBe(9);
     });
   });
-
   it('lists only ready official models whose capability and adapter match the inputs', async () => {
     const { settings, profile, service, identity } = await setup();
     const draftProfile = settings.createProfile({
@@ -594,7 +608,6 @@ describe('MediaPreparationService', () => {
       { prompt: 'A dragon flying in the sky' },
       identity,
     );
-
     expect(context.candidates.length).toBeGreaterThan(0);
     expect(context.candidates.map((candidate) => candidate.remoteModelId)).toEqual([
       'vendor-hosted-video-model',
@@ -626,7 +639,6 @@ describe('MediaPreparationService', () => {
       ),
     ).toBe(false);
   });
-
   it('creates only a local draft after selection and freezes the validated Provider route', async () => {
     const { projectsService, profile, service, identity } = await setup();
     const context = service.selectionContext(
@@ -641,7 +653,6 @@ describe('MediaPreparationService', () => {
     ).toEqual({ count: 0 });
     const candidate = context.candidates[0]!;
     const adapter = candidate.adapters[0]!;
-
     const draft = service.prepareSelected(
       context,
       {
@@ -652,7 +663,6 @@ describe('MediaPreparationService', () => {
       },
       identity,
     );
-
     expect(draft).toMatchObject({
       kind: 'video',
       status: 'draft',
@@ -685,7 +695,11 @@ describe('MediaPreparationService', () => {
     expect(persisted.status).toBe('pending');
     expect(persisted.provider_task_id).toBeNull();
     const snapshot = JSON.parse(persisted.task_snapshot_json) as {
-      inputs?: Array<{ type: string; handle: string; contentType: string }>;
+      inputs?: Array<{
+        type: string;
+        handle: string;
+        contentType: string;
+      }>;
     };
     expect(snapshot).toMatchObject({
       mediaModelSelection: draft.mediaModelSelection,
@@ -693,13 +707,11 @@ describe('MediaPreparationService', () => {
     });
     expect(snapshot.inputs).toEqual([]);
   });
-
   it('rejects tampered selections and never creates a job for them', async () => {
     const { projectsService, service, identity } = await setup();
     const context = service.selectionContext('image', { prompt: 'Paint a red dragon' }, identity);
     const candidate = context.candidates[0]!;
     const adapter = candidate.adapters[0]!;
-
     expect(() =>
       service.prepareSelected(
         context,
@@ -728,12 +740,11 @@ describe('MediaPreparationService', () => {
       ),
     ).toEqual({ count: 0 });
   });
-
   it('accepts a canonical attachment only for the shown input count and redacts it everywhere durable', async () => {
     const { projectsService, service, identity } = await setup([
       { name: 'reference.png', mimeType: 'image/png', dataUrl: largePng },
     ]);
-    expect(largePng.length).toBeGreaterThan(10_000);
+    expect(largePng.length).toBeGreaterThan(10000);
     const context = service.selectionContext(
       'video',
       { prompt: 'Animate the reference image' },
@@ -742,7 +753,6 @@ describe('MediaPreparationService', () => {
     const candidate = context.candidates[0]!;
     const adapter = candidate.adapters[0]!;
     expect(adapter.parameterSchema.properties.images).toBeDefined();
-
     const draft = service.prepareSelected(
       context,
       {
@@ -753,7 +763,6 @@ describe('MediaPreparationService', () => {
       },
       identity,
     );
-
     expect(JSON.stringify(draft)).not.toContain('base64');
     expect(draft.normalizedParameters.images).toEqual(['attachment://omitted']);
     const durable = projectsService.access(
@@ -761,7 +770,10 @@ describe('MediaPreparationService', () => {
       (database) =>
         database
           .prepare('SELECT request_json, task_snapshot_json FROM generation_jobs WHERE id = ?')
-          .get(draft.draftId) as { request_json: string; task_snapshot_json: string },
+          .get(draft.draftId) as {
+          request_json: string;
+          task_snapshot_json: string;
+        },
     );
     expect(JSON.stringify(durable)).not.toContain('base64');
     expect(durable.request_json).toContain('local-image://omitted');
@@ -771,9 +783,17 @@ describe('MediaPreparationService', () => {
         (database) =>
           database
             .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
-            .get(draft.draftId) as { task_snapshot_json: string },
+            .get(draft.draftId) as {
+            task_snapshot_json: string;
+          },
       ).task_snapshot_json,
-    ) as { inputs?: Array<{ type: string; handle: string; contentType: string }> };
+    ) as {
+      inputs?: Array<{
+        type: string;
+        handle: string;
+        contentType: string;
+      }>;
+    };
     expect(snapshotWithInput.inputs).toHaveLength(1);
     expect(snapshotWithInput.inputs?.[0]).toMatchObject({
       type: 'controlled_temporary_file',
@@ -784,7 +804,6 @@ describe('MediaPreparationService', () => {
     if (!inputHandle) throw new Error('Expected one controlled media input handle.');
     expect(existsSync(join(projectsService.current()!.rootPath, inputHandle))).toBe(true);
   });
-
   it('freezes local files chosen in a reviewed UI decision without importing them or relaxing Agent inputs', async () => {
     const { projectsService, service, identity } = await setup([
       { name: 'original.png', mimeType: 'image/png', dataUrl: tinyPng },
@@ -832,12 +851,10 @@ describe('MediaPreparationService', () => {
       createHash('sha256').update(unboundPngBytes).digest('hex'),
     );
   });
-
   it('materializes direct UI Data URLs under the Native-controlled shared root', async () => {
     const { directory, projectsService, service } = await setup();
     const nativeRoot = join(directory, 'native-root');
     vi.stubEnv('AI_VIDEO_MEDIA_INPUT_ROOT', nativeRoot);
-
     const job = service.prepareImage({
       adapterKey: 'REFERENCE_TO_IMAGE:vidu:viduq2:v2',
       parameters: {
@@ -852,11 +869,19 @@ describe('MediaPreparationService', () => {
     const snapshot = projectsService.access(false, (database) => {
       const row = database
         .prepare('SELECT request_json, task_snapshot_json FROM generation_jobs WHERE id = ?')
-        .get(job.id) as { request_json: string; task_snapshot_json: string };
+        .get(job.id) as {
+        request_json: string;
+        task_snapshot_json: string;
+      };
       expect(row.request_json).not.toContain('base64');
       return JSON.parse(row.task_snapshot_json) as {
-        parameters: { images: string[] };
-        inputs: Array<{ type: string; handle?: string }>;
+        parameters: {
+          images: string[];
+        };
+        inputs: Array<{
+          type: string;
+          handle?: string;
+        }>;
       };
     });
     expect(JSON.stringify(snapshot)).not.toContain('base64');
@@ -868,7 +893,6 @@ describe('MediaPreparationService', () => {
     expect(existsSync(join(nativeRoot, handle!))).toBe(true);
     expect(existsSync(join(projectsService.current()!.rootPath, handle!))).toBe(false);
   });
-
   it('materializes a large Desktop asset reference without returning inline bytes over IPC', async () => {
     const { directory, projectsService, service } = await setup();
     const nativeRoot = join(directory, 'native-root');
@@ -906,11 +930,19 @@ describe('MediaPreparationService', () => {
           (
             database
               .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?')
-              .get(job.id) as { task_snapshot_json: string }
+              .get(job.id) as {
+              task_snapshot_json: string;
+            }
           ).task_snapshot_json,
         ) as {
-          parameters: { images: string[] };
-          inputs: Array<{ type: string; assetId?: string; handle?: string }>;
+          parameters: {
+            images: string[];
+          };
+          inputs: Array<{
+            type: string;
+            assetId?: string;
+            handle?: string;
+          }>;
         },
     );
     expect(snapshot.inputs).toContainEqual({ type: 'asset', assetId: 'large-reference' });
@@ -921,7 +953,6 @@ describe('MediaPreparationService', () => {
     if (!handle) throw new Error('Expected a controlled media input.');
     expect(readFileSync(join(nativeRoot, handle)).equals(bytes)).toBe(true);
   });
-
   it('copies Agent asset inputs into controlled files and retains only asset provenance', async () => {
     const { directory, projectsService, service, identity } = await setup();
     const nativeRoot = join(directory, 'native-root');
@@ -942,7 +973,6 @@ describe('MediaPreparationService', () => {
         createdAt: new Date().toISOString(),
       });
     });
-
     const context = service.selectionContext(
       'video',
       { prompt: 'Animate this asset', inputAssetIds: [assetId] },
@@ -963,10 +993,18 @@ describe('MediaPreparationService', () => {
     const snapshot = projectsService.access(false, (database) => {
       const row = database
         .prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id = ?')
-        .get(draft.draftId) as { task_snapshot_json: string };
+        .get(draft.draftId) as {
+        task_snapshot_json: string;
+      };
       return JSON.parse(row.task_snapshot_json) as {
-        parameters: { images: string[] };
-        inputs: Array<{ type: string; assetId?: string; handle?: string }>;
+        parameters: {
+          images: string[];
+        };
+        inputs: Array<{
+          type: string;
+          assetId?: string;
+          handle?: string;
+        }>;
       };
     });
     expect(snapshot.inputs).toEqual(
@@ -997,7 +1035,10 @@ describe('MediaPreparationService', () => {
     const editedSnapshot = projectsService.access(false, (db) => {
       const row = createRepositories(db).jobs.get(edited.draftId)!;
       return JSON.parse(row.taskSnapshotJson!) as {
-        parameters: { prompt: string; images: string[] };
+        parameters: {
+          prompt: string;
+          images: string[];
+        };
         inputs?: unknown[];
       };
     });
@@ -1007,7 +1048,6 @@ describe('MediaPreparationService', () => {
     });
     expect(editedSnapshot.inputs ?? []).not.toContainEqual({ type: 'asset', assetId });
   });
-
   it('rejects malformed inline images, raw Base64, and absolute paths before draft creation', async () => {
     const { projectsService, service, identity } = await setup([
       { name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng },
@@ -1030,7 +1070,6 @@ describe('MediaPreparationService', () => {
         },
         identity,
       );
-
     expect(() => select(['data:image/png;base64,%%%'])).toThrow('parameter images is invalid');
     expect(() => select(['A'.repeat(600)])).toThrow('parameter images is invalid');
     expect(() => select(['C:\\Users\\test\\reference.png'])).toThrow('parameter images is invalid');
@@ -1041,7 +1080,6 @@ describe('MediaPreparationService', () => {
       ),
     ).toEqual({ count: 0 });
   });
-
   it('only accepts normalized official media Provider routes', async () => {
     const { settings, profile } = await setup();
     const selectedProfile = settings.getProfile(profile.id)!;
@@ -1081,7 +1119,6 @@ describe('MediaPreparationService', () => {
       }),
     ).toBeUndefined();
   });
-
   it('offers custom OpenAI Images to enabled models without a model binding', async () => {
     const f = await setup();
     const customProfile = f.settings.createProfile({
@@ -1118,7 +1155,6 @@ describe('MediaPreparationService', () => {
     expect(
       f.settings.listModels(customProfile.id).map((item) => item.parameterTemplateKey),
     ).toEqual([undefined, undefined]);
-
     const context = f.service.selectionContext('image', { prompt: 'A red fox' }, f.identity);
     expect(
       context.candidates
@@ -1132,7 +1168,6 @@ describe('MediaPreparationService', () => {
       (item) => item.key === 'TEXT_TO_IMAGE:custom:openai-images:v1',
     )!;
     expect(candidate.remoteModelId).toBe('vendor-image-model');
-
     const draft = f.service.prepareSelected(
       context,
       {
@@ -1150,7 +1185,6 @@ describe('MediaPreparationService', () => {
     });
     expect(draft.normalizedParameters).toMatchObject({ prompt: 'A red fox' });
   });
-
   it('offers custom OpenAI-compatible video models without a model binding', async () => {
     const f = await setup();
     const customProfile = f.settings.createProfile({
@@ -1175,7 +1209,6 @@ describe('MediaPreparationService', () => {
       capabilities: { ...model.capabilities, videoGeneration: true },
       enabled: true,
     });
-
     const textContext = f.service.selectionContext(
       'video',
       { prompt: 'A slow camera move' },
@@ -1189,7 +1222,6 @@ describe('MediaPreparationService', () => {
       (item) => item.key === 'TEXT_TO_VIDEO:custom:openai-compatible-video:v1',
     );
     expect(textAdapter).toBeDefined();
-
     const imageContext = f.service.selectionContext(
       'video',
       {
@@ -1203,7 +1235,6 @@ describe('MediaPreparationService', () => {
         .find((item) => item.providerProfileId === customProfile.id)
         ?.adapters.map((item) => item.key),
     ).toContain('IMAGE_TO_VIDEO:custom:openai-compatible-video:v1');
-
     const draft = f.service.prepareSelected(
       textContext,
       {

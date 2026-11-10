@@ -42,7 +42,11 @@ const compiled = (patch: Partial<ProductionCompileResult> = {}): ProductionCompi
   ...patch,
 });
 function useForm(
-  props: { target?: ProductionTarget; adapter?: AdapterDescriptor; ready?: boolean } = {},
+  props: {
+    target?: ProductionTarget;
+    adapter?: AdapterDescriptor;
+    ready?: boolean;
+  } = {},
 ) {
   const [parameters, setParameters] = useState<AdapterParameters>({ resolution: '720P' });
   const state = useProductionAuthoring({
@@ -94,7 +98,7 @@ describe('production form local compilation', () => {
             frames: [{ assetId: 'confirmed-frame', timeMs: 1000 }],
             anchorAssetId: 'confirmed-frame',
             firstFrameAssetId: 'confirmed-frame',
-            videoPrompt: '已确认的后续动作',
+            prompt: '已确认的后续动作',
           },
         },
       }),
@@ -239,7 +243,11 @@ describe('production form local compilation', () => {
       Promise.resolve(
         compiled({
           parameters:
-            (params as { adapterKey: string }).adapterKey === first.key
+            (
+              params as {
+                adapterKey: string;
+              }
+            ).adapterKey === first.key
               ? { prompt: '模型一', duration: 5, audio: true }
               : { prompt: '模型二', duration: 8 },
         }),

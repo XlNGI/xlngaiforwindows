@@ -20,8 +20,8 @@ import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { loadedToolGuidance } from './agent-workflow-guidance.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
 import { taskCheckpointValidationDefinition } from './agent-task-checkpoint-schema.js';
+import { projectBundleSubmission } from './production-bundle-submission.js';
 import { PREPARED_ARGUMENT_TOOLS, type PreparedArgumentsRef } from './agent-prepared-arguments.js';
-
 export const CORE_TOOLS = [
   'conversation.ask',
   'conversation.task.route',
@@ -30,7 +30,15 @@ export const CORE_TOOLS = [
   'library.search',
   'library.read',
 ];
-
+const BUNDLE_TOOLS = new Set([
+  'conversation.task.checkpoint',
+  'project.structure.get',
+  'library.search',
+  'library.read',
+  'production.skill.read',
+  'production.bundle',
+  'production.bundle.submit',
+]);
 export interface AgentProviderToolExecutor {
   resolveToolArguments?(identity: LlmGenerationIdentity, tool: string, args: unknown): unknown;
   preserveToolArguments?(
@@ -77,32 +85,27 @@ export interface AgentProviderToolExecutor {
     providerErrorCode?: string,
   ): number;
 }
-
 export class AgentTaskContinuationRequired extends Error {
   constructor(readonly instruction: string) {
     super(instruction);
     this.name = 'AgentTaskContinuationRequired';
   }
 }
-
 type ProviderCallContext = {
   definition?: LlmToolDefinition;
   providerResponseId: string;
   usage?: NormalizedLlmUsage;
 };
-
 type ConfirmationRequester = (request: AgentToolConfirmationRequest) => Promise<boolean>;
 type MediaSelectionRequester = (
   request: MediaModelSelectionRequest,
 ) => Promise<MediaModelSelectionDecision | undefined>;
 type MediaSubmissionRequester = (request: MediaSubmissionConfirmationRequest) => Promise<boolean>;
-
 export interface AgentProviderPlanHooks {
   begin(operation: string): string | undefined;
   succeed(stepId: string, operation: string, resultText: string): boolean;
   fail(stepId: string, operation: string, error: unknown): void;
 }
-
 /**
  * Adapts Pi's single-tool callback to the existing Worker authorization,
  * transaction, confirmation, and audit service. It deliberately owns no
@@ -125,12 +128,12 @@ export class AgentProviderToolGateway {
   private readonly repeatedResults = new RepeatedReadResults();
   private readonly deliveredGuidance = new Set<string>();
   private readonly supportsTaskCheckpoint: boolean;
+  private readonly bundleTask: boolean;
   private readonly readWaiters: Array<() => void> = [];
   // A durable review boundary closes the current Worker step. Pi still calls
   // prepareNextTurnWithContext after finalizing tool results, so remember the
   // termination and avoid trying to advance that already-closed step.
   private terminated = false;
-
   constructor(
     private readonly executor: AgentProviderToolExecutor,
     private readonly identity: LlmGenerationIdentity,
@@ -143,6 +146,12 @@ export class AgentProviderToolGateway {
     private readonly lazyTools = false,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
+    this.bundleTask =
+      initialDefinitions.some((tool) => tool.name === 'production.bundle.submit') &&
+      !initialDefinitions.some((tool) => tool.name === 'document.submit_draft');
+    if (this.bundleTask)
+      for (const tool of initialDefinitions)
+        if (BUNDLE_TOOLS.has(tool.name)) this.selectedTools.add(tool.name);
     // The runtime decides whether to coordinate durable stages at task start.
     // A later authorization refresh cannot enable that coordinator mid-task.
     this.supportsTaskCheckpoint = initialDefinitions.some(
@@ -155,13 +164,11 @@ export class AgentProviderToolGateway {
       .join('; ');
     this.catalogNames = this.definitions.map((tool) => tool.name);
   }
-
   tools(allowedOperations?: readonly string[]): AgentTool[] {
     return this.currentDefinitions(allowedOperations).map((definition) =>
       definition.name === 'tools.load' ? this.loaderTool() : this.tool(definition),
     );
   }
-
   currentDefinitions(allowedOperations?: readonly string[]): LlmToolDefinition[] {
     for (const definition of this.definitions)
       if (!this.catalogNames.includes(definition.name)) {
@@ -177,6 +184,8 @@ export class AgentProviderToolGateway {
           isLibraryRetrievalOperation(definition.name)) &&
         this.isLoaded(definition.name),
     );
+    if (this.bundleTask)
+      return this.withRecoveryLimits(available.filter((tool) => BUNDLE_TOOLS.has(tool.name)));
     if (!this.lazyTools) return this.withRecoveryLimits(available);
     const byName = new Map(available.map((definition) => [definition.name, definition]));
     return this.withRecoveryLimits([
@@ -189,7 +198,6 @@ export class AgentProviderToolGateway {
         .flatMap((name) => (byName.has(name) ? [structuredClone(byName.get(name)!)] : [])),
     ]);
   }
-
   private withRecoveryLimits(definitions: LlmToolDefinition[]): LlmToolDefinition[] {
     const tools = cloneDefinitions(definitions);
     if (this.sceneShotBatchLimit === 4) return tools;
@@ -201,17 +209,14 @@ export class AgentProviderToolGateway {
     }
     return tools;
   }
-
   private refreshedDefinitions(definitions: LlmToolDefinition[]): LlmToolDefinition[] {
     return cloneDefinitions(definitions).filter(
       (tool) => this.supportsTaskCheckpoint || tool.name !== 'conversation.task.checkpoint',
     );
   }
-
   private isLoaded(name: string): boolean {
     return !this.lazyTools || this.selectedTools.has(name) || CORE_TOOLS.includes(name);
   }
-
   private loaderDefinition(): LlmToolDefinition {
     return {
       name: 'tools.load',
@@ -241,7 +246,6 @@ export class AgentProviderToolGateway {
       },
     };
   }
-
   private loaderTool(): AgentTool {
     return {
       ...this.loaderDefinition(),
@@ -292,21 +296,22 @@ export class AgentProviderToolGateway {
       },
     } as unknown as AgentTool;
   }
-
   hasDefinition(operation: string): boolean {
     return this.definitions.some((definition) => definition.name === operation);
   }
-
   restoreSelection(names: string[]): void {
     this.selectedTools.clear();
+    if (this.bundleTask) {
+      for (const tool of this.definitions)
+        if (BUNDLE_TOOLS.has(tool.name)) this.selectedTools.add(tool.name);
+      return;
+    }
     for (const name of names)
       if (!CORE_TOOLS.includes(name) && this.hasDefinition(name)) this.selectedTools.add(name);
   }
-
   clearResultReuse(omittedCallIds?: ReadonlySet<string>): void {
     this.repeatedResults.clear(omittedCallIds);
   }
-
   preferStagedSceneAuthoring(): boolean {
     if (!this.hasDefinition('scene.structure.stage')) return false;
     // Load only an already authorized schema. Existing-scene revisions can
@@ -315,7 +320,6 @@ export class AgentProviderToolGateway {
     this.selectedTools.add('scene.structure.stage');
     return true;
   }
-
   recoverSceneAuthoring(reason: 'output-size' | 'arguments'): string | undefined {
     if (!this.preferStagedSceneAuthoring()) return undefined;
     if (reason === 'output-size')
@@ -325,13 +329,17 @@ export class AgentProviderToolGateway {
       'Resume the matching stage using get and its latest stageId, rowVersion and missingShots; do not repeat saved scenes or shots. ' +
       'Only when no matching stage exists, begin with a stable executionKey and the full sceneShotCounts manifest, then put_scene and put_shots in order. ' +
       'Preserve the full manifest and prompt content across successive shotOffset batches; plan remaining writes using this batch size and missingShots. ' +
-      'Each new shot is {"title":"...","authoringIR":{"schemaVersion":1,"kind":"shot","prompt":"..."}}; put optional creative fields in authoringIR.data and real document IDs in authoringIR.references. ' +
-      'Use complete JSON with escaped quotes/newlines inside strings. Put final generation text in authoringIR.prompt. ' +
+      'Each new shot is {"title":"...","prompt":"...","bindings":{"schemaVersion":1}}; put optional creative fields in 正文 and real document IDs in bindings. ' +
+      'Use complete JSON with escaped quotes/newlines inside strings. Put final generation text in prompt. ' +
       'For EXISTING scene revisions keep sceneId and expectedRowVersion through scene.read/scene.submit_structure; never create replacements.'
     );
   }
-
-  providerResponseRejection(calls: Array<{ id: string; name: string }>): string | undefined {
+  providerResponseRejection(
+    calls: Array<{
+      id: string;
+      name: string;
+    }>,
+  ): string | undefined {
     if (calls.length > 8 || new Set(calls.map((call) => call.id)).size !== calls.length)
       return 'A response must contain at most eight distinct tool calls. No calls were executed.';
     if (calls.length <= 1) return undefined;
@@ -349,8 +357,12 @@ export class AgentProviderToolGateway {
       );
     return undefined;
   }
-
-  freezeProviderResponse(calls: Array<{ id: string; name: string }>): void {
+  freezeProviderResponse(
+    calls: Array<{
+      id: string;
+      name: string;
+    }>,
+  ): void {
     const rejection = this.providerResponseRejection(calls);
     if (rejection) throw new Error(rejection);
     if (calls.some((call) => call.name === 'tools.load')) return;
@@ -368,7 +380,6 @@ export class AgentProviderToolGateway {
       updates: [],
     };
   }
-
   finishProviderResponse(): void {
     if (this.terminated) {
       this.batch = undefined;
@@ -402,9 +413,10 @@ export class AgentProviderToolGateway {
     this.batch = undefined;
     this.readBatchContext = undefined;
   }
-
-  private readBatchContext?: { providerResponseId?: string; usage?: NormalizedLlmUsage };
-
+  private readBatchContext?: {
+    providerResponseId?: string;
+    usage?: NormalizedLlmUsage;
+  };
   advanceTextTurn(providerResponseId: string | undefined, usage?: NormalizedLlmUsage): void {
     const tools = this.executor.advanceTextTurn?.({
       ...this.identity,
@@ -414,7 +426,6 @@ export class AgentProviderToolGateway {
     });
     if (tools) this.definitions = this.refreshedDefinitions(tools);
   }
-
   captureProviderCall(
     toolCallId: string,
     providerResponseId: string | undefined,
@@ -428,12 +439,10 @@ export class AgentProviderToolGateway {
       usage,
     });
   }
-
   startProviderStep(): void {
     if (this.terminated) return;
     this.executor.startProviderStep(this.identity);
   }
-
   completeProviderStep(
     providerResponseId: string | undefined,
     finishReason: string | undefined,
@@ -447,7 +456,6 @@ export class AgentProviderToolGateway {
       usage,
     });
   }
-
   terminate(reason: 'cancelled' | 'failed', errorMessage?: string): void {
     if (errorMessage?.trim()) {
       this.executor.terminateGeneration(this.identity.generationId, reason, errorMessage);
@@ -455,7 +463,6 @@ export class AgentProviderToolGateway {
     }
     this.executor.terminateGeneration(this.identity.generationId, reason);
   }
-
   private tool(definition: LlmToolDefinition): AgentTool {
     return {
       name: definition.name,
@@ -467,11 +474,12 @@ export class AgentProviderToolGateway {
       execute: async (toolCallId, args) => this.execute(toolCallId, definition.name, args),
     } as AgentTool;
   }
-
   private prepareArguments(definition: LlmToolDefinition, args: unknown): unknown {
-    args = this.executor.resolveToolArguments?.(this.identity, definition.name, args) ?? args;
-    definition = taskCheckpointValidationDefinition(definition, args);
+    let resolved = false;
     try {
+      args = this.executor.resolveToolArguments?.(this.identity, definition.name, args) ?? args;
+      resolved = true;
+      definition = taskCheckpointValidationDefinition(definition, args);
       const validated: unknown = validateToolArguments(definition, {
         type: 'toolCall',
         id: 'validation',
@@ -480,9 +488,12 @@ export class AgentProviderToolGateway {
       });
       return validated;
     } catch (error) {
-      const recovery = isNewSceneAuthoring(definition.name, args)
-        ? this.recoverSceneAuthoring('arguments')
-        : undefined;
+      const recovery =
+        definition.name === 'scene.structure.stage'
+          ? 'No write occurred. This rejection did not change stageId or rowVersion. Correct the same call; reload/get only if the stage changed independently.'
+          : isNewSceneAuthoring(definition.name, args)
+            ? this.recoverSceneAuthoring('arguments')
+            : undefined;
       const reason = boundedValidationError(error, definition, args);
       this.executor.recordValidationFailure?.(
         this.identity,
@@ -490,13 +501,17 @@ export class AgentProviderToolGateway {
         Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8'),
         reason,
       );
-      const prepared = PREPARED_ARGUMENT_TOOLS.has(definition.name)
-        ? this.executor.preserveToolArguments?.(this.identity, definition.name, args)
-        : undefined;
-      throw new Error([reason, recovery, preparedInstruction(prepared)].filter(Boolean).join('\n'));
+      const prepared =
+        resolved && PREPARED_ARGUMENT_TOOLS.has(definition.name)
+          ? this.executor.preserveToolArguments?.(this.identity, definition.name, args)
+          : undefined;
+      throw new Error(
+        [reason, recovery, preparedInstruction(prepared, definition.name, args)]
+          .filter(Boolean)
+          .join('\n'),
+      );
     }
   }
-
   private liveDefinition(name: string): LlmToolDefinition {
     const live = this.definitions.find((definition) => definition.name === name);
     if (!live) {
@@ -504,7 +519,6 @@ export class AgentProviderToolGateway {
     }
     return live;
   }
-
   private async execute(
     toolCallId: string,
     name: string,
@@ -578,7 +592,10 @@ export class AgentProviderToolGateway {
       unifiedAgentToolRegistry.assertResultText(output);
       const result = JSON.parse(output) as {
         status?: string;
-        error?: { code?: string; message?: string };
+        error?: {
+          code?: string;
+          message?: string;
+        };
       };
       if (unifiedAgentToolRegistry.isFailureResult(result)) {
         const recovery = isNewSceneAuthoring(name, args)
@@ -622,7 +639,7 @@ export class AgentProviderToolGateway {
         );
         if (prepared)
           throw new Error(
-            `${error instanceof Error ? error.message : String(error)}\n${preparedInstruction(prepared)}`,
+            `${error instanceof Error ? error.message : String(error)}\n${preparedInstruction(prepared, name, args)}`,
           );
       }
       throw error;
@@ -635,13 +652,37 @@ export class AgentProviderToolGateway {
     }
   }
 }
-
-function preparedInstruction(ref?: PreparedArgumentsRef): string | undefined {
-  return ref
-    ? `Arguments retained, not proof of a save. Retry the same tool using preparedArguments=${JSON.stringify(ref)} plus only corrected top-level fields. Original CAS still applies. Arrays/objects are replaced as a whole.`
-    : undefined;
+function preparedInstruction(
+  ref?: PreparedArgumentsRef,
+  tool?: string,
+  args?: unknown,
+): string | undefined {
+  if (!ref) return undefined;
+  const retry = { ...ref };
+  delete retry.argumentsHash;
+  if (tool === 'production.bundle.submit')
+    return `Arguments retained, not saved. Retry production.bundle.submit with preparedArguments=${JSON.stringify(retry)}. The task-scoped resultId is sufficient; do not copy a hash. Correct only reported fields with explicit patches, for example /prompts/0/bindings. A patch may remove an unsupported field, but must never change partKey or expectedRevision. If the original CAS is stale, submit a new explicit part using the current revision and a new partKey. Use one prompts list with explicit kind and ordinary prompt text. Do not retransmit unaffected prompts or override lists while patching. Original schema, authorization and CAS still apply.`;
+  if (
+    tool === 'production.bundle' &&
+    args &&
+    typeof args === 'object' &&
+    (args as Record<string, unknown>).operation === 'put'
+  )
+    return `Arguments retained, not proof of a save. Retry production.bundle using preparedArguments=${JSON.stringify(retry)}. To correct only a field, add patches=[{"op":"set","path":"/part/shots/0/bindings","value":"<correct value>"}] inside preparedArguments; choose the actual target path/value from the error. remove deletes an object field; set can supply a missing array such as /part/scenes. Do not resend or override part when patching. Original schema, authorization and CAS still apply. No content is automatically corrected.`;
+  let nestedHint = '';
+  if (tool === 'scene.structure.stage' && args && typeof args === 'object') {
+    const values = args as Record<string, unknown>;
+    const misplaced = ['title', 'sceneDocumentId', 'characterDocumentIds'].filter((key) =>
+      Object.hasOwn(values, key),
+    );
+    if (misplaced.length) retry.deleteFields = misplaced;
+    const scene = values.scene as Record<string, unknown> | undefined;
+    if (values.operation === 'put_scene' && scene && typeof scene.title !== 'string')
+      nestedHint =
+        ' To supply scene.title without resending prompt, bindings and timing, add setFields={"scene.title":"<actual scene title>"} inside preparedArguments; replace the placeholder. Do not also override scene.';
+  }
+  return `Arguments retained, not proof of a save. Retry the same tool using preparedArguments=${JSON.stringify(retry)} plus only corrected top-level fields. Original CAS still applies. Arrays/objects are replaced as a whole.${nestedHint}`;
 }
-
 export function boundedValidationError(
   error: unknown,
   definition?: LlmToolDefinition,
@@ -649,12 +690,32 @@ export function boundedValidationError(
 ): string {
   const message = error instanceof Error ? error.message : 'Invalid tool arguments.';
   const paths = definition ? unsupportedArgumentPaths(definition.parameters, args) : [];
+  let bundleReason: string | undefined;
+  if (
+    definition?.name === 'production.bundle.submit' &&
+    args &&
+    typeof args === 'object' &&
+    !Array.isArray(args) &&
+    !Object.hasOwn(args, 'preparedArguments')
+  ) {
+    try {
+      projectBundleSubmission(args as Record<string, unknown>);
+    } catch (failure) {
+      if (failure instanceof Error) bundleReason = failure.message;
+    }
+  }
   return [
     ...(paths.length ? [`Unsupported fields: ${paths.join(', ')}.`] : []),
+    ...(bundleReason ? [bundleReason] : []),
     message.split('Received arguments:')[0]!.trim(),
     ...(definition?.name === 'document.submit_draft'
       ? [
-          'New document: omit documentId, expectedDocumentRowVersion and baseVersionId completely, even null. Existing document: provide documentId and that target’s current expectedDocumentRowVersion/baseVersionId; omit bindingRole. Source version IDs are provenance, never output-target CAS. contentIR is only for character/scene/prop; plans/scripts keep all authored structure in contentMarkdown and omit contentIR. Preserve all content when correcting fields.',
+          'New document: omit documentId, expectedDocumentRowVersion and baseVersionId completely, even null. Existing document: provide documentId and that target’s current expectedDocumentRowVersion/baseVersionId; omit bindingRole. Source version IDs are provenance, never output-target CAS. bindings is only for character/scene/prop; plans/scripts keep all authored structure in contentMarkdown and omit bindings. Preserve all content when correcting fields.',
+        ]
+      : []),
+    ...(definition?.name === 'scene.structure.stage'
+      ? [
+          'put_scene envelope: operation, resourceId, stageId, sceneIndex, expectedRowVersion and scene={"title":"...","prompt":"..."}. Keep scene.title and all prompt text, bindings and timing intact. Root title/sceneDocumentId/characterDocumentIds are unsupported; shot material references belong in each shot.bindings. put_shots uses shotOffset and shots=[{title,prompt,bindings?,timing?}], at most 4 ordered shots (or the current recovery limit). Do not invent new schema keys or omit a required envelope title.',
         ]
       : []),
     ...(definition?.name === 'conversation.task.checkpoint' &&
@@ -662,7 +723,7 @@ export function boundedValidationError(
     typeof args === 'object' &&
     (args as Record<string, unknown>).operation === 'review'
       ? [
-          'No review executed. Call conversation.task.checkpoint operation=state and follow current pendingActions using the Worker reviewId. Report content findings with targetId/category/description/evidence; resolve or withdraw open issueIds with reason and evidence. Worker manages hashes, versions and missing reads; never report system readiness as a content defect.',
+          'No review executed. conclusion must be "passed" or "needs_revision", never "partial". A partial batch uses reviewedTargetIds; omitted targets stay pending. issues is required (use [] only when there are no findings). Preserve assessment text and correct only invalid fields. Follow current pendingActions; production.bundle.submit complete seals the candidate package. Unit requirement IDs may omit requirementQuote. Report content findings with targetId/category/description/evidence; resolve or withdraw issueIds with reason and evidence. Worker manages hashes and versions; never report system readiness as a content defect.',
         ]
       : []),
     ...(definition?.name === 'conversation.task.checkpoint' &&
@@ -677,9 +738,8 @@ export function boundedValidationError(
     .join('\n')
     .slice(0, 1600);
 }
-
 // Diagnostics only: the schema validator remains authoritative. Never include
-// argument values or interpret open authoringIR.data as envelope fields.
+// argument values or interpret open 正文 as envelope fields.
 function unsupportedArgumentPaths(schema: unknown, args: unknown): string[] {
   const paths: string[] = [];
   let visited = 0;
@@ -706,18 +766,23 @@ function unsupportedArgumentPaths(schema: unknown, args: unknown): string[] {
   visit(schema, args, '', 0);
   return paths;
 }
-
 function isNewSceneAuthoring(name: string, args: unknown): boolean {
   if (name === 'scene.structure.stage') return true;
   if (!['scene.submit_structure', 'novel.episode.submit_structure'].includes(name)) return false;
-  const scenes = (args as { scenes?: Array<{ sceneId?: string }> } | undefined)?.scenes;
+  const scenes = (
+    args as
+      | {
+          scenes?: Array<{
+            sceneId?: string;
+          }>;
+        }
+      | undefined
+  )?.scenes;
   return !Array.isArray(scenes) || scenes.some((scene) => !scene?.sceneId);
 }
-
 export function isLibraryRetrievalOperation(operation: string): boolean {
   return operation === 'library.search' || operation === 'library.read';
 }
-
 function cloneDefinitions(definitions: LlmToolDefinition[]): LlmToolDefinition[] {
   return definitions.map((definition) => ({
     ...definition,

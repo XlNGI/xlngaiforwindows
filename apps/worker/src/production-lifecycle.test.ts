@@ -13,7 +13,6 @@ import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
 import { compileProjectResourceMap } from './project-resource-map.js';
 import { validateSessionRequestParams } from './request-validation.js';
-
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const dispose of cleanup.splice(0)) await dispose();
@@ -35,7 +34,6 @@ async function setup() {
     });
   return { projects, content, change };
 }
-
 describe('recoverable scene and shot lifecycle', () => {
   it('preserves content, bindings, order and individual child state across parent archive/restore', async () => {
     const { content, projects, change } = await setup();
@@ -47,17 +45,17 @@ describe('recoverable scene and shot lifecycle', () => {
     const scene = content.saveScene({
       title: '雨夜场次',
       sceneDocumentId: location.id,
-      videoPrompt: '雨夜场次正文',
+      prompt: '雨夜场次正文',
     });
     const shot = content.saveShot({
       sceneId: scene.id,
       title: '雨夜镜头',
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '雨夜镜头正文',
-        data: { movement: '向前' },
-        references: { sceneDocumentIds: [location.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ sceneDocumentIds: [location.id] },
+        },
       },
     });
     content.saveShotReferenceBindings({
@@ -108,7 +106,7 @@ describe('recoverable scene and shot lifecycle', () => {
     expect(content.saveScene({ title: '下一场' }).position).toBe(scene.position + 1);
     const restoredScene = change(archivedScene, false);
     expect(restoredScene).toMatchObject({
-      videoPrompt: scene.videoPrompt,
+      prompt: scene.prompt,
       sceneDocumentId: location.id,
       position: scene.position,
     });
@@ -134,12 +132,12 @@ describe('recoverable scene and shot lifecycle', () => {
     ).toThrow('已归档');
     expect(change(archivedShot, false)).toMatchObject({
       prompt: savedShot.prompt,
-      authoringIR: savedShot.authoringIR,
+      bindings: savedShot.bindings,
+      timing: savedShot.timing,
       referenceBindings: savedShot.referenceBindings,
       documentId: savedShot.documentId,
     });
   });
-
   it('fences stale versions, foreign project IDs, published storyboards and read-only projects', async () => {
     const { content, projects, change } = await setup();
     const scene = content.saveScene({ title: '第一场' });
@@ -200,10 +198,9 @@ describe('recoverable scene and shot lifecycle', () => {
       reader.close();
     }
   });
-
   it('hides archived production and storyboards from default search and directories and restores discovery', async () => {
     const { content, projects, change } = await setup();
-    const scene = content.saveScene({ title: '雨夜场次', videoPrompt: '雨夜场次正文' });
+    const scene = content.saveScene({ title: '雨夜场次', prompt: '雨夜场次正文' });
     const shot = content.saveShot({ sceneId: scene.id, title: '雨夜镜头', prompt: '雨夜镜头正文' });
     content.saveShotStoryboard({
       shotId: shot.id,
@@ -251,7 +248,6 @@ describe('recoverable scene and shot lifecycle', () => {
     change(archivedShot, false);
     expect(inspect().search).toHaveLength(3);
   });
-
   it('validates lifecycle payloads and list flags strictly', () => {
     expect(() =>
       validateSessionRequestParams('production.lifecycle.change', {

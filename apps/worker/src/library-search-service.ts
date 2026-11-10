@@ -1,3 +1,4 @@
+import { DOCUMENT_DELIVERY_TOOLS } from './agent-delivery-capabilities.js';
 import { createHash, randomBytes } from 'node:crypto';
 import type {
   LibraryErrorCode,
@@ -7,7 +8,7 @@ import type {
   LibrarySearchMode,
   LibrarySourceStatus,
 } from '@ai-video/contracts';
-import { validateProjectContentIR } from '@ai-video/contracts';
+import { validatePromptBindings } from '@ai-video/contracts';
 import type Database from 'better-sqlite3';
 import {
   getProjectLibraryChunk,
@@ -21,14 +22,12 @@ import {
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { taskPlanScope } from './agent-task-deliverables.js';
-
-const SOURCE_HANDLE_TTL_MS = 10 * 60_000;
+const SOURCE_HANDLE_TTL_MS = 10 * 60000;
 const SEARCH_CACHE_LIMIT = 64;
-const SOURCE_HANDLE_LIMIT = 4_000;
-const DEFAULT_READ_CHARS = 4_000;
-const MAX_READ_CHARS = 20_000;
+const SOURCE_HANDLE_LIMIT = 4000;
+const DEFAULT_READ_CHARS = 4000;
+const MAX_READ_CHARS = 20000;
 const DRAFT_CANDIDATE_NOTE = '未审核候选资料，不能当作已发布权威';
-
 export class LibraryError extends Error {
   constructor(
     readonly code: LibraryErrorCode,
@@ -39,7 +38,6 @@ export class LibraryError extends Error {
     this.name = 'LibraryError';
   }
 }
-
 interface LibraryHandleRecord {
   sourceHandle: string;
   taskId: string;
@@ -53,21 +51,16 @@ interface LibraryHandleRecord {
   structureNodeId?: string;
   expiresAt: number;
 }
-
 type ContentSearchHit = ReturnType<typeof searchProjectLibraryChunksPage>['hits'][number];
 type StructureSearchHit = ReturnType<typeof searchProjectStructureNodesPage>['hits'][number];
-
 interface LibrarySearchPage {
   hits: Array<ContentSearchHit | StructureSearchHit>;
   truncated: boolean;
 }
-
 export class LibrarySearchService {
   private readonly sourceHandles = new Map<string, LibraryHandleRecord>();
   private readonly searchCache = new Map<string, LibrarySearchPage>();
-
   constructor(private readonly projects: ProjectService) {}
-
   search(params: {
     taskId: string;
     attemptId: string;
@@ -95,7 +88,11 @@ export class LibrarySearchService {
       const generationId = (
         database
           .prepare('SELECT generation_id AS id FROM llm_generation_attempts WHERE id=?')
-          .get(params.attemptId) as { id: string } | undefined
+          .get(params.attemptId) as
+          | {
+              id: string;
+            }
+          | undefined
       )?.id;
       const limit = boundedInteger(params.limit, searchMode === 'structure' ? 20 : 8, 1, 20);
       const revision = getProjectLibraryRevision(database, project.id);
@@ -220,7 +217,6 @@ export class LibrarySearchService {
       };
     });
   }
-
   /** Direct versioned readback of a known task target, using the existing read path. */
   readArtifact(params: {
     taskId: string;
@@ -228,7 +224,7 @@ export class LibrarySearchService {
     documentId: string;
     expectedVersionId: string;
     maxChars?: number;
-    includeContentIR?: boolean;
+    includeBindings?: boolean;
     offset?: number;
   }): LibraryReadResult {
     const sourceHandle = this.projects.access(false, (database, project) => {
@@ -238,7 +234,11 @@ export class LibrarySearchService {
          JOIN agent_task_generations l ON l.generation_id=g.id
          WHERE a.id=? AND l.task_id=? AND g.project_id=?`,
         )
-        .get(params.attemptId, params.taskId, project.id) as { id: string } | undefined;
+        .get(params.attemptId, params.taskId, project.id) as
+        | {
+            id: string;
+          }
+        | undefined;
       if (!generation)
         throw new LibraryError('LIBRARY_READ_BLOCKED', 'Artifact is outside this task.', false);
       const known =
@@ -249,9 +249,9 @@ export class LibrarySearchService {
           database
             .prepare(
               `SELECT 1 FROM agent_tool_calls WHERE project_id=? AND task_id=? AND status='succeeded'
-           AND tool_name='document.submit_draft' AND json_extract(result_summary_json,'$.documentId')=? LIMIT 1`,
+           AND tool_name IN (${DOCUMENT_DELIVERY_TOOLS.map(() => '?').join(',')}) AND json_valid(result_summary_json) AND json_extract(result_summary_json,'$.documentId')=? LIMIT 1`,
             )
-            .get(project.id, params.taskId, params.documentId),
+            .get(project.id, params.taskId, ...DOCUMENT_DELIVERY_TOOLS, params.documentId),
         ) ||
         Boolean(
           database
@@ -276,7 +276,10 @@ export class LibrarySearchService {
          AND ${taskLibraryVisibility()} ORDER BY chunks.id LIMIT 1`,
         )
         .get(project.id, params.documentId, params.expectedVersionId, generation.id) as
-        { id: string } | undefined;
+        | {
+            id: string;
+          }
+        | undefined;
       if (!chunk)
         throw new LibraryError(
           'LIBRARY_READ_BLOCKED',
@@ -299,14 +302,13 @@ export class LibrarySearchService {
     });
     return this.read({ ...params, sourceHandle, readMode: 'source' });
   }
-
   read(params: {
     taskId: string;
     attemptId: string;
     sourceHandle: string;
     maxChars?: number;
     readMode?: 'chunk' | 'source';
-    includeContentIR?: boolean;
+    includeBindings?: boolean;
     offset?: number;
   }): LibraryReadResult {
     const handle = this.sourceHandles.get(params.sourceHandle);
@@ -326,10 +328,10 @@ export class LibrarySearchService {
     if (readMode !== 'chunk' && readMode !== 'source') {
       throw new LibraryError('LIBRARY_READ_BLOCKED', 'Library read mode is invalid.', false);
     }
-    if (params.includeContentIR && readMode !== 'source')
+    if (params.includeBindings && readMode !== 'source')
       throw new LibraryError(
         'LIBRARY_READ_BLOCKED',
-        'contentIR is available only with readMode="source" for the exact retrieved document version.',
+        'bindings is available only with readMode="source" for the exact retrieved document version.',
         false,
       );
     const offset = boundedInteger(params.offset, 0, 0, Number.MAX_SAFE_INTEGER);
@@ -341,9 +343,7 @@ export class LibrarySearchService {
     );
     // Keep an explicitly requested IR plus its Markdown page below the common
     // Agent tool-result bound, even for non-ASCII text.
-    const maxChars = params.includeContentIR
-      ? Math.min(requestedMaxChars, 4_000)
-      : requestedMaxChars;
+    const maxChars = params.includeBindings ? Math.min(requestedMaxChars, 4000) : requestedMaxChars;
     return this.projects.access(false, (database, project) => {
       if (project.id !== handle.projectId || project.rootPath !== handle.projectRoot) {
         throw new LibraryError(
@@ -363,7 +363,11 @@ export class LibrarySearchService {
       const generationId = (
         database
           .prepare('SELECT generation_id AS id FROM llm_generation_attempts WHERE id=?')
-          .get(params.attemptId) as { id: string } | undefined
+          .get(params.attemptId) as
+          | {
+              id: string;
+            }
+          | undefined
       )?.id;
       if (
         generationId &&
@@ -384,13 +388,18 @@ export class LibrarySearchService {
         readMode === 'source' && chunk.documentId && chunk.versionId
           ? (database
               .prepare(
-                `SELECT versions.content_markdown, versions.content_hash
+                `SELECT versions.content_markdown, versions.content_hash, versions.sample_text
                  FROM document_versions versions
                  INNER JOIN documents ON documents.id = versions.document_id
                  WHERE documents.project_id = ? AND documents.id = ? AND versions.id = ?`,
               )
               .get(project.id, chunk.documentId, chunk.versionId) as
-              { content_markdown: string; content_hash: string | null } | undefined)
+              | {
+                  content_markdown: string;
+                  content_hash: string | null;
+                  sample_text: string | null;
+                }
+              | undefined)
           : undefined;
       const contentBeforeLimit =
         readMode === 'source'
@@ -405,26 +414,28 @@ export class LibrarySearchService {
               ),
             ))
           : chunk.contentText;
-      const contentIR =
-        params.includeContentIR && chunk.documentId && chunk.versionId
+      const bindings =
+        params.includeBindings && chunk.documentId && chunk.versionId
           ? (() => {
               const row = database
                 .prepare(
-                  `SELECT versions.content_ir_json, documents.kind
+                  `SELECT versions.bindings_json, documents.kind
                    FROM document_versions versions
                    JOIN documents ON documents.id=versions.document_id
                    WHERE documents.project_id=? AND documents.id=? AND versions.id=?`,
                 )
                 .get(project.id, chunk.documentId, chunk.versionId) as
-                { content_ir_json: string | null; kind: string } | undefined;
-              if (!row?.content_ir_json || !['character', 'scene', 'prop'].includes(row.kind))
+                | {
+                    bindings_json: string | null;
+                    kind: string;
+                  }
+                | undefined;
+              if (
+                !row?.bindings_json ||
+                !['character', 'scene', 'prop', 'voice'].includes(row.kind)
+              )
                 return undefined;
-              return validateProjectContentIR(
-                JSON.parse(row.content_ir_json),
-                ['character', 'scene', 'prop'].includes(row.kind)
-                  ? (row.kind as 'character' | 'scene' | 'prop')
-                  : undefined,
-              );
+              return validatePromptBindings(JSON.parse(row.bindings_json));
             })()
           : undefined;
       if (offset > contentBeforeLimit.length) {
@@ -462,7 +473,10 @@ export class LibrarySearchService {
         kind: chunk.kind,
         title: chunk.title,
         content,
-        ...(contentIR ? { contentIR } : {}),
+        ...(bindings ? { bindings } : {}),
+        ...(version?.sample_text !== null && version?.sample_text !== undefined
+          ? { sampleText: version.sample_text }
+          : {}),
         characterCount: content.length,
         startOffset: offset,
         endOffset,
@@ -483,7 +497,6 @@ export class LibrarySearchService {
       };
     });
   }
-
   private readCachedPage(
     database: Database.Database,
     projectId: string,
@@ -512,7 +525,6 @@ export class LibrarySearchService {
     this.searchCache.set(cacheKey, cached);
     return { ...cached, hits: refreshedHits };
   }
-
   private writeCachedPage(cacheKey: string, page: LibrarySearchPage): void {
     this.searchCache.delete(cacheKey);
     this.searchCache.set(cacheKey, page);
@@ -522,7 +534,6 @@ export class LibrarySearchService {
       this.searchCache.delete(oldestKey);
     }
   }
-
   private pruneExpiredHandles(): void {
     const now = Date.now();
     for (const [handle, source] of this.sourceHandles) {
@@ -530,9 +541,12 @@ export class LibrarySearchService {
     }
   }
 }
-
 function mergeSourceChunks(
-  chunks: Array<{ startOffset: number; endOffset: number; contentText: string }>,
+  chunks: Array<{
+    startOffset: number;
+    endOffset: number;
+    contentText: string;
+  }>,
 ): string {
   if (chunks.length === 0) return '';
   let content = '';
@@ -548,7 +562,6 @@ function mergeSourceChunks(
   }
   return content;
 }
-
 function normalizeQuery(value: string, allowStructureWildcard = false): string {
   const query = value
     .normalize('NFC')
@@ -559,7 +572,6 @@ function normalizeQuery(value: string, allowStructureWildcard = false): string {
   }
   return query;
 }
-
 function normalizeSourceTypes(value: string[] | undefined): string[] | undefined {
   if (!value) return undefined;
   const allowed = new Set<string>(LIBRARY_SOURCE_TYPES);
@@ -568,7 +580,6 @@ function normalizeSourceTypes(value: string[] | undefined): string[] | undefined
   }
   return value;
 }
-
 function normalizeStructurePath(value: string[] | undefined): string[] | undefined {
   if (value === undefined) return undefined;
   if (
@@ -579,7 +590,6 @@ function normalizeStructurePath(value: string[] | undefined): string[] | undefin
   }
   return value.map((segment) => segment.normalize('NFC').trim());
 }
-
 function boundedInteger(
   value: number | undefined,
   fallback: number,
@@ -592,7 +602,6 @@ function boundedInteger(
   }
   return value;
 }
-
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }

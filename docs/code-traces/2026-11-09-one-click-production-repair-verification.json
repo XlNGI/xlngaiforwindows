@@ -1,0 +1,331 @@
+{
+  "recordedAt": "2026-11-09T09:15:03.432Z",
+  "objective": "Repair one-click script-to-material task execution reliability while preserving original requirements and stage order.",
+  "originalTaskId": "4b089522-8131-4d8c-8aac-19c6739199e3",
+  "originalTaskStatus": "cancelled",
+  "authorization": "User requested source repair. No live project mutation, model calls, media generation or user-app stop/restart.",
+  "testResults": {
+    "command": "pnpm test",
+    "exitCode": 0,
+    "passed": 2651,
+    "failed": 0,
+    "skipped": 0,
+    "packages": [
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/packages/context",
+        "passed": 8,
+        "total": 8,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/packages/contracts",
+        "passed": 48,
+        "total": 48,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/packages/llm",
+        "passed": 32,
+        "total": 32,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/apps/desktop",
+        "passed": 806,
+        "total": 806,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/packages/generation-adapters",
+        "passed": 80,
+        "total": 80,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/packages/persistence",
+        "passed": 101,
+        "total": 101,
+        "failed": 0,
+        "skipped": 0
+      },
+      {
+        "package": "E:/p22/xlngaiforwindowsP22/apps/worker",
+        "passed": 1576,
+        "total": 1576,
+        "failed": 0,
+        "skipped": 0
+      }
+    ],
+    "addedRegressionCases": 21,
+    "finalFocused": {
+      "passed": 24,
+      "failed": 0,
+      "skipped": 294,
+      "overlapsFullSuite": true
+    },
+    "protocols": ["openai-responses", "openai-chat-completions"],
+    "fullWorkflow": "Nonempty original and session-constraints matrix; partial target acceptance; shot -> three material kinds -> binding -> final review; no media jobs."
+  },
+  "qualityGates": [
+    {
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "log": "typecheck.log"
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": "lint-final.log"
+    },
+    {
+      "command": "pnpm format:check",
+      "exitCode": 0,
+      "log": "format-final.log"
+    },
+    {
+      "command": "pnpm build",
+      "exitCode": 0,
+      "log": "build.log"
+    },
+    {
+      "command": "pnpm worker:sidecar",
+      "exitCode": 0,
+      "log": "sidecar-build.log"
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker validate:m7-sidecar",
+      "exitCode": 0,
+      "log": "sidecar-smoke.log"
+    },
+    {
+      "command": "New sidecar subprocess: temporary project create/close/process-exit/reopen/integrity",
+      "exitCode": 0,
+      "log": "sidecar-reopen.log"
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    },
+    {
+      "command": "Explicit Prettier check of changed plan/repair documents and evidence, bypassing docs ignore",
+      "exitCode": 0,
+      "log": "docs-format.log"
+    }
+  ],
+  "observedRepairs": {
+    "protectedFailureSamples": 19,
+    "beforeFingerprintGroups": 18,
+    "afterFingerprintGroups": 1,
+    "firstStopAt": 4,
+    "precisePlanField": "intent",
+    "inspection": {
+      "elapsedMs": 4755816,
+      "saved": {
+        "scenes": 4,
+        "shots": 13,
+        "materialDocuments": {},
+        "lastSavedAt": "2026-11-09T07:49:14.255Z"
+      },
+      "review": {
+        "available": true,
+        "readyToSubmit": true,
+        "approved": false,
+        "currentTargetCount": 17,
+        "acceptedTargetCount": 0,
+        "pendingTargetCount": 17,
+        "openIssueCount": 1
+      }
+    },
+    "sourceAndBuildAgree": true,
+    "frozenDatabaseSha256Before": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2",
+    "frozenDatabaseSha256After": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2"
+  },
+  "repairedVerificationIssues": [
+    "Initial Worker typecheck caught four issues in new code/tests; corrected narrowing and checked target lookup.",
+    "Initial lint caught nine new typing/throw issues; corrected without disabling lint rules.",
+    "Initial format check found production-skill-validation.test.ts; formatted and rechecked.",
+    "Temporary custom sidecar reopen harness initially omitted IPC protocolVersion; corrected harness and reran successfully. M7 official validation passed independently."
+  ],
+  "scopeLimits": [
+    "Frozen-data failure replay isolates those errors and is not an entire historical model replay.",
+    "No real-provider autonomous rerun, full 8547-character original requirement creative acceptance, or paired speed comparison.",
+    "No desktop installation or user-app replacement/restart; source and built artifacts do not prove a running instance loaded them.",
+    "Native/Rust source was not changed by this repair; existing Native workspace changes preserved."
+  ],
+  "sourceFingerprints": [
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-context-budget.ts",
+      "bytes": 52517,
+      "sha256": "d8df1d2cad3d6ce534df1100313437857089ad0f81404b2327009d8636c944fc"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-context-results.ts",
+      "bytes": 9339,
+      "sha256": "3387e5d6fa0f95cfca6a2fdcece129d3c1b4daf5b48ef64db6ba2d1610b4afde"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-provider-loop-service.ts",
+      "bytes": 248000,
+      "sha256": "e8d0953406e3b2114c94b58b7fc047ebcb1148bf94d0845e04c8a575320fdf2d"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-system-tool-service.ts",
+      "bytes": 68904,
+      "sha256": "21dca379ba57a29c243296b7f5c67af83bf6cd5a5339da6617e86d459546157a"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-checkpoints.ts",
+      "bytes": 19061,
+      "sha256": "f4913ebf5e2719d55dcdaad6e042f599b967249fa2c35f37ff4b34f20de28ac8"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-deliverables.ts",
+      "bytes": 58207,
+      "sha256": "d0b6083f9b7c8f01d27cb2c6cc1ec909dd14b687896616e6679c6c67e69ae438"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-review.ts",
+      "bytes": 34125,
+      "sha256": "70d1629118bf66b565efd182ea273d18be66ccfd617bc45e6f7cbba0f1e70c1f"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-tool-definitions.ts",
+      "bytes": 94780,
+      "sha256": "1389c5ece3af58df8c5c079c48090fe8a6f9e39ee82294023e6fbad097a07929"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-repair.ts",
+      "bytes": 651,
+      "sha256": "aa4878aad7b2741bdbebbc2c72370eca9aca332dad4cb0e9b67e5a4897d8f2ca"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-inspection.ts",
+      "bytes": 8287,
+      "sha256": "cc5de4f154bef55655fd21e4c49b27415f985efe764612f08558e4f74fd20303"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-repair.test.ts",
+      "bytes": 7783,
+      "sha256": "ddecadaa4b32407cf7c6ac97c2eb8f165a123805f127ffe930de6286eb02b331"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-task-inspection.test.ts",
+      "bytes": 5250,
+      "sha256": "82f8e1471f381c68e8191c95b7489beb0efbc537cfbc5256aada6a047f99bf85"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/production-skill-validation.test.ts",
+      "bytes": 87776,
+      "sha256": "81167d57158fb2b5f01267480a6005c354c396702053022643c7e50b43d5561c"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/src/agent-pipeline-remediation.test.ts",
+      "bytes": 187220,
+      "sha256": "ae19c8840128116d974980d56992a5fb608d545b2f5c6155385605fcf4322f2b"
+    }
+  ],
+  "buildFingerprints": [
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/dist/index.js",
+      "bytes": 13008,
+      "sha256": "efa916cae96cbebc96b1ca99263a7249ef95a15ef70adbd035d535554567a46d"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/dist/agent-task-inspection.js",
+      "bytes": 7704,
+      "sha256": "ac440a9fdcd52db3ff729a403cc35593e2628ac897484970e869ec920dcda78a"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/dist/agent-task-review.js",
+      "bytes": 31657,
+      "sha256": "525c3eef32655d9fb0d0709313aa6c20882948f8059250c8c5c016fee3dfa8ee"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/worker/dist/agent-context-budget.js",
+      "bytes": 54567,
+      "sha256": "95d12cb043cc05957f81254dc2452b62bc1598486a341f1332fe6b05586a19fb"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/desktop/dist/index.html",
+      "bytes": 445,
+      "sha256": "42b5cbd5938a51fde34f064620cbf5a99d455f872c1f9d0b288af731c5be7529"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+      "bytes": 77128118,
+      "sha256": "c80dd228471032e387921535f3d70134c608022d641373447b9707662934f104"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/desktop/dist/assets/index-CqGcZlAD.css",
+      "bytes": 224164,
+      "sha256": "809bf420e6e2095e324ac9616bd0e993fc4424f6b3f52f6398cb8d2b30104f35"
+    },
+    {
+      "path": "E:/p22/xlngaiforwindowsP22/apps/desktop/dist/assets/index-D7YHADsn.js",
+      "bytes": 1336497,
+      "sha256": "f9490ebeb04ebf280819457bd2a4e6e2ec6b922cb76db19ff4618abd5fcac2e4"
+    }
+  ],
+  "logFingerprints": [
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/all-tests.log",
+      "bytes": 162364,
+      "sha256": "5fa81f1b2858d5f5ba5e3b14d06407ab927fa30a936003c9e2c00a0d9f67bf9b"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/typecheck.log",
+      "bytes": 812,
+      "sha256": "d247de7c5b72868af713b8b6b4d7b413880c144df69a8da6899c3698658f5172"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/lint.log",
+      "bytes": 1686,
+      "sha256": "3db2280af2037d6b0630b03374207241bfc1f1f01985076ba6ab6f316009cb46"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/lint-final.log",
+      "bytes": 12,
+      "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/format.log",
+      "bytes": 238,
+      "sha256": "0ef125fc78fffef2ad6d5ea636fef11a14adca14233f49848f7c7d29677f8836"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/format-final.log",
+      "bytes": 90,
+      "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/build.log",
+      "bytes": 1351,
+      "sha256": "ca2b415f24adbef4ad001992cf89e3d0d74a2ef7e478bfc3ff09b270ffccd0ce"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/sidecar-build.log",
+      "bytes": 931,
+      "sha256": "767070c22af5b190881191c42a3fe2e14aa329a67db908a1d61c694b9a35e94d"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/sidecar-smoke.log",
+      "bytes": 333,
+      "sha256": "aa99e6cb8949a5d69355628153d54450ae4af3678db31c154b3fabc34113e92c"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/sidecar-reopen.log",
+      "bytes": 468,
+      "sha256": "ab81ccf566402e42a8098c6b8c87a34358f6a41ff0c5a2e957a96dea57edc93f"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-one-click-repair-20261109/final-focused.json",
+      "bytes": 100577,
+      "sha256": "03f21f06c78cc1966730b1c7a90fbc91b4ea5ebf6dbf8412d8557d453639b8f8"
+    }
+  ]
+}

@@ -523,6 +523,17 @@ describe('adapter registry', () => {
     expect(custom.parameterSchema.properties.output_format).not.toHaveProperty('default');
   });
 
+  it('lets the custom image service determine supported dimensions without official size enums', () => {
+    const parameters = { prompt: 'A character sheet', size: '1920x1080' };
+    expect(validateAdapterParameters('TEXT_TO_IMAGE:custom:openai-images:v1', parameters)).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(
+      validateAdapterParameters('TEXT_TO_IMAGE:openai:openai-images:v1', parameters).valid,
+    ).toBe(false);
+  });
+
   it('routes custom video-capable models through the generic asynchronous video adapters', () => {
     const textToVideo = getAdapter('TEXT_TO_VIDEO:custom:openai-compatible-video:v1')!;
     const imageToVideo = getAdapter('IMAGE_TO_VIDEO:custom:openai-compatible-video:v1')!;

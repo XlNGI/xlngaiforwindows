@@ -9,12 +9,13 @@ import type {
 import type { ProductionSkillId } from './production-skills.js';
 export * from './dubbing.js';
 export * from './production-skills.js';
+export * from './production-bundle.js';
 export * from './scene-reference.js';
 export * from './media-review.js';
 import type { MediaReviewWorkerMethodMap } from './media-review.js';
 export * from './voice-reference.js';
 export * from './official-video-endpoint.js';
-import type { VoiceReferenceWorkerMethodMap } from './voice-reference.js';
+import type { VoiceReferenceWorkerMethodMap, NativeVoiceDesignParams } from './voice-reference.js';
 import type { TaskScheduleWorkerMethodMap } from './task-schedule.js';
 import type { ProjectRuntimeScope, ProjectRuntimeWorkerMethodMap } from './project-runtime.js';
 export * from './project-runtime.js';
@@ -24,7 +25,7 @@ import type { FileTaskWorkerMethodMap } from './file-tasks.js';
 export * from './file-tasks.js';
 export * from './task-schedule.js';
 export * from './production.js';
-export * from './project-ir.js';
+export * from './prompt-bindings.js';
 export * from './character-sheet.js';
 export * from './video-prompt-guidance.js';
 export * from './production-schema.js';
@@ -42,9 +43,7 @@ import type {
   ProductionDefaultsInfo,
   ProductionDefaults,
 } from './production.js';
-
 export const IPC_PROTOCOL_VERSION = 1 as const;
-
 export {
   officialVideoContracts,
   officialVideoAudioContracts,
@@ -56,7 +55,6 @@ export {
   adapterBindsCatalogModel,
   supportsProductionAudioUpload,
 } from './official-media-contracts.js';
-
 export interface HealthResult {
   protocolVersion: typeof IPC_PROTOCOL_VERSION;
   workerVersion: string;
@@ -65,20 +63,16 @@ export interface HealthResult {
   arch: string;
   pid: number;
 }
-
 export interface SqliteProbeParams {
   databasePath?: string;
 }
-
 export interface SqliteProbeResult {
   databasePath: string;
   sqliteVersion: string;
   journalMode: string;
   writeVerified: boolean;
 }
-
 export type ProjectOpenMode = 'read-write' | 'read-only';
-
 export interface ProjectInfo {
   id: string;
   name: string;
@@ -88,7 +82,6 @@ export interface ProjectInfo {
   mode: ProjectOpenMode;
   schemaVersion: number;
 }
-
 /**
  * A bounded, read-only projection of the current project structure. This is
  * derived from the project database on every read; it is never a second
@@ -129,7 +122,6 @@ export interface ProjectStructureSnapshot {
   novel?: NovelStructureSnapshot;
   truncated?: boolean;
 }
-
 export interface ProjectStructureSource {
   id: string;
   type: string;
@@ -146,9 +138,7 @@ export interface ProjectStructureSource {
   scopeId?: string;
   updatedAt?: string;
 }
-
 export type NovelStructureChapterStatus = 'empty' | 'draft' | 'canonical';
-
 /** A bounded, metadata-only tree for the current project's novel. */
 export interface NovelStructureSnapshot {
   version: 1;
@@ -165,7 +155,6 @@ export interface NovelStructureSnapshot {
   references: NovelStructureReference[];
   truncated?: boolean;
 }
-
 export interface NovelStructureVolume {
   id: string;
   title: string;
@@ -173,7 +162,6 @@ export interface NovelStructureVolume {
   status?: string;
   chapters: NovelStructureChapter[];
 }
-
 export interface NovelStructureChapter {
   id: string;
   volumeId?: string;
@@ -189,7 +177,6 @@ export interface NovelStructureChapter {
   documentRowVersion?: number;
   updatedAt?: string;
 }
-
 export interface NovelStructureReference {
   id: string;
   documentId: string;
@@ -202,13 +189,11 @@ export interface NovelStructureReference {
   canonicalVersionId?: string;
   updatedAt?: string;
 }
-
 export interface RecentProjectInfo {
   name: string;
   rootPath: string;
   lastOpenedAt: string;
 }
-
 export type ProviderCategory = 'llm' | 'image' | 'video' | 'multi';
 export type ProviderAccessType = 'official' | 'custom';
 export type ProviderConnectionStatus =
@@ -220,7 +205,6 @@ export type ProviderConnectionStatus =
   | 'protocol-failed'
   | 'sync-failed'
   | 'disabled';
-
 export interface ProviderProfileInfo {
   id: string;
   name: string;
@@ -239,24 +223,19 @@ export interface ProviderProfileInfo {
   updatedAt: string;
   archivedAt?: string;
 }
-
 export interface ProviderLegacyMigrationParams {
   source: 'vidu' | 'vidu-cn';
 }
-
 export interface ProviderLegacyMigrationResult {
   state: 'created' | 'existing' | 'archived';
   profile?: ProviderProfileInfo;
 }
-
 export interface ProviderProfileListParams {
   includeArchived?: boolean;
 }
-
 export interface ProviderProfileGetParams {
   profileId: string;
 }
-
 export interface ProviderProfileCreateParams {
   name: string;
   category: ProviderCategory;
@@ -265,12 +244,10 @@ export interface ProviderProfileCreateParams {
   protocol: string;
   baseUrl: string;
 }
-
 export interface ProviderProfileUpdateParams extends ProviderProfileCreateParams {
   profileId: string;
   enabled: boolean;
 }
-
 export interface ProviderDefinitionInfo {
   id: string;
   name: string;
@@ -280,7 +257,6 @@ export interface ProviderDefinitionInfo {
   baseUrl: string;
   accessType: 'official';
 }
-
 export interface ModelCapabilities {
   modelId: string;
   contextWindow: number;
@@ -290,7 +266,6 @@ export interface ModelCapabilities {
   tokenizer?: string;
   capabilitySource: 'provider' | 'model_registry' | 'manual_config' | 'fallback';
 }
-
 export interface ProviderModelCapabilities {
   contextLimits?: Omit<ModelCapabilities, 'modelId'>;
   /** Explicit dubbing capabilities; absent in historical model metadata. */
@@ -308,9 +283,7 @@ export interface ProviderModelCapabilities {
   imageEditing?: boolean;
   videoGeneration: boolean;
 }
-
 export type ProviderModelSource = 'remote' | 'built-in' | 'manual';
-
 export interface ProviderModelInfo {
   id: string;
   providerProfileId: string;
@@ -331,12 +304,9 @@ export interface ProviderModelInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export type ModelCatalogStatus =
   'discovered' | 'verified' | 'enabled' | 'deprecated' | 'rejected' | 'revalidation_required';
-
 export type ModelBindingCompatibility = 'exact' | 'partial' | 'incompatible';
-
 export interface ModelContractCapabilities {
   text: boolean;
   vision: boolean;
@@ -362,7 +332,6 @@ export interface ModelContractCapabilities {
   maxImages?: number;
   supportedImageFormats?: string[];
 }
-
 export interface ModelContractSource {
   url: string;
   title: string;
@@ -370,7 +339,6 @@ export interface ModelContractSource {
   locale?: string;
   verificationStatus: 'pending' | 'verified' | 'revalidation_required';
 }
-
 export type ContractMappingOperation =
   | 'copy'
   | 'rename'
@@ -381,7 +349,6 @@ export type ContractMappingOperation =
   | 'arrayMap'
   | 'conditional'
   | 'extract';
-
 export interface ContractFieldMapping {
   operation: ContractMappingOperation;
   from?: string;
@@ -392,14 +359,15 @@ export interface ContractFieldMapping {
   enumMap?: Record<string, string>;
   factor?: number;
 }
-
 export interface ContractTransport {
   protocolFamily: string;
   request: ContractFieldMapping[];
   response: ContractFieldMapping[];
-  samples?: { request: unknown; response: unknown }[];
+  samples?: {
+    request: unknown;
+    response: unknown;
+  }[];
 }
-
 export interface ProtocolAdapter {
   id: string;
   protocol: string;
@@ -408,7 +376,6 @@ export interface ProtocolAdapter {
   supportsStreaming: boolean;
   supportsToolCalls: boolean;
 }
-
 export interface ModelContractLifecycle {
   mode: 'synchronous' | 'asynchronous';
   submit?: string;
@@ -416,7 +383,6 @@ export interface ModelContractLifecycle {
   cancel?: string;
   output?: string;
 }
-
 export interface TaskAdapterDescriptor {
   id: string;
   capability: string;
@@ -426,9 +392,7 @@ export interface TaskAdapterDescriptor {
   lifecycle: ModelContractLifecycle;
   parameterSchema: Record<string, unknown>;
 }
-
 export type TaskAdapter = TaskAdapterDescriptor;
-
 export interface ModelContract {
   contractId: string;
   contractRevision: number;
@@ -448,7 +412,6 @@ export interface ModelContract {
   inputMediaLimits?: OfficialInputMediaLimit[];
   inputSemantics?: string;
 }
-
 export interface OfficialInputMediaLimit {
   field: string;
   kind: string;
@@ -459,7 +422,6 @@ export interface OfficialInputMediaLimit {
   maxTotalDurationMs: number;
   maxBytes?: number;
 }
-
 export interface ModelBinding {
   bindingId: string;
   providerProfileId?: string;
@@ -472,44 +434,38 @@ export interface ModelBinding {
   capabilitiesOverride?: Partial<ModelContractCapabilities>;
   transportOverride?: Partial<ContractTransport>;
   /** Channel input transport; independent of the model's audio semantics. */
-  inputTransport?: { audio: 'upload' | 'url-only' };
+  inputTransport?: {
+    audio: 'upload' | 'url-only';
+  };
   status: ModelCatalogStatus;
 }
-
 export interface ModelContractListParams {
   status?: ModelCatalogStatus;
 }
-
 export interface ModelContractGetParams {
   contractId: string;
   contractRevision?: number;
 }
-
 export interface ModelBindingListParams {
   status?: ModelCatalogStatus;
   providerType?: string;
 }
-
 export interface ModelContractEnableParams {
   contractId: string;
   contractRevision: number;
   enabled: boolean;
 }
-
 export interface ModelBindingEnableParams {
   bindingId: string;
   enabled: boolean;
 }
-
 export type UnifiedAgentSchemaSource = 'official-adapter' | 'manual' | 'synced-catalog' | 'missing';
 export type UnifiedAgentSchemaStatus = 'confirmed' | 'needs_confirmation' | 'missing';
-
 export interface UnifiedAgentModelCatalogListParams {
   capability?: UnifiedAgentCapability;
   providerProfileId?: string;
   includeUnavailable?: boolean;
 }
-
 export interface UnifiedAgentModelSchemaInfo {
   providerProfileId: string;
   providerName: string;
@@ -530,24 +486,19 @@ export interface UnifiedAgentModelSchemaInfo {
   missingRequired: string[];
   updatedAt: string;
 }
-
 export interface UnifiedAgentModelCatalogListResult {
   models: UnifiedAgentModelSchemaInfo[];
   generatedAt: string;
 }
-
 export interface UnifiedAgentModelCatalogGetParams {
   providerProfileId: string;
   modelId: string;
   capability?: UnifiedAgentCapability;
 }
-
 export type UnifiedAgentModelCatalogGetResult = UnifiedAgentModelSchemaInfo;
-
 export interface UnifiedAgentAdapterSchemaGetParams {
   adapterKey: string;
 }
-
 export interface UnifiedAgentAdapterSchemaProposeParams {
   adapterKey: string;
   descriptor: AdapterDescriptor;
@@ -555,7 +506,6 @@ export interface UnifiedAgentAdapterSchemaProposeParams {
   conversationId?: string;
   actorType?: 'user' | 'agent' | 'system';
 }
-
 export interface UnifiedAgentAdapterSchemaProposeResult {
   status: 'proposed';
   adapterKey: string;
@@ -563,7 +513,6 @@ export interface UnifiedAgentAdapterSchemaProposeResult {
   requiresConfirmation: boolean;
   diff: string[];
 }
-
 export interface UnifiedAgentAdapterSchemaConfirmParams {
   adapterKey: string;
   version: number;
@@ -571,14 +520,12 @@ export interface UnifiedAgentAdapterSchemaConfirmParams {
   conversationId?: string;
   actorType?: 'user' | 'agent' | 'system';
 }
-
 export interface UnifiedAgentAdapterSchemaConfirmResult {
   status: 'confirmed';
   adapterKey: string;
   version: number;
   descriptor: AdapterDescriptor;
 }
-
 export interface UnifiedAgentAdapterSchemaRollbackParams {
   adapterKey: string;
   version: number;
@@ -586,7 +533,6 @@ export interface UnifiedAgentAdapterSchemaRollbackParams {
   conversationId?: string;
   actorType?: 'user' | 'agent' | 'system';
 }
-
 export interface UnifiedAgentAdapterSchemaRollbackResult {
   status: 'rolled_back';
   adapterKey: string;
@@ -594,14 +540,11 @@ export interface UnifiedAgentAdapterSchemaRollbackResult {
   rolledBackToVersion: number;
   descriptor: AdapterDescriptor;
 }
-
 export interface UnifiedAgentAdapterSchemaAuditListParams {
   adapterKey: string;
   limit?: number;
 }
-
 export type UnifiedAgentAdapterSchemaAuditListResult = UnifiedAgentAdapterSchemaAuditInfo[];
-
 export interface UnifiedAgentAdapterSchemaAuditInfo {
   id: string;
   adapterKey: string;
@@ -612,7 +555,6 @@ export interface UnifiedAgentAdapterSchemaAuditInfo {
   reason?: string;
   createdAt: string;
 }
-
 export interface ModelPricingInfo {
   providerProfileId: string;
   modelId: string;
@@ -624,7 +566,6 @@ export interface ModelPricingInfo {
   creditPrice?: string;
   updatedAt: string;
 }
-
 export interface ModelPricingUpdateParams {
   providerProfileId: string;
   modelId: string;
@@ -634,38 +575,31 @@ export interface ModelPricingUpdateParams {
   outputPrice?: string;
   creditPrice?: string;
 }
-
 export type ProviderDefaultRole = 'quality' | 'balanced' | 'fast' | 'vision' | 'embedding';
-
 export interface ProviderDefaultInfo {
   role: ProviderDefaultRole;
   providerProfileId: string;
   modelId: string;
   updatedAt: string;
 }
-
 export interface ProviderDefaultUpdateParams {
   role: ProviderDefaultRole;
   providerProfileId?: string;
   modelId?: string;
 }
-
 export interface ProviderRuntimeProfile {
   profileId: string;
   providerType: string;
   protocol: string;
   baseUrl: string;
 }
-
 export interface RemoteProviderModelInfo {
   id: string;
   displayName?: string;
   contextLimits?: Omit<ModelCapabilities, 'modelId'>;
 }
-
 export type ProviderConnectionFailureStatus =
   'auth-failed' | 'network-failed' | 'protocol-failed' | 'sync-failed';
-
 export interface ProviderConnectionCompleteParams {
   profileId: string;
   status: 'ready' | ProviderConnectionFailureStatus;
@@ -673,13 +607,11 @@ export interface ProviderConnectionCompleteParams {
   errorMessage?: string;
   models?: RemoteProviderModelInfo[];
 }
-
 export interface ProviderConnectionResult {
   profile: ProviderProfileInfo;
   models: ProviderModelInfo[];
   modelSyncStatus: 'synced' | 'unsupported' | 'failed' | 'not-attempted';
 }
-
 export interface ProviderModelCreateParams {
   profileId: string;
   remoteModelId: string;
@@ -688,7 +620,6 @@ export interface ProviderModelCreateParams {
   enabled?: boolean;
   parameterTemplateKey?: string;
 }
-
 export interface ProviderModelUpdateParams {
   profileId: string;
   modelId: string;
@@ -697,14 +628,12 @@ export interface ProviderModelUpdateParams {
   enabled: boolean;
   parameterTemplateKey?: string | null;
 }
-
 export type UniCompApiMediaTemplateKey =
   | 'openai-compatible-image'
   | 'qwen-image-edit'
   | 'openai-compatible-video'
   | 'vidu-compatible-reference'
   | 'vidu-compatible-start-end';
-
 export interface MediaParameterTemplateInfo {
   key: UniCompApiMediaTemplateKey;
   label: string;
@@ -712,7 +641,6 @@ export interface MediaParameterTemplateInfo {
   provider: 'unicompapi';
   capabilities: GenerationCapability[];
 }
-
 export const UNICOMPAPI_MEDIA_TEMPLATES: readonly MediaParameterTemplateInfo[] = [
   {
     key: 'openai-compatible-image',
@@ -750,64 +678,51 @@ export const UNICOMPAPI_MEDIA_TEMPLATES: readonly MediaParameterTemplateInfo[] =
     capabilities: ['START_END_TO_VIDEO'],
   },
 ];
-
 export function isUniCompApiMediaTemplateKey(value: string): value is UniCompApiMediaTemplateKey {
   return UNICOMPAPI_MEDIA_TEMPLATES.some((template) => template.key === value);
 }
-
 export function uniCompApiTemplateAdapterKey(
   capability: GenerationCapability,
   templateKey: UniCompApiMediaTemplateKey,
 ): string {
   return `${capability}:unicompapi:${templateKey}:v1`;
 }
-
 export interface ProjectCreateParams {
   name: string;
   rootPath: string;
 }
-
 export interface SampleProjectCreateParams {
   rootPath: string;
   name?: string;
 }
-
 export interface ProjectOpenParams {
   rootPath: string;
 }
-
 export interface ProjectRenameParams {
   name: string;
 }
-
 export interface ProjectIntegrityResult {
   ok: boolean;
   messages: string[];
   schemaVersion: number;
 }
-
 export interface ProjectBackupParams {
   destinationPath?: string;
 }
-
 export interface ProjectExportParams {
   destinationRoot: string;
 }
-
 export interface ProjectRestoreParams {
   backupPath: string;
   destinationRoot: string;
 }
-
 export interface PathResult {
   path: string;
 }
-
 export type NovelMarkdownExportType = 'chapter' | 'selection' | 'volume' | 'work';
 export type NovelMarkdownExportFormat = 'files' | 'merged';
 export type NovelMarkdownExportStatus =
   'queued' | 'writing' | 'verifying' | 'succeeded' | 'failed' | 'cancelled';
-
 export interface NovelMarkdownExportPrepareParams {
   exportType: NovelMarkdownExportType;
   exportFormat?: NovelMarkdownExportFormat;
@@ -816,7 +731,6 @@ export interface NovelMarkdownExportPrepareParams {
   volumeId?: string;
   includeDraft?: boolean;
 }
-
 export interface NovelMarkdownExportJobInfo {
   id: string;
   projectId: string;
@@ -831,25 +745,21 @@ export interface NovelMarkdownExportJobInfo {
   createdAt: string;
   completedAt?: string;
 }
-
 export interface CacheInspectionResult {
   fileCount: number;
   directoryCount: number;
   sizeBytes: number;
   skippedLinks: number;
 }
-
 export interface CacheClearResult {
   removedFiles: number;
   removedDirectories: number;
   freedBytes: number;
   removedLinks: number;
 }
-
 export interface ResearchCacheCleanupParams {
   maxBytes?: number;
 }
-
 export interface ResearchCacheCleanupResult {
   missingCount: number;
   expiredCount: number;
@@ -857,16 +767,13 @@ export interface ResearchCacheCleanupResult {
   removedBytes: number;
   retainedBytes: number;
 }
-
 export interface ContextSnapshotCleanupParams {
   olderThanDays?: number;
 }
-
 export interface ContextSnapshotCleanupResult {
   removedCount: number;
   retainedCount: number;
 }
-
 export interface WorkerMetricByOperation {
   operation: string;
   requests: number;
@@ -876,7 +783,6 @@ export interface WorkerMetricByOperation {
   maxDurationMs: number;
   recentRequestIds: string[];
 }
-
 export interface WorkerGenerationMetric {
   generationId: string;
   providerName: string;
@@ -890,7 +796,6 @@ export interface WorkerGenerationMetric {
   estimatedCost?: string;
   retryOfGenerationId?: string;
 }
-
 export interface WorkerProviderMetric {
   providerName: string;
   attempts: number;
@@ -901,14 +806,12 @@ export interface WorkerProviderMetric {
   maxDurationMs: number;
   maxFirstTokenMs: number;
 }
-
 export interface WorkerQueueWaitMetric {
   operation: string;
   samples: number;
   totalMs: number;
   maxMs: number;
 }
-
 export interface WorkerMetricsSnapshot {
   totals: {
     requests: number;
@@ -943,22 +846,18 @@ export interface WorkerMetricsSnapshot {
   }>;
   recentGenerations: WorkerGenerationMetric[];
 }
-
 export interface DiagnosticExportParams {
   destinationRoot?: string;
 }
-
 export interface DiagnosticExportResult {
   path: string;
   createdAt: string;
   manifestVersion: 1;
   fileCount: number;
 }
-
 export interface DiagnosticRevealParams {
   path: string;
 }
-
 export const DOCUMENT_KINDS = [
   'outline',
   'plan',
@@ -966,6 +865,7 @@ export const DOCUMENT_KINDS = [
   'character',
   'scene',
   'prop',
+  'voice',
   'storyboard',
   'note',
 ] as const;
@@ -981,7 +881,6 @@ export type DocumentVersionState =
   | 'discarded';
 export type DocumentReviewStatus =
   'pending' | 'approved' | 'changes_requested' | 'rejected' | 'withdrawn';
-
 export interface DocumentSummary {
   id: string;
   projectId: string;
@@ -998,13 +897,13 @@ export interface DocumentSummary {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface DocumentVersionInfo {
   id: string;
   documentId: string;
   version: number;
   contentMarkdown: string;
-  contentIR?: import('./project-ir.js').ProjectContentIR;
+  sampleText?: string;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR;
   state: DocumentVersionState;
   baseVersionId?: string;
   titleSnapshot?: string;
@@ -1016,12 +915,10 @@ export interface DocumentVersionInfo {
   contextSnapshotId?: string;
   createdAt: string;
 }
-
 export interface DocumentDetail extends DocumentSummary {
   currentVersion?: DocumentVersionInfo;
   publishedVersion?: DocumentVersionInfo;
 }
-
 export type NovelProfileStatus = 'active' | 'archived';
 export type NovelVolumeStatus = 'active' | 'archived';
 export type NovelChapterLifecycleStatus = 'reserved' | 'active' | 'archived';
@@ -1041,7 +938,6 @@ export type DocumentBindingRole =
   | 'note';
 export type DocumentBindingDomain = 'shared' | 'novel' | 'short-drama';
 export type DocumentBindingStatus = 'active' | 'archived' | 'needs_review';
-
 export interface NovelProfileInfo {
   projectId: string;
   projectName: string;
@@ -1051,26 +947,21 @@ export interface NovelProfileInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelProfileGetParams {
   createIfMissing?: boolean;
 }
-
 export interface ProjectStructureGetParams {
   includeArchived?: boolean;
 }
-
 export interface NovelStructureGetParams {
   novelId?: string;
   includeArchived?: boolean;
 }
-
 export interface NovelProfileUpdateParams {
   language?: string;
   status?: NovelProfileStatus;
   expectedRowVersion: number;
 }
-
 export interface NovelVolumeInfo {
   id: string;
   projectId: string;
@@ -1081,11 +972,9 @@ export interface NovelVolumeInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelVolumeListParams {
   includeArchived?: boolean;
 }
-
 export interface NovelVolumeSaveParams {
   volumeId?: string;
   title: string;
@@ -1093,7 +982,6 @@ export interface NovelVolumeSaveParams {
   status?: NovelVolumeStatus;
   expectedRowVersion?: number;
 }
-
 export interface NovelChapterInfo {
   id: string;
   projectId: string;
@@ -1112,12 +1000,10 @@ export interface NovelChapterInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelChapterListParams {
   volumeId?: string;
   includeArchived?: boolean;
 }
-
 export interface NovelChapterSaveParams {
   chapterId?: string;
   volumeId?: string;
@@ -1128,13 +1014,11 @@ export interface NovelChapterSaveParams {
   archiveReason?: NovelChapterArchiveReason;
   expectedRowVersion?: number;
 }
-
 export interface NovelChapterArchiveParams {
   chapterId: string;
   expectedRowVersion: number;
   reason?: NovelChapterArchiveReason;
 }
-
 export interface NovelChapterMetadataUpdateParams {
   chapterId: string;
   expectedChapterRowVersion: number;
@@ -1142,29 +1026,24 @@ export interface NovelChapterMetadataUpdateParams {
   title?: string;
   displayLabel?: string;
 }
-
 export interface NovelChapterRestoreParams {
   chapterId: string;
   expectedRowVersion: number;
 }
-
 export interface NovelImportChapterInput {
   title: string;
   displayLabel?: string;
   contentMarkdown: string;
 }
-
 export interface NovelImportParams {
   volumeTitle?: string;
   chapters: NovelImportChapterInput[];
 }
-
 export interface NovelImportResult {
   volume?: NovelVolumeInfo;
   chapters: NovelChapterInfo[];
   importedCount: number;
 }
-
 export interface NovelBindingInfo {
   id: string;
   projectId: string;
@@ -1181,11 +1060,9 @@ export interface NovelBindingInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelBindingListParams {
   includeNeedsReview?: boolean;
 }
-
 export interface NovelConsistencyIssueInfo {
   code:
     | 'missing-rag-index'
@@ -1197,7 +1074,6 @@ export interface NovelConsistencyIssueInfo {
   chapterId?: string;
   message: string;
 }
-
 export interface NovelConsistencyReport {
   projectId: string;
   generatedAt: string;
@@ -1207,7 +1083,6 @@ export interface NovelConsistencyReport {
   staleSummaryCount: number;
   issues: NovelConsistencyIssueInfo[];
 }
-
 export interface NovelBindingSaveParams {
   bindingId?: string;
   documentId: string;
@@ -1220,30 +1095,26 @@ export interface NovelBindingSaveParams {
   status?: DocumentBindingStatus;
   expectedRowVersion?: number;
 }
-
 export interface DocumentGetParams {
   documentId: string;
 }
-
 export interface DocumentArchiveParams {
   documentId: string;
   expectedDocumentRowVersion: number;
 }
-
 export type DocumentUnarchiveParams = DocumentArchiveParams;
-
 export interface DocumentSaveParams {
   documentId?: string;
   /** @deprecated The editor no longer exposes classification. Legacy callers may still send it. */
   kind?: DocumentKind;
   title: string;
   contentMarkdown: string;
-  contentIR?: import('./project-ir.js').ProjectContentIR;
+  sampleText?: string;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR | null;
   scopeType?: ConversationScopeType;
   scopeId?: string;
   expectedDocumentRowVersion?: number;
 }
-
 export interface DocumentDraftSaveParams extends DocumentSaveParams {
   baseVersionId?: string;
   sourceTaskId?: string;
@@ -1251,7 +1122,6 @@ export interface DocumentDraftSaveParams extends DocumentSaveParams {
   contextSnapshotId?: string;
   authorType?: 'user' | 'agent' | 'import';
 }
-
 export interface DocumentReviewInfo {
   id: string;
   projectId: string;
@@ -1264,38 +1134,31 @@ export interface DocumentReviewInfo {
   comment?: string;
   version: number;
 }
-
 export interface DocumentReviewSubmitParams {
   documentId: string;
   documentVersionId?: string;
   expectedDocumentRowVersion: number;
 }
-
 export interface DocumentReviewRejectParams {
   documentId: string;
   documentVersionId?: string;
   expectedDocumentRowVersion: number;
   comment?: string;
 }
-
 /** Returns a reviewable draft to editing without ending its Agent task. */
 export type DocumentReviewRequestChangesParams = DocumentReviewRejectParams;
-
 export interface DocumentPublishParams {
   documentId: string;
   documentVersionId?: string;
   expectedDocumentRowVersion: number;
   expectedPublishedVersionId?: string;
 }
-
 export type DocumentSelfPublishParams = DocumentPublishParams;
-
 /** User-only transition that unlocks a published document as a new draft. */
 export interface DocumentUnpublishParams {
   documentId: string;
   expectedDocumentRowVersion: number;
 }
-
 export interface DocumentPublicationInfo {
   id: string;
   documentId: string;
@@ -1304,19 +1167,16 @@ export interface DocumentPublicationInfo {
   publicationNo: number;
   publishedAt: string;
 }
-
 export const AGENT_TOOL_RISK_LEVELS = ['R0', 'R1', 'R2', 'R3'] as const;
 export type AgentToolRiskLevel = (typeof AGENT_TOOL_RISK_LEVELS)[number];
 export type AgentToolConfirmationPolicy =
   'none' | 'explicit-user-intent' | 'always' | 'protected-ui';
 export type AgentToolExecutionLane = 'parallel-readonly' | 'serial';
-
 export interface AgentToolRiskPolicy {
   riskLevel: AgentToolRiskLevel;
   description: string;
   confirmationPolicy: AgentToolConfirmationPolicy;
 }
-
 /** Frozen P0 defaults. Worker policy may only make a registered tool more restrictive. */
 export const AGENT_TOOL_RISK_POLICIES = {
   R0: {
@@ -1340,7 +1200,6 @@ export const AGENT_TOOL_RISK_POLICIES = {
     confirmationPolicy: 'protected-ui',
   },
 } as const satisfies Record<AgentToolRiskLevel, AgentToolRiskPolicy>;
-
 export interface AgentToolRegistryEntryV1 {
   version: 1;
   name: string;
@@ -1350,7 +1209,6 @@ export interface AgentToolRegistryEntryV1 {
   inputSchema: Record<string, unknown>;
   resultSchema: Record<string, unknown>;
 }
-
 /** Task-scoped registry snapshot. It is policy output, not model-provided authority. */
 export interface AgentToolRegistryV1 {
   version: 1;
@@ -1359,7 +1217,6 @@ export interface AgentToolRegistryV1 {
   tools: AgentToolRegistryEntryV1[];
   createdAt: string;
 }
-
 export type AgentToolPolicyErrorCode =
   | 'AGENT_TOOL_UNKNOWN'
   | 'AGENT_TOOL_UNAUTHORIZED'
@@ -1375,7 +1232,6 @@ export type AgentToolPolicyErrorCode =
   | 'AGENT_TOOL_RESULT_TOO_LARGE'
   | 'AGENT_TOOL_RESULT_FORBIDDEN'
   | 'AGENT_TOOL_TASK_INACTIVE';
-
 export interface AgentToolPolicyErrorV1 {
   version: 1;
   status: 'rejected';
@@ -1385,7 +1241,6 @@ export interface AgentToolPolicyErrorV1 {
     retryable: boolean;
   };
 }
-
 export interface AgentConfirmationRequestV1 {
   version: 1;
   confirmationId: string;
@@ -1396,22 +1251,23 @@ export interface AgentConfirmationRequestV1 {
   projectSessionId: string;
   riskLevel: Extract<AgentToolRiskLevel, 'R2' | 'R3'>;
   summary: string;
-  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  affectedEntities: Array<{
+    type: string;
+    id: string;
+    label?: string;
+  }>;
   costNotice?: string;
   draftVersion?: number;
   protectedUi?: AgentProtectedUiHandoff;
   expiresAt: string;
 }
-
 export type AgentProtectedUiPage = 'providers' | 'maintenance' | 'asset-library';
-
 /** A safe navigation request. Sensitive values are entered only after this handoff. */
 export interface AgentProtectedUiHandoff {
   page: AgentProtectedUiPage;
   focusId?: string;
   reason: string;
 }
-
 /** Opaque, short-lived grant. The handle must never enter Provider messages or durable snapshots. */
 export interface AgentToolAuthorizationGrantV1 {
   version: 1;
@@ -1425,13 +1281,11 @@ export interface AgentToolAuthorizationGrantV1 {
   singleUse: true;
   expiresAt: string;
 }
-
 export const AGENT_TOOL_RESULT_LIMITS = {
   maxJsonBytes: 64 * 1024,
-  maxSummaryCharacters: 2_048,
+  maxSummaryCharacters: 2048,
   maxCollectionItems: 100,
 } as const;
-
 /** Keys that must not occur anywhere in a model-visible Tool Result. */
 export const AGENT_TOOL_RESULT_FORBIDDEN_FIELDS = [
   'authorization',
@@ -1448,7 +1302,6 @@ export const AGENT_TOOL_RESULT_FORBIDDEN_FIELDS = [
   'base64',
   'dataUrl',
 ] as const;
-
 export type MediaGenerationTaskState =
   | 'draft'
   | 'awaiting_confirmation'
@@ -1462,14 +1315,12 @@ export type MediaGenerationTaskState =
   | 'failed'
   | 'timed_out'
   | 'cancelled';
-
 export const MEDIA_GENERATION_TERMINAL_STATES = [
   'succeeded',
   'failed',
   'timed_out',
   'cancelled',
 ] as const satisfies readonly MediaGenerationTaskState[];
-
 /** Allowed forward transitions for the Worker-owned media state machine. */
 export const MEDIA_GENERATION_ALLOWED_TRANSITIONS = {
   draft: ['awaiting_confirmation', 'cancelled'],
@@ -1487,9 +1338,11 @@ export const MEDIA_GENERATION_ALLOWED_TRANSITIONS = {
 } as const satisfies Readonly<
   Record<MediaGenerationTaskState, readonly MediaGenerationTaskState[]>
 >;
-
 export type MediaInputReferenceV1 =
-  | { type: 'asset'; assetId: string }
+  | {
+      type: 'asset';
+      assetId: string;
+    }
   | {
       type: 'controlled_temporary_file';
       handle: string;
@@ -1501,7 +1354,6 @@ export type MediaInputReferenceV1 =
       voiceRevision?: number;
       audioId?: string;
     };
-
 export interface MediaProviderSelectionSnapshotV1 {
   providerProfileId: string;
   providerType: string;
@@ -1511,7 +1363,6 @@ export interface MediaProviderSelectionSnapshotV1 {
   adapterKey: string;
   adapterSchemaVersion: number;
 }
-
 /** Durable media draft. Parameters contain references only, never media bytes or secrets. */
 export interface MediaGenerationDraftV1 {
   version: 1;
@@ -1528,25 +1379,44 @@ export interface MediaGenerationDraftV1 {
   createdAt: string;
   updatedAt: string;
 }
-
 export type NormalizedMediaOutput =
-  | { type: 'remote_url'; url: string }
-  | { type: 'authenticated_content'; providerTaskId: string }
-  | { type: 'native_temporary_file'; handle: string };
-
+  | {
+      type: 'remote_url';
+      url: string;
+    }
+  | {
+      type: 'authenticated_content';
+      providerTaskId: string;
+    }
+  | {
+      type: 'native_temporary_file';
+      handle: string;
+    };
 export type NormalizedMediaTaskState =
-  | { state: 'queued' | 'running'; progress?: number; retryAfterMs?: number }
-  | { state: 'succeeded'; output: NormalizedMediaOutput }
-  | { state: 'failed'; code?: string; message: string; retryable: boolean }
-  | { state: 'cancelled' };
-
+  | {
+      state: 'queued' | 'running';
+      progress?: number;
+      retryAfterMs?: number;
+    }
+  | {
+      state: 'succeeded';
+      output: NormalizedMediaOutput;
+    }
+  | {
+      state: 'failed';
+      code?: string;
+      message: string;
+      retryable: boolean;
+    }
+  | {
+      state: 'cancelled';
+    };
 export interface MediaTaskAcceptedV1 {
   version: 1;
   accepted: true;
   taskId: string;
   state: Extract<MediaGenerationTaskState, 'submitting' | 'polling'>;
 }
-
 export type AgentTaskType =
   | 'document-create'
   | 'document-update'
@@ -1568,7 +1438,6 @@ export type AgentTaskPhase =
   | 'artifact_persisting'
   | 'waiting_review'
   | 'recovering';
-
 export interface AgentTaskInfo {
   id: string;
   projectId: string;
@@ -1598,7 +1467,6 @@ export interface AgentTaskInfo {
   estimatedCost?: string;
   usage?: AgentTaskUsageInfo;
 }
-
 export interface AgentTaskUsageInfo {
   providerRequestsUsed: number;
   toolCallsUsed: number;
@@ -1610,14 +1478,12 @@ export interface AgentTaskUsageInfo {
     | 'context_exhausted';
   errorCode?: string;
 }
-
 export * from './agent-user-input.js';
 import type {
   AgentInputForm,
   AgentInputSubmitParams,
   AgentInputSubmitResult,
 } from './agent-user-input.js';
-
 export interface AgentTaskEventInfo {
   id: string;
   taskId: string;
@@ -1627,17 +1493,18 @@ export interface AgentTaskEventInfo {
   summary: string;
   createdAt: string;
   /** Position in the saved assistant message, captured before this stage's first text. */
-  messageBoundary?: { messageId: string; startOffset: number };
+  messageBoundary?: {
+    messageId: string;
+    startOffset: number;
+  };
   userInput?: AgentInputForm;
 }
-
 export interface AgentTaskDocumentArtifact {
   documentId: string;
   documentVersionId: string;
   operation: 'create' | 'update' | 'regenerate';
   createdAt: string;
 }
-
 /** Worker-verified domain target for routing completed Agent work in Desktop. */
 export interface AgentTaskTargetInfo {
   targetKind: 'novel-chapter' | 'novel-reference';
@@ -1646,7 +1513,6 @@ export interface AgentTaskTargetInfo {
   documentId: string;
   documentVersionId?: string;
 }
-
 /** A redacted, task-scoped view of one Provider request/response step. */
 export interface AgentProviderStepInfo {
   id: string;
@@ -1669,7 +1535,6 @@ export interface AgentProviderStepInfo {
   startedAt: string;
   completedAt?: string;
 }
-
 export interface AgentResearchSourceInfo {
   id: string;
   title: string;
@@ -1686,7 +1551,6 @@ export interface AgentResearchSourceInfo {
   cacheStatus?: 'present' | 'missing' | 'expired';
   cacheErrorCode?: string;
 }
-
 export interface AgentSavedProductionReceiptPage {
   receipts: Array<{
     callId: string;
@@ -1699,12 +1563,54 @@ export interface AgentSavedProductionReceiptPage {
   nextOffset?: number;
   instruction: string;
 }
-
+export interface AgentTaskReviewTargetInfo {
+  id: string;
+  kind: 'document' | 'scene' | 'shot';
+  title: string;
+  version?: string;
+  sceneId?: string;
+  state: 'unverified' | 'pending' | 'needs_revision' | 'verified';
+}
 export interface AgentTaskDetail {
-  chapterBatch?: { batchId: string; role: 'parent' | 'child' };
+  deliveryReview?: {
+    bundle?: {
+      businessSaved: boolean;
+      readbackVerified: boolean;
+      counts: Record<string, number>;
+      requestedAt?: string;
+      taskCreatedAt: string;
+      elapsedMs: number;
+      preparationMs?: number;
+    };
+    state: 'unverified' | 'pending' | 'needs_revision' | 'verified';
+    pendingTargetIds: string[];
+    issueCount: number;
+    targets?: AgentTaskReviewTargetInfo[];
+    requirements?: Array<{
+      id: string;
+      text: string;
+    }>;
+    issues?: Array<{
+      id: string;
+      targetId?: string;
+      targetVersion?: string;
+      description: string;
+      evidenceStatus?: 'verified' | 'needs_correction';
+      /** Only explicit requirement citations establish this association. */
+      requirementIds: string[];
+    }>;
+  };
+  chapterBatch?: {
+    batchId: string;
+    role: 'parent' | 'child';
+  };
   task: AgentTaskInfo;
   /** Committed project-local changes, independent of model/audit completion. */
-  resourceChanges?: { sequence: number; documentSequence: number; productionSequence: number };
+  resourceChanges?: {
+    sequence: number;
+    documentSequence: number;
+    productionSequence: number;
+  };
   productionUpdated?: boolean;
   savedProductionReceipts?: AgentSavedProductionReceiptPage;
   novelMetadataUpdated?: boolean;
@@ -1724,7 +1630,6 @@ export interface AgentTaskDetail {
   researchSources: AgentResearchSourceInfo[];
   librarySources?: AgentLibrarySourceInfo[];
 }
-
 export interface AgentTaskPendingSchemaConfirmationInfo {
   action: 'adapter.schema.propose';
   adapterKey: string;
@@ -1732,7 +1637,6 @@ export interface AgentTaskPendingSchemaConfirmationInfo {
   diff: string[];
   status: 'pending';
 }
-
 /** Safe-to-display confirmation metadata; the one-time token is never persisted or returned. */
 export interface AgentTaskPendingConfirmationInfo {
   version: 1;
@@ -1745,36 +1649,35 @@ export interface AgentTaskPendingConfirmationInfo {
   projectSessionId: string;
   riskLevel: Extract<AgentToolRiskLevel, 'R2' | 'R3'>;
   summary: string;
-  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  affectedEntities: Array<{
+    type: string;
+    id: string;
+    label?: string;
+  }>;
   protectedUi?: AgentProtectedUiHandoff;
   documentId?: string;
   documentTitle?: string;
   expiresAt: string;
   status: 'pending' | 'expired';
 }
-
 export interface AgentTaskListParams {
   limit?: number;
   conversationId?: string;
 }
-
 export interface AgentTaskGetParams {
   taskId: string;
 }
-
 export interface AgentTaskEventsParams {
   taskId: string;
   afterSequence?: number;
   limit?: number;
 }
-
 export interface AgentTaskEventsResult {
   task: AgentTaskInfo;
   events: AgentTaskEventInfo[];
   nextSequence: number;
   hasMore: boolean;
 }
-
 /** Explicit user action that converts a completed assistant response into a reviewable draft. */
 export interface AgentTaskCreateDocumentDraftParams {
   messageId: string;
@@ -1783,12 +1686,10 @@ export interface AgentTaskCreateDocumentDraftParams {
   expectedDocumentRowVersion?: number;
   idempotencyKey?: string;
 }
-
 export interface AgentTaskCreateDocumentDraftResult {
   task: AgentTaskInfo;
   document: DocumentDetail;
 }
-
 export interface TaskLogItem {
   id: string;
   kind: 'agent-document' | 'image' | 'video' | 'dubbing';
@@ -1807,23 +1708,23 @@ export interface TaskLogItem {
   inputTokens?: number;
   outputTokens?: number;
   estimatedCost?: string;
-  scheduling?: { state: string; waitReason?: string; revision: number };
+  scheduling?: {
+    state: string;
+    waitReason?: string;
+    revision: number;
+  };
 }
-
 export type TaskLogKind = TaskLogItem['kind'];
-
 export interface TaskLogListParams {
   limit?: number;
   cursor?: string;
   kind?: TaskLogKind;
   status?: string;
 }
-
 export interface TaskLogPage {
   items: TaskLogItem[];
   nextCursor?: string;
 }
-
 /** Safe, project-scoped lifecycle facts for an image/video generation job. */
 export interface GenerationJobEventInfo {
   id: string;
@@ -1835,28 +1736,23 @@ export interface GenerationJobEventInfo {
   details?: Record<string, unknown>;
   createdAt: string;
 }
-
 export interface GenerationJobEventsListParams {
   jobId: string;
   afterSequence?: number;
   limit?: number;
 }
-
 export interface GenerationJobEventsPage {
   events: GenerationJobEventInfo[];
   nextSequence: number;
   hasMore: boolean;
 }
-
 export interface DocumentVersionsParams {
   documentId: string;
 }
-
 export interface DocumentRestoreParams {
   documentId: string;
   versionId: string;
 }
-
 export interface SceneInfo {
   id: string;
   projectId: string;
@@ -1864,10 +1760,11 @@ export interface SceneInfo {
   title: string;
   /** Reusable production scene document (kind=scene). */
   sceneDocumentId?: string;
-  /** All reusable production scene documents referenced by the scene IR. */
+  /** All reusable production scene documents referenced by scene bindings. */
   sceneDocumentIds?: string[];
-  videoPrompt?: string;
-  authoringIR?: import('./project-ir.js').ProductionSceneAuthoringIR;
+  prompt?: string;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
   materialBindings?: SceneMaterialBindingInfo[];
   /** Explicit cast, independent of whether reference images exist. */
   characterBindings?: SceneCharacterBindingInfo[];
@@ -1878,9 +1775,7 @@ export interface SceneInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export type SceneMaterialRole = 'character' | 'scene' | 'prop' | 'other';
-
 export interface SceneCharacterBindingInfo {
   characterDocumentId: string;
   imageAssetId?: string;
@@ -1889,26 +1784,22 @@ export interface SceneCharacterBindingInfo {
   imageDisabled?: boolean;
   voiceDisabled?: boolean;
 }
-
 export interface SceneCharacterMediaInfo {
   characterDocumentId: string;
   defaultImage?: AssetInfo;
   images?: AssetInfo[];
   voice?: import('./voice-reference.js').CharacterVoiceReferenceInfo;
 }
-
 export interface SceneMediaResolveParams {
   characterDocumentIds: string[];
   assetIds?: string[];
   voiceVersionIds?: string[];
 }
-
 export interface SceneMediaResolveResult {
   characters: SceneCharacterMediaInfo[];
   assets: AssetInfo[];
   voices: import('./voice-reference.js').CharacterVoiceReferenceInfo[];
 }
-
 export interface SceneMaterialBindingInfo {
   id: string;
   role: SceneMaterialRole;
@@ -1917,23 +1808,22 @@ export interface SceneMaterialBindingInfo {
   sourceDocumentId?: string;
   source: 'auto' | 'manual';
 }
-
 export interface SceneSaveParams {
   sceneId?: string;
   title: string;
   /** Omitted preserves the binding; null clears it. */
   sceneDocumentId?: string | null;
-  /** Complete reusable location list. This is the authoritative write field. */
+  /** Complete reusable location list for the scene editor. */
   sceneDocumentIds?: string[] | null;
-  videoPrompt?: string;
-  authoringIR?: import('./project-ir.js').ProductionSceneAuthoringIR | null;
+  prompt?: string;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR | null;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
   materialBindings?: SceneMaterialBindingInfo[];
   characterBindings?: SceneCharacterBindingInfo[];
   /** Omitted preserves the recording; null clears it. */
   dialogueAudioId?: string | null;
   expectedRowVersion?: number;
 }
-
 export interface ShotInfo {
   id: string;
   sceneId: string;
@@ -1944,14 +1834,14 @@ export interface ShotInfo {
   documentId?: string;
   /** Short-drama episode shot prompt (image/video generation text). */
   prompt?: string;
-  authoringIR?: import('./project-ir.js').ProductionShotAuthoringIR;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
   /** Durable manual image selections used by direct generation and review forms. */
   referenceBindings?: ShotReferenceBindingInfo;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ShotReferenceBindingInfo {
   /** Durable document-to-asset selections. These are authoritative when present. */
   characterBindings?: Array<{
@@ -1969,23 +1859,22 @@ export interface ShotReferenceBindingInfo {
   firstFrameAssetId?: string;
   ignoreSceneBinding?: boolean;
 }
-
 export interface ShotReferenceBindingResult {
   shotId: string;
   referenceBindings?: ShotReferenceBindingInfo;
 }
-
 export interface ShotListParams {
   sceneId: string;
   includeArchived?: boolean;
 }
-
 export interface ProductionLifecycleParams {
-  target: { kind: 'scene' | 'shot'; id: string };
+  target: {
+    kind: 'scene' | 'shot';
+    id: string;
+  };
   expectedRowVersion: number;
   archived: boolean;
 }
-
 export interface ShotSaveParams {
   shotId?: string;
   sceneId: string;
@@ -1993,22 +1882,20 @@ export interface ShotSaveParams {
   status?: string;
   documentId?: string;
   prompt?: string;
-  authoringIR?: import('./project-ir.js').ProductionShotAuthoringIR | null;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR | null;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
   referenceBindings?: ShotReferenceBindingInfo | null;
   expectedRowVersion?: number;
 }
-
 export interface ShotReferenceBindingSaveParams {
   shotId: string;
   referenceBindings?: ShotReferenceBindingInfo | null;
 }
-
 export interface ShotStoryboardSaveParams {
   shotId: string;
   title: string;
   contentMarkdown: string;
 }
-
 export interface ConstraintInfo {
   id: string;
   projectId: string;
@@ -2019,27 +1906,22 @@ export interface ConstraintInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export type AgentChangeSetStatus =
   'proposed' | 'partially_applied' | 'applied' | 'rejected' | 'conflicted';
 export type AgentChangeSetItemStatus = 'pending' | 'applied' | 'rejected' | 'conflicted';
-
 export interface AgentChangeSetItemDraft {
   entityType: 'scene' | 'shot' | 'document';
   action: 'create' | 'update';
   targetId?: string;
   parentSceneId?: string;
   parentItemOrdinal?: number;
-  /** Production scene document for a scene proposal. */
-  sceneDocumentId?: string | null;
-  /** LLM-resolved scene prompt and complete cast, applied together after review. */
-  videoPrompt?: string;
-  characterDocumentIds?: string[];
-  authoringIR?: import('./project-ir.js').ProductionAuthoringIR;
+  prompt?: string;
+  sampleText?: string;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR | null;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
   title: string;
   shotStatus?: string;
-  /** Shot prompt for `shot` items; applied to `shots.prompt` when approved. */
-  prompt?: string;
+
   documentKind?: DocumentKind;
   contentMarkdown?: string;
   scopeType?: ConversationScopeType;
@@ -2047,7 +1929,6 @@ export interface AgentChangeSetItemDraft {
   expectedRowVersion?: number;
   expectedCurrentVersionId?: string;
 }
-
 export interface AgentChangeSetItemInfo extends AgentChangeSetItemDraft {
   id: string;
   ordinal: number;
@@ -2055,7 +1936,6 @@ export interface AgentChangeSetItemInfo extends AgentChangeSetItemDraft {
   appliedEntityId?: string;
   errorCode?: string;
 }
-
 export interface AgentChangeSetInfo {
   id: string;
   projectId: string;
@@ -2068,27 +1948,21 @@ export interface AgentChangeSetInfo {
   updatedAt: string;
   completedAt?: string;
 }
-
 export interface AgentChangeSetCreateParams {
   taskId?: string;
   title: string;
   items: AgentChangeSetItemDraft[];
 }
-
 export interface AgentChangeSetListParams {
   includeTerminal?: boolean;
 }
-
 export interface AgentChangeSetApplyParams {
   changeSetId: string;
   expectedRowVersion: number;
   itemIds?: string[];
 }
-
 export type AgentChangeSetRejectParams = AgentChangeSetApplyParams;
-
 export type ConversationScopeType = 'project' | 'scene' | 'shot';
-
 export interface ConversationInfo {
   id: string;
   projectId: string;
@@ -2099,7 +1973,6 @@ export interface ConversationInfo {
   updatedAt: string;
   archivedAt?: string;
 }
-
 export interface ConversationListParams {
   scopeType?: ConversationScopeType;
   scopeId?: string;
@@ -2108,33 +1981,26 @@ export interface ConversationListParams {
   limit?: number;
   cursor?: string;
 }
-
 export interface ConversationPage {
   items: ConversationInfo[];
   nextCursor?: string;
 }
-
 export interface ConversationCreateParams {
   scopeType: ConversationScopeType;
   scopeId?: string;
   title?: string;
 }
-
 export interface ConversationUpdateParams {
   conversationId: string;
   title: string;
 }
-
 export interface ConversationArchiveParams {
   conversationId: string;
 }
-
 export interface ConversationRestoreParams {
   conversationId: string;
 }
-
 export type ConversationModelPreferenceCapability = Exclude<UnifiedAgentCapability, 'auto'>;
-
 export interface ConversationModelPreferenceInfo {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
@@ -2143,24 +2009,20 @@ export interface ConversationModelPreferenceInfo {
   confirmedAt: string;
   updatedAt: string;
 }
-
 export interface ConversationModelPreferenceGetParams {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
 }
-
 export interface ConversationModelPreferenceSetParams {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
   providerProfileId: string;
   modelId: string;
 }
-
 export interface ConversationModelPreferenceClearParams {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
 }
-
 /** Editable instructions automatically attached to every request in one conversation. */
 export interface ConversationPromptTemplateInfo {
   conversationId: string;
@@ -2169,16 +2031,13 @@ export interface ConversationPromptTemplateInfo {
   createdAt?: string;
   updatedAt?: string;
 }
-
 export interface ConversationPromptTemplateSaveParams {
   conversationId: string;
   content: string;
   expectedRowVersion: number;
 }
-
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type ChatMessageStatus = 'streaming' | 'complete' | 'failed';
-
 export interface ChatMessageInfo {
   id: string;
   conversationId: string;
@@ -2189,18 +2048,15 @@ export interface ChatMessageInfo {
   createdAt: string;
   attempt?: LlmAttemptInfo;
 }
-
 export interface ChatMessageListParams {
   conversationId: string;
   before?: string;
   limit?: number;
 }
-
 export interface ChatMessagePage {
   items: ChatMessageInfo[];
   nextCursor?: string;
 }
-
 export interface ChatMessageSaveParams {
   messageId?: string;
   conversationId: string;
@@ -2209,24 +2065,19 @@ export interface ChatMessageSaveParams {
   content: string;
   status?: ChatMessageStatus;
 }
-
 export interface MessageArtifactParams {
   messageId: string;
 }
-
 export interface MessageDocumentParams extends MessageArtifactParams {
   title: string;
   kind?: DocumentKind;
 }
-
 export interface MessageConstraintParams extends MessageArtifactParams {
   kind?: string;
 }
-
 export interface CreatedArtifact {
   id: string;
 }
-
 export type LibrarySourceType =
   | 'document'
   | 'novel-chapter'
@@ -2241,24 +2092,18 @@ export type LibrarySourceType =
   | 'change-set'
   | 'adaptation'
   | 'media-task';
-
 export type LibrarySourceStatus =
   'draft' | 'published' | 'conversation' | 'memory' | 'constraint' | 'active' | 'trash';
-
 /** Deterministic Markdown/project hierarchy attached to a retrieval hit. */
 export type ProjectStructureKind = 'document' | 'volume' | 'chapter' | 'scene' | 'shot' | 'section';
-
 /** Ordinary assistant sessions retrieve on demand; episode generation freezes confirmed chapters. */
 export type AssistantRecallMode = 'on-demand' | 'episode-frozen-scope';
-
 export type LibraryErrorCode =
   | 'LIBRARY_SEARCH_FAILED'
   | 'LIBRARY_HANDLE_INVALID'
   | 'LIBRARY_BUDGET_EXCEEDED'
   | 'LIBRARY_READ_BLOCKED';
-
 export type LibrarySearchMode = 'content' | 'structure';
-
 export interface LibraryCatalogItem {
   id: string;
   sourceType: LibrarySourceType;
@@ -2269,9 +2114,7 @@ export interface LibraryCatalogItem {
   title: string;
   updatedAt: string;
 }
-
 export type LibrarySearchMatchKind = 'title' | 'body';
-
 export interface LibrarySearchSource {
   sourceHandle: string;
   sourceType: LibrarySourceType;
@@ -2293,7 +2136,6 @@ export interface LibrarySearchSource {
   structurePath?: string[];
   structureNodeId?: string;
 }
-
 export interface LibrarySearchResult {
   status: 'searched';
   searchMode?: LibrarySearchMode;
@@ -2305,7 +2147,6 @@ export interface LibrarySearchResult {
   guidance?: string;
   sources: LibrarySearchSource[];
 }
-
 export interface LibraryReadResult {
   status: 'read';
   sourceHandle: string;
@@ -2318,7 +2159,9 @@ export interface LibraryReadResult {
   title: string;
   content: string;
   /** Returned only when requested by the Agent for a full source-version read. */
-  contentIR?: import('./project-ir.js').ProjectContentIR;
+  bindings?: import('./prompt-bindings.js').PromptBindingIR;
+  /** Voice audition text returned with an explicit source-version read. */
+  sampleText?: string;
   characterCount: number;
   truncated: boolean;
   citationLabel: string;
@@ -2334,7 +2177,6 @@ export interface LibraryReadResult {
   structurePath?: string[];
   structureNodeId?: string;
 }
-
 export interface AgentLibrarySourceInfo {
   citationLabel: string;
   title: string;
@@ -2348,7 +2190,6 @@ export interface AgentLibrarySourceInfo {
   structureNodeId?: string;
   toolName: 'library.search' | 'library.read';
 }
-
 export interface ContextSourceInfo {
   id: string;
   type: 'document' | 'memory' | 'constraint' | 'conversation' | 'catalog';
@@ -2363,7 +2204,6 @@ export interface ContextSourceInfo {
   status?: LibrarySourceStatus;
   sourceType?: LibrarySourceType;
 }
-
 export interface ProductionContextInfo {
   version: 1;
   scopeType: ConversationScopeType;
@@ -2376,7 +2216,6 @@ export interface ProductionContextInfo {
   /** Metadata-only structure directory; bodies remain on-demand. */
   structure?: ProjectStructureSnapshot;
 }
-
 /** Project-wide resource map exposed to the System Agent before it selects a tool. */
 export type ProjectResourceKind =
   | 'project'
@@ -2390,7 +2229,6 @@ export type ProjectResourceKind =
   | 'asset'
   | 'conversation'
   | 'settings';
-
 export interface ProjectStructureResource {
   id: string;
   kind: ProjectResourceKind;
@@ -2425,7 +2263,6 @@ export interface ProjectStructureResource {
   };
   children?: ProjectStructureResource[];
 }
-
 export interface ProjectStructureResult {
   version: 1;
   projectId: string;
@@ -2434,28 +2271,22 @@ export interface ProjectStructureResult {
   resources: ProjectStructureResource[];
   truncated: boolean;
 }
-
 export interface ContextPreviewParams {
   conversationId: string;
   budgetTokens?: number;
 }
-
 export interface LlmStatusResult {
   provider: string;
   model: string;
   configured: boolean;
   configurationSource: 'environment' | 'none' | 'managed';
 }
-
 export type LlmGenerationStatus = 'prepared' | 'streaming' | 'complete' | 'failed' | 'cancelled';
-
 export type LlmExecutionMode = 'legacy' | 'native';
-
 export interface LlmGenerateParams extends ContextPreviewParams {
   prompt: string;
   idempotencyKey?: string;
 }
-
 export interface LlmGenerationInfo {
   generationId: string;
   attemptId?: string;
@@ -2475,17 +2306,14 @@ export interface LlmGenerationInfo {
   error?: string;
   retryable?: boolean;
 }
-
 export interface LlmGenerationGetParams {
   generationId: string;
 }
-
 export interface LlmGenerationRetryParams {
   assistantMessageId: string;
   budgetTokens?: number;
   idempotencyKey?: string;
 }
-
 export interface LlmGenerationIdentity {
   generationId: string;
   attemptId: string;
@@ -2493,7 +2321,6 @@ export interface LlmGenerationIdentity {
   projectSessionId: string;
   conversationId: string;
 }
-
 /** Local attachment content supplied to a multimodal Agent invocation. */
 export interface LlmInputAttachment {
   name: string;
@@ -2502,7 +2329,6 @@ export interface LlmInputAttachment {
   dataUrl?: string;
   text?: string;
 }
-
 export interface LlmGenerationPrepareParams extends ContextPreviewParams {
   taskExecution?: 'ordered' | 'parallel';
   prompt: string;
@@ -2511,17 +2337,14 @@ export interface LlmGenerationPrepareParams extends ContextPreviewParams {
   attachments?: LlmInputAttachment[];
   idempotencyKey?: string;
 }
-
 export interface LlmGenerationRetryPrepareParams extends LlmGenerationRetryParams {
   providerProfileId: string;
   modelId: string;
 }
-
 export interface LlmGenerationPrepareResult {
   generation: LlmGenerationInfo;
   stream: LlmGenerationIdentity;
 }
-
 export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
   /** Bounded completed turns, rebuilt locally without opaque provider history. */
   contextTurns?: LlmChatToolTurn[];
@@ -2542,14 +2365,12 @@ export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
   tools?: LlmToolDefinition[];
   continuation?: LlmToolContinuation;
 }
-
 export interface LlmInferenceSettings {
   maxOutputTokens: number;
   outputTokenParameter: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** No provider-specific reasoning capability has been declared. */
   reasoning: 'provider_default';
 }
-
 export interface LlmToolDefinition {
   name: string;
   description: string;
@@ -2559,21 +2380,21 @@ export interface LlmToolDefinition {
   /** Worker-owned scheduling metadata; never part of the Provider tool schema. */
   executionLane?: AgentToolExecutionLane;
 }
-
 export interface LlmToolCall {
   id: string;
   name: string;
   argumentsJson: string;
   authorizationHandle?: string;
 }
-
 export interface LlmToolOutput {
   callId: string;
   output: string;
   /** Bounded, transient visual tool input; never stored in the textual audit result. */
-  images?: Array<{ mimeType: string; data: string }>;
+  images?: Array<{
+    mimeType: string;
+    data: string;
+  }>;
 }
-
 export interface LlmResponsesToolContinuation {
   protocol: 'openai-responses';
   previousResponseId: string;
@@ -2581,7 +2402,6 @@ export interface LlmResponsesToolContinuation {
   /** New user input after this response's completed tool outputs. */
   userMessages?: string[];
 }
-
 export interface LlmChatToolTurn {
   content?: string;
   calls: Array<Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>>;
@@ -2589,7 +2409,6 @@ export interface LlmChatToolTurn {
   /** User messages following this completed assistant/tool turn, in order. */
   userMessages?: string[];
 }
-
 export interface LlmChatCompletionsToolContinuation {
   protocol: 'openai-chat-completions';
   providerResponseId: string;
@@ -2600,14 +2419,12 @@ export interface LlmChatCompletionsToolContinuation {
   outputs: LlmToolOutput[];
   userMessages?: string[];
 }
-
 export type LlmToolContinuation = LlmResponsesToolContinuation | LlmChatCompletionsToolContinuation;
-
 /** Maximum UTF-8 size of one JSONL message on the Worker <-> Native host channel. */
 export const SIDECAR_ENVELOPE_MAX_BYTES = 2 * 1024 * 1024;
-
 export type HostMethod =
   | 'provider.dubbing.speech'
+  | 'provider.dubbing.voiceDesign'
   | 'provider.dubbing.submit'
   | 'provider.dubbing.poll'
   | 'provider.dubbing.cancel'
@@ -2618,7 +2435,6 @@ export type HostMethod =
   | 'provider.media.cancel'
   | 'provider.confirmation.wait'
   | 'provider.confirmation.resolve';
-
 /** Provider request data that is safe to cross the sidecar boundary. Credentials and headers are absent. */
 export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
   contextTurns?: LlmChatToolTurn[];
@@ -2640,12 +2456,10 @@ export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
         calls: Array<Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>>;
       });
 }
-
 export interface NativeProviderStreamCancelParams {
   streamRequestId: string;
   projectSessionId: string;
 }
-
 export interface NativeProviderMediaSubmitParams {
   baseUrl?: string;
   operationId?: string;
@@ -2659,7 +2473,6 @@ export interface NativeProviderMediaSubmitParams {
   inputs?: MediaInputReferenceV1[];
   kind: MediaGenerationKind;
 }
-
 export interface NativeProviderMediaCancelParams {
   baseUrl?: string;
   operationId?: string;
@@ -2669,18 +2482,14 @@ export interface NativeProviderMediaCancelParams {
   providerRegion: VideoProviderRegion;
   providerTaskId: string;
 }
-
 export type NativeProviderMediaPollParams = NativeProviderMediaCancelParams;
-
 export type NativeProviderMediaTaskState =
   'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-
 export interface NativeProviderMediaOutput {
   type: 'native_temporary_file';
   path: string;
   contentType?: string;
 }
-
 export interface NativeProviderMediaPollResult {
   providerStatus: number;
   state: NativeProviderMediaTaskState;
@@ -2695,18 +2504,16 @@ export interface NativeProviderMediaPollResult {
   };
   retryAfterMs?: number;
 }
-
 export interface NativeProviderConfirmationWaitParams {
   confirmationToken: string;
   projectSessionId: string;
 }
-
 export interface NativeProviderConfirmationResolveParams extends NativeProviderConfirmationWaitParams {
   approved: boolean;
 }
-
 export type HostMethodParams = {
   'provider.dubbing.speech': NativeDubbingSpeechParams;
+  'provider.dubbing.voiceDesign': NativeVoiceDesignParams;
   'provider.dubbing.submit': NativeDubbingSubmitParams;
   'provider.dubbing.poll': NativeDubbingPollParams;
   'provider.dubbing.cancel': NativeDubbingCancelParams;
@@ -2718,7 +2525,6 @@ export type HostMethodParams = {
   'provider.confirmation.wait': NativeProviderConfirmationWaitParams;
   'provider.confirmation.resolve': NativeProviderConfirmationResolveParams;
 };
-
 export interface HostError {
   code:
     | 'INVALID_ENVELOPE'
@@ -2742,7 +2548,6 @@ export interface HostError {
   providerTaskId?: string;
   providerStatus?: number;
 }
-
 export type NativeProviderHostEvent =
   | {
       type: 'request_progress';
@@ -2751,42 +2556,93 @@ export type NativeProviderHostEvent =
       argumentBytes?: number;
       toolName?: string;
       receivedBytes?: number;
+      /** Elapsed in the Native process, measured with its own monotonic clock. */
+      nativeElapsedMs?: number;
       requestBodyHash?: string;
       requestBodyBytes?: number;
       wireContext?: NativeWireContext;
     }
-  | { type: 'started'; projectSessionId: string }
-  | { type: 'text_delta'; projectSessionId: string; delta: string }
-  | { type: 'thinking_delta'; projectSessionId: string; delta: string }
-  | { type: 'tool_call_start'; projectSessionId: string; callId: string; name: string }
-  | { type: 'tool_call_delta'; projectSessionId: string; callId: string; delta: string }
+  | {
+      type: 'started';
+      projectSessionId: string;
+    }
+  | {
+      type: 'text_delta';
+      projectSessionId: string;
+      delta: string;
+    }
+  | {
+      type: 'thinking_delta';
+      projectSessionId: string;
+      delta: string;
+    }
+  | {
+      type: 'tool_call_start';
+      projectSessionId: string;
+      callId: string;
+      name: string;
+    }
+  | {
+      type: 'tool_call_delta';
+      projectSessionId: string;
+      callId: string;
+      delta: string;
+    }
   | {
       type: 'tool_call_end';
       projectSessionId: string;
       call: Pick<LlmToolCall, 'id' | 'name' | 'argumentsJson'>;
     }
-  | { type: 'usage'; projectSessionId: string; usage: NormalizedLlmUsage }
+  | {
+      type: 'usage';
+      projectSessionId: string;
+      usage: NormalizedLlmUsage;
+    }
   | {
       type: 'complete';
       projectSessionId: string;
       providerResponseId?: string;
       finishReason?: string;
     }
-  | { type: 'failed'; projectSessionId: string; error: HostError }
-  | { type: 'cancelled'; projectSessionId: string };
-
+  | {
+      type: 'failed';
+      projectSessionId: string;
+      error: HostError;
+    }
+  | {
+      type: 'cancelled';
+      projectSessionId: string;
+    };
 export type SidecarEnvelope =
-  | { kind: 'worker.response'; requestId: string; payload: WorkerResponse }
-  | { kind: 'host.request'; requestId: string; method: HostMethod; params: unknown }
+  | {
+      kind: 'worker.response';
+      requestId: string;
+      payload: WorkerResponse;
+    }
+  | {
+      kind: 'host.request';
+      requestId: string;
+      method: HostMethod;
+      params: unknown;
+    }
   | {
       kind: 'host.event';
       requestId: string;
       sequence: number;
       event: NativeProviderHostEvent;
     }
-  | { kind: 'host.response'; requestId: string; ok: true; result: unknown }
-  | { kind: 'host.response'; requestId: string; ok: false; error: HostError };
-
+  | {
+      kind: 'host.response';
+      requestId: string;
+      ok: true;
+      result: unknown;
+    }
+  | {
+      kind: 'host.response';
+      requestId: string;
+      ok: false;
+      error: HostError;
+    };
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
   /** Legacy Desktop hint. Runtime always uses the project System Agent. */
   agentMode: 'document' | 'novel-writing' | 'short-drama';
@@ -2796,6 +2652,9 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
   targetPlatform?: ConversationTargetPlatform;
   /** Optional trusted workflow selected by a first-party production action. */
   productionSkillId?: ProductionSkillId;
+  productionWorkflowVersion?: 2;
+  productionSources?: import('./production-bundle.js').ProductionBundleSource[];
+  productionRequestedAt?: string;
   /**
    * External research is opt-out for explicit Agent document tasks. The Worker
    * still enforces the selected mode when deciding which tools to authorize.
@@ -2810,11 +2669,9 @@ export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams
   /** Trusted Desktop intent. Provider tool arguments never carry these targets. */
   novelIntent?: NovelWritingIntent;
 }
-
 /** Capabilities that the unified conversational Agent may route to. */
 export type UnifiedAgentCapability =
   'text' | 'image' | 'video' | 'document' | 'novel' | 'short-drama' | 'research' | 'asset' | 'auto';
-
 /**
  * A deterministic UI/offline hint only. The selected LLM remains responsible
  * for semantic intent and tool selection, and Worker policy remains
@@ -2845,7 +2702,6 @@ export function inferUnifiedAgentCapabilityHint(prompt: string): UnifiedAgentCap
   if (/(小说|章节|续写|短剧|剧本|场次|镜头)/u.test(value)) return 'document';
   return 'text';
 }
-
 export interface UnifiedAgentModelCandidate {
   providerProfileId: string;
   providerName: string;
@@ -2857,7 +2713,6 @@ export interface UnifiedAgentModelCandidate {
   /** False when the model exists but its parameter schema still needs configuration. */
   schemaReady?: boolean;
 }
-
 export interface UnifiedAgentRunParams {
   /** Internal batch jobs may pin a dependency; ordinary user messages leave this unset so the Agent routes them. */
   taskExecution?: 'ordered' | 'parallel';
@@ -2882,19 +2737,20 @@ export interface UnifiedAgentRunParams {
   targetPlatform?: ConversationTargetPlatform;
   /** Optional trusted workflow selected by a first-party production action. */
   productionSkillId?: ProductionSkillId;
+  productionWorkflowVersion?: 2;
+  productionSources?: import('./production-bundle.js').ProductionBundleSource[];
+  productionRequestedAt?: string;
   researchMode?: AgentResearchMode;
   novelIntent?: NovelWritingIntent;
   budgetTokens?: number;
   idempotencyKey?: string;
 }
-
 export interface UnifiedAgentModelSelectionRequest {
   prompt: string;
   capability: UnifiedAgentCapability;
   models: UnifiedAgentModelCandidate[];
   reason?: 'missing_model' | 'model_unavailable' | 'capability_mismatch' | 'agent_tools_required';
 }
-
 export type UnifiedAgentRunResult =
   | {
       status: 'needs_model_selection';
@@ -2928,8 +2784,10 @@ export type UnifiedAgentRunResult =
       capability: UnifiedAgentCapability;
       pendingIntent: AgentPendingIntentInfo;
     }
-  | ({ status: 'started'; capability: UnifiedAgentCapability } & AgentGenerationPrepareResult);
-
+  | ({
+      status: 'started';
+      capability: UnifiedAgentCapability;
+    } & AgentGenerationPrepareResult);
 /** Versioned, model-proposed business plan. Authority fields are injected by the Worker. */
 export type ConversationTaskMode = 'document' | 'novel-writing' | 'short-drama';
 export type ConversationTaskAction = 'generate' | 'revise' | 'analyze';
@@ -2941,13 +2799,11 @@ export type ConversationDeliverableKind =
   | 'scene-shot-structure'
   | 'shot-prompts'
   | 'production-notes';
-
 export interface ConversationTaskDeliverableV1 {
   kind: ConversationDeliverableKind;
   required: boolean;
   dependsOn: ConversationDeliverableKind[];
 }
-
 export interface ConversationTaskPlanV1 {
   version: 1;
   mode: ConversationTaskMode;
@@ -2956,7 +2812,6 @@ export interface ConversationTaskPlanV1 {
   deliverables: ConversationTaskDeliverableV1[];
   constraints: string[];
 }
-
 export interface ConversationTaskStepV2 {
   /** Model-owned stable identifier used only inside this plan. */
   id: string;
@@ -2966,20 +2821,16 @@ export interface ConversationTaskStepV2 {
   dependsOn: string[];
   constraints: string[];
 }
-
 /** Generic plan for cross-domain or dependent Worker tool operations. */
 export interface ConversationTaskPlanV2 {
   version: 2;
   steps: ConversationTaskStepV2[];
   constraints: string[];
 }
-
 export type ConversationTaskPlan = ConversationTaskPlanV1 | ConversationTaskPlanV2;
-
 export type ConversationTaskPlanStatus = 'frozen' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 export type ConversationDeliverableStatus =
   'pending' | 'ready' | 'in_progress' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
-
 export type ConversationTaskPlanErrorCode =
   | 'TASK_PLAN_INVALID_TYPE'
   | 'TASK_PLAN_UNKNOWN_FIELD'
@@ -3007,20 +2858,19 @@ export type ConversationTaskPlanErrorCode =
   | 'TASK_PACKAGE_ENTITY_INVALID'
   | 'TASK_PACKAGE_INCOMPLETE'
   | 'TASK_PACKAGE_FOLLOW_UP_LIMIT';
-
 export type ConversationTaskToolName =
   | 'task.plan.submit'
   | 'novel.episode.submit_draft'
   | 'document.create_draft'
   | 'novel.episode.submit_structure'
   | 'task.package.complete';
-
 export interface ConversationTaskToolGrant {
   deliverableId?: string;
   deliverableKind?: ConversationDeliverableKind;
-  tool: LlmToolDefinition & { name: ConversationTaskToolName };
+  tool: LlmToolDefinition & {
+    name: ConversationTaskToolName;
+  };
 }
-
 export interface DomainToolResultV1 {
   version: 1;
   status: 'succeeded' | 'rejected' | 'needs_confirmation' | 'conflicted';
@@ -3031,7 +2881,6 @@ export interface DomainToolResultV1 {
   remainingRequiredDeliverables: string[];
   retryable: boolean;
 }
-
 export interface ConversationPackageCompleteResult {
   complete: boolean;
   taskStatus?: 'waiting_review' | 'completed' | 'failed';
@@ -3042,7 +2891,6 @@ export interface ConversationPackageCompleteResult {
     missingDeliverables: string[];
   };
 }
-
 export interface ConversationTaskPlanInfo {
   id: string;
   taskId: string;
@@ -3066,9 +2914,7 @@ export interface ConversationTaskPlanInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export type AgentResearchMode = 'auto' | 'project_only' | 'network_disabled';
-
 export type AgentGenerationPrepareResult =
   | (LlmGenerationPrepareResult & {
       agentTaskId: string;
@@ -3077,10 +2923,10 @@ export type AgentGenerationPrepareResult =
       /** Worker-selected internal workflow; never a user-visible Agent mode. */
       runtimeMode?: ConversationTaskMode;
     })
-  | { pendingIntent: AgentPendingIntentInfo };
-
+  | {
+      pendingIntent: AgentPendingIntentInfo;
+    };
 export type NovelWritingAction = 'create_chapter' | 'continue_chapter' | 'rewrite_chapter';
-
 export interface NovelWritingIntent {
   action?: NovelWritingAction;
   chapterId?: string;
@@ -3088,13 +2934,11 @@ export interface NovelWritingIntent {
   chapterTitle?: string;
   displayLabel?: string;
 }
-
 export {
   splitNovelChapterCreationRequest,
   hasMultipleNovelChapterTargets,
   type NovelChapterRequest,
 } from './novel-chapter-requests.js';
-
 export interface AgentPendingIntentInfo {
   id: string;
   projectId: string;
@@ -3106,22 +2950,18 @@ export interface AgentPendingIntentInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ConversationRuntimeStartParams extends LlmGenerationIdentity {
   taskId: string;
   mode: ConversationTaskMode;
   prompt: string;
 }
-
 export interface ConversationRuntimeStartResult {
   runtime: 'pi';
   taskId: string;
 }
-
 export interface ConversationRuntimeGetParams {
   generationId: string;
 }
-
 export interface ConversationRuntimeLiveAction {
   id: string;
   toolName: string;
@@ -3130,7 +2970,6 @@ export interface ConversationRuntimeLiveAction {
   argumentBytes?: number;
   lastActivityAt?: string;
 }
-
 export interface ConversationRuntimeGetResult {
   active: boolean;
   liveActions?: ConversationRuntimeLiveAction[];
@@ -3138,46 +2977,37 @@ export interface ConversationRuntimeGetResult {
   mediaSelection?: MediaModelSelectionRequest;
   mediaSubmission?: MediaSubmissionConfirmationRequest;
 }
-
 export interface ConversationRuntimeConfirmParams {
   generationId: string;
   confirmationToken: string;
   approved: boolean;
 }
-
 export interface ConversationRuntimeConfirmResult {
   accepted: boolean;
 }
-
 export interface ConversationRuntimeSelectMediaParams {
   generationId: string;
   selectionToken: string;
   selection?: MediaModelSelectionDecision;
 }
-
 export interface ConversationRuntimeSelectMediaResult {
   accepted: boolean;
 }
-
 export interface ConversationRuntimeConfirmMediaSubmissionParams {
   generationId: string;
   jobId: string;
   confirmationToken: string;
   approved: boolean;
 }
-
 export interface ConversationRuntimeConfirmMediaSubmissionResult {
   accepted: boolean;
 }
-
 export interface NovelPendingIntentListParams {
   includeResolved?: boolean;
 }
-
 export interface NovelPendingIntentCancelParams {
   intentId: string;
 }
-
 export interface AgentPartialArtifactInfo {
   id: string;
   taskId: string;
@@ -3191,22 +3021,18 @@ export interface AgentPartialArtifactInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface AgentPartialArtifactListParams {
   includeTerminal?: boolean;
 }
-
 export interface AgentPartialArtifactRecoverParams {
   artifactId: string;
   expectedRowVersion: number;
   expectedDocumentRowVersion: number;
 }
-
 export interface AgentPartialArtifactDiscardParams {
   artifactId: string;
   expectedRowVersion: number;
 }
-
 export interface NovelAdaptationProposalInfo {
   id: string;
   projectId: string;
@@ -3218,7 +3044,6 @@ export interface NovelAdaptationProposalInfo {
   adaptationTaskId: string;
   createdAt: string;
 }
-
 export type AgentDocumentOperation =
   | 'adapter.schema.get'
   | 'adapter.schema.propose'
@@ -3234,19 +3059,16 @@ export type AgentDocumentOperation =
   | 'novel.adaptation.submit_proposal'
   | 'novel.episode.submit_draft'
   | 'novel.episode.submit_structure';
-
 export interface AgentDocumentIntent {
   operation: AgentDocumentOperation;
   /** Required for read, update, archive, and restore. */
   documentId?: string;
 }
-
 export interface AgentGenerationExecuteToolsParams extends LlmGenerationIdentity {
   providerResponseId: string;
   calls: LlmToolCall[];
   usage?: NormalizedLlmUsage;
 }
-
 export interface AgentGenerationExecuteToolsResult {
   continuation?: LlmToolContinuation;
   confirmation?: AgentToolConfirmationRequest;
@@ -3257,7 +3079,6 @@ export interface AgentGenerationExecuteToolsResult {
   /** Tools authorized for the next Provider step, including read-only research. */
   tools?: LlmToolDefinition[];
 }
-
 export type MediaGenerationKind = 'image' | 'video';
 export type MediaProviderType =
   'unicompapi' | 'vidu' | 'wan-video' | 'seedance-video' | 'minimax-video' | 'openai' | 'custom';
@@ -3270,7 +3091,6 @@ export type MediaProviderBaseUrlCategory =
   | 'official-wan'
   | 'official-seedance'
   | 'official-minimax-video';
-
 export interface MediaModelSelectionSnapshot {
   providerBaseUrl?: string;
   providerProfileId: string;
@@ -3286,7 +3106,6 @@ export interface MediaModelSelectionSnapshot {
   contractRevision?: number;
   contractStatus?: ModelCatalogStatus;
 }
-
 export interface MediaModelCandidate {
   providerProfileId: string;
   providerName: string;
@@ -3299,9 +3118,11 @@ export interface MediaModelCandidate {
   contractRevision?: number;
   contractStatus?: ModelCatalogStatus;
   adapters: AdapterDescriptor[];
-  costNotice: { required: true; summary: string };
+  costNotice: {
+    required: true;
+    summary: string;
+  };
 }
-
 /** Worker-created UI request. It is never included in a Provider Tool Result. */
 export interface MediaModelSelectionRequest {
   selectionToken: string;
@@ -3313,7 +3134,6 @@ export interface MediaModelSelectionRequest {
   candidates: MediaModelCandidate[];
   expiresAt: string;
 }
-
 export interface MediaModelSelectionDecision {
   /** Sent by the reviewed generation form: authorizes submission of these exact parameters. */
   providerProfileId: string;
@@ -3322,12 +3142,10 @@ export interface MediaModelSelectionDecision {
   parameters: AdapterParameters;
   assetKind?: ImageAssetKind | VideoAssetKind;
 }
-
 export interface AgentGenerationSelectMediaParams extends LlmGenerationIdentity {
   selectionToken: string;
   selection?: MediaModelSelectionDecision;
 }
-
 export interface MediaGenerationDraft {
   draftId: string;
   kind: MediaGenerationKind;
@@ -3337,9 +3155,11 @@ export interface MediaGenerationDraft {
   mediaModelSelection: MediaModelSelectionSnapshot;
   normalizedParameters: AdapterParameters;
   missingParameters: string[];
-  costNotice: { required: true; summary: string };
+  costNotice: {
+    required: true;
+    summary: string;
+  };
 }
-
 export interface MediaTaskSummary {
   taskId: string;
   kind: MediaGenerationKind;
@@ -3350,7 +3170,6 @@ export interface MediaTaskSummary {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface MediaSubmissionConfirmationRequest {
   confirmationToken: string;
   jobId: string;
@@ -3359,45 +3178,44 @@ export interface MediaSubmissionConfirmationRequest {
   providerName: string;
   modelName: string;
   adapterKey: string;
-  parameterSummary: Array<{ key: string; value: string }>;
-  costNotice: { required: true; summary: string };
+  parameterSummary: Array<{
+    key: string;
+    value: string;
+  }>;
+  costNotice: {
+    required: true;
+    summary: string;
+  };
   expiresAt: string;
 }
-
 export interface MediaTaskCancellationOutcome {
   localCancelled: true;
   provider: 'not_submitted' | 'cancelled' | 'unsupported' | 'rejected' | 'unknown';
   providerStatus?: number;
 }
-
 export interface MediaSubmissionRequestParams {
   jobId: string;
 }
-
 export interface MediaSubmissionConfirmParams {
   jobId: string;
   confirmationToken: string;
   approved: boolean;
 }
-
 export interface MediaSubmissionResult {
   kind: MediaGenerationKind;
   job: ImageGenerationJobInfo | VideoGenerationJobInfo;
   confirmation?: MediaSubmissionConfirmationRequest;
   cancellation?: MediaTaskCancellationOutcome;
 }
-
 export interface AgentGenerationConfirmMediaSubmissionParams extends LlmGenerationIdentity {
   jobId: string;
   confirmationToken: string;
   approved: boolean;
 }
-
 export interface MediaTaskCancelParams {
   jobId: string;
   projectSessionId?: string;
 }
-
 export interface AgentToolConfirmationRequest extends AgentConfirmationRequestV1 {
   confirmationToken: string;
   /** Compatibility alias for operation used by existing Desktop callers. */
@@ -3405,30 +3223,24 @@ export interface AgentToolConfirmationRequest extends AgentConfirmationRequestV1
   documentId?: string;
   documentTitle?: string;
 }
-
 export interface AgentGenerationConfirmToolParams extends LlmGenerationIdentity {
   confirmationToken: string;
   approved: boolean;
 }
-
 export interface AgentGenerationConfirmToolResult {
   continuation?: LlmToolContinuation;
   /** Tools authorized for the Provider step created after confirmation. */
   tools?: LlmToolDefinition[];
 }
-
 export interface AgentProviderStepCompleteParams extends LlmGenerationIdentity {
   providerResponseId?: string;
   finishReason?: string;
   usage?: NormalizedLlmUsage;
 }
-
 export type AgentProviderStepStartParams = LlmGenerationIdentity;
-
 export interface LlmGenerationObserveParams extends LlmGenerationIdentity {
   content: string;
 }
-
 export interface NormalizedLlmUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
@@ -3438,12 +3250,10 @@ export interface NormalizedLlmUsage {
   providerReportedCost?: ProviderReportedCostInfo;
   raw?: Record<string, unknown>;
 }
-
 export interface ProviderReportedCostInfo {
   amount: string;
   currency?: string;
 }
-
 export interface LlmPricingSnapshotInfo {
   currency: string;
   unitTokens: number;
@@ -3452,7 +3262,6 @@ export interface LlmPricingSnapshotInfo {
   outputPrice: string;
   configuredAt: string;
 }
-
 export interface LlmAttemptInfo {
   accounting?: LlmUsageAccounting;
   id: string;
@@ -3476,13 +3285,11 @@ export interface LlmAttemptInfo {
   errorCode?: string;
   errorMessage?: string;
 }
-
 export interface LlmGenerationCompleteParams extends LlmGenerationObserveParams {
   providerResponseId?: string;
   finishReason?: string;
   usage?: NormalizedLlmUsage;
 }
-
 export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
   error: string;
   retryable: boolean;
@@ -3491,11 +3298,18 @@ export interface LlmGenerationFailParams extends LlmGenerationObserveParams {
   providerStatus?: number;
   usage?: NormalizedLlmUsage;
 }
-
 export type LlmNativeStreamEvent =
-  | { type: 'started' }
-  | { type: 'delta'; delta: string }
-  | { type: 'confirmation'; confirmation: AgentToolConfirmationRequest }
+  | {
+      type: 'started';
+    }
+  | {
+      type: 'delta';
+      delta: string;
+    }
+  | {
+      type: 'confirmation';
+      confirmation: AgentToolConfirmationRequest;
+    }
   | {
       type: 'toolCalls';
       calls: LlmToolCall[];
@@ -3516,8 +3330,10 @@ export type LlmNativeStreamEvent =
       providerStatus?: number;
       usage?: NormalizedLlmUsage;
     }
-  | { type: 'cancelled'; usage?: NormalizedLlmUsage };
-
+  | {
+      type: 'cancelled';
+      usage?: NormalizedLlmUsage;
+    };
 export interface UsageQueryParams {
   startAt: string;
   endAt: string;
@@ -3526,7 +3342,6 @@ export interface UsageQueryParams {
   projectId?: string;
   status?: 'complete' | 'failed' | 'cancelled';
 }
-
 export interface UsageEntryInfo {
   accounting?: LlmUsageAccounting;
   providerReportedCost?: ProviderReportedCostInfo;
@@ -3547,7 +3362,6 @@ export interface UsageEntryInfo {
   currency?: string;
   createdAt: string;
 }
-
 export interface UsageCurrencySummary {
   currency: string;
   attempts: number;
@@ -3559,8 +3373,13 @@ export interface UsageCurrencySummary {
   estimatedCost: string;
   partial?: boolean;
 }
-
 export interface LlmRequestUsageInfo {
+  /** First observation of each stage; clocks must never be subtracted across processes. */
+  timing?: {
+    hostRequestId?: string;
+    workerFirstMs: Record<string, number>;
+    nativeFirstMs: Record<string, number>;
+  };
   modelSelection?: {
     providerProfileId?: string;
     modelId?: string;
@@ -3582,7 +3401,6 @@ export interface LlmRequestUsageInfo {
   errorCode?: string;
   failureOrigin?: 'local_context' | 'bridge' | 'provider';
 }
-
 export interface NativeWireContext {
   limitEnforcement?: 'verified_capability' | 'advisory_fallback' | 'legacy_unmanaged';
   estimatedInputTokens: number;
@@ -3598,7 +3416,6 @@ export interface NativeWireContext {
   requestedOutputTokens?: number;
   capabilitySource: string;
 }
-
 export interface LlmRequestContextInfo {
   limitEnforcement?: 'verified_capability' | 'advisory_fallback';
   nativeWire?: NativeWireContext;
@@ -3618,9 +3435,15 @@ export interface LlmRequestContextInfo {
   effectiveInputBudgetTokens?: number;
   deficitTokens?: number;
   compactionCount: number;
-  sections: Record<string, { bytes: number; hash: string; estimatedTokens: number }>;
+  sections: Record<
+    string,
+    {
+      bytes: number;
+      hash: string;
+      estimatedTokens: number;
+    }
+  >;
 }
-
 export interface LlmUsageAccounting {
   version: 1;
   generationId: string;
@@ -3636,18 +3459,15 @@ export interface LlmUsageAccounting {
   cacheReportedRequests: number;
   estimatedCostCoverage: 'complete' | 'partial' | 'unknown';
 }
-
 export interface UsageQueryResult {
   entries: UsageEntryInfo[];
   summaries: UsageCurrencySummary[];
 }
-
 export interface UsageRebuildResult {
   projectsScanned: number;
   projectsSkipped: number;
   attemptsIndexed: number;
 }
-
 export type GenerationCapability =
   | 'TEXT_TO_AUDIO'
   | 'TEXT_TO_IMAGE'
@@ -3657,16 +3477,16 @@ export type GenerationCapability =
   | 'REFERENCE_TO_VIDEO'
   | 'VIDEO_TO_VIDEO'
   | 'START_END_TO_VIDEO';
-
 export type AdapterParameterValue =
   | string
   | number
   | boolean
   | null
   | AdapterParameterValue[]
-  | { [key: string]: AdapterParameterValue };
+  | {
+      [key: string]: AdapterParameterValue;
+    };
 export type AdapterParameters = Record<string, AdapterParameterValue>;
-
 export interface AdapterParameterProperty {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object';
   title: string;
@@ -3696,7 +3516,6 @@ export interface AdapterParameterProperty {
   /** Retain nested official JSON Schema, including oneOf/contains/if constraints. */
   [keyword: string]: unknown;
 }
-
 export interface AdapterParameterSchema {
   $schema: 'https://json-schema.org/draft/2020-12/schema';
   type: 'object';
@@ -3707,10 +3526,8 @@ export interface AdapterParameterSchema {
   anyOf?: Record<string, unknown>[];
   oneOf?: Record<string, unknown>[];
 }
-
 export type AdapterControl =
   'text' | 'textarea' | 'select' | 'number' | 'toggle' | 'url-list' | 'structured';
-
 export interface AdapterUiField {
   key: string;
   control: AdapterControl;
@@ -3720,11 +3537,9 @@ export interface AdapterUiField {
   hidden?: boolean;
   placeholder?: string;
 }
-
 export interface AdapterUiSchema {
   fields: AdapterUiField[];
 }
-
 export interface AdapterDescriptor {
   key: string;
   capability: GenerationCapability;
@@ -3745,35 +3560,35 @@ export interface AdapterDescriptor {
   contractRevision?: number;
   bindingId?: string;
 }
-
 export interface AdapterCatalogResult {
-  capabilities: { key: GenerationCapability; label: string }[];
-  providers: { key: string; label: string }[];
+  capabilities: {
+    key: GenerationCapability;
+    label: string;
+  }[];
+  providers: {
+    key: string;
+    label: string;
+  }[];
   adapters: AdapterDescriptor[];
 }
-
 export interface AdapterResolveParams {
   capability: GenerationCapability;
   provider: string;
   model: string;
   apiVersion?: string;
 }
-
 export interface AdapterValidateParams {
   adapterKey: string;
   parameters: AdapterParameters;
 }
-
 export interface AdapterValidationError {
   path: string;
   message: string;
 }
-
 export interface AdapterValidationResult {
   valid: boolean;
   errors: AdapterValidationError[];
 }
-
 export interface GenerationDraftInfo {
   id: string;
   shotId: string;
@@ -3781,22 +3596,18 @@ export interface GenerationDraftInfo {
   parameters: AdapterParameters;
   updatedAt: string;
 }
-
 export interface GenerationDraftGetParams {
   shotId: string;
   adapterKey: string;
   providerProfileId?: string;
   modelId?: string;
 }
-
 export interface GenerationDraftSaveParams extends GenerationDraftGetParams {
   parameters: AdapterParameters;
 }
-
 export type ImageGenerationJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type ImageAssetKind =
   'character' | 'scene' | 'prop' | 'first-frame' | 'last-frame' | 'generated-image';
-
 export interface AssetInfo {
   id: string;
   projectId: string;
@@ -3812,7 +3623,6 @@ export interface AssetInfo {
   tags?: AssetTagInfo[];
   createdAt: string;
 }
-
 export interface ImageGenerationResultInfo {
   id: string;
   jobId: string;
@@ -3820,7 +3630,6 @@ export interface ImageGenerationResultInfo {
   providerUrl?: string;
   createdAt: string;
 }
-
 export interface ImagePreviewInfo {
   assetId?: string;
   jobId?: string;
@@ -3828,7 +3637,6 @@ export interface ImagePreviewInfo {
   contentType: string;
   sourceUrl?: string;
 }
-
 export interface ImageGenerationJobInfo {
   id: string;
   shotId?: string;
@@ -3842,7 +3650,6 @@ export interface ImageGenerationJobInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ImageGenerationPrepareParams {
   productionSource?: ProductionSource;
   shotId?: string;
@@ -3862,7 +3669,6 @@ export interface ImageGenerationPrepareParams {
   /** Worker-created submission parameters. IPC callers cannot provide this field. */
   mediaSubmissionParameters?: AdapterParameters;
 }
-
 export interface ImageGenerationCompleteParams {
   jobId: string;
   projectSessionId?: string;
@@ -3871,7 +3677,6 @@ export interface ImageGenerationCompleteParams {
   assetKind?: ImageAssetKind;
   saveAsset?: boolean;
 }
-
 export interface ImageGenerationSavePreviewParams {
   jobId: string;
   projectSessionId?: string;
@@ -3879,21 +3684,17 @@ export interface ImageGenerationSavePreviewParams {
   contentType: string;
   assetKind?: ImageAssetKind;
 }
-
 export interface ImageGenerationFailParams {
   jobId: string;
   projectSessionId?: string;
 }
-
 export interface ImageGenerationCancelParams {
   jobId: string;
   projectSessionId?: string;
 }
-
 export interface ImageGenerationGetParams {
   jobId: string;
 }
-
 export type VideoGenerationJobStatus =
   | 'pending'
   | 'polling'
@@ -3907,7 +3708,6 @@ export type VideoGenerationFailureKind =
   'transport' | 'provider' | 'download' | 'interrupted' | 'timeout';
 export type VideoAssetKind = 'generated-video' | 'shot-video' | 'scene-video';
 export type VideoProviderRegion = 'global' | 'cn' | 'unicompapi';
-
 export interface VideoGenerationCostInfo {
   amount: number;
   unit: 'credits' | 'unknown';
@@ -3915,7 +3715,6 @@ export interface VideoGenerationCostInfo {
   estimatedAmount?: string;
   currency?: string;
 }
-
 export interface VideoGenerationMetadataInfo {
   providerBaseUrl?: string;
   providerRegion: VideoProviderRegion;
@@ -3931,14 +3730,12 @@ export interface VideoGenerationMetadataInfo {
   failureKind?: VideoGenerationFailureKind;
   cost?: VideoGenerationCostInfo;
 }
-
 export interface VideoGenerationResultInfo {
   id: string;
   jobId: string;
   asset: AssetInfo;
   createdAt: string;
 }
-
 export interface VideoGenerationJobInfo {
   id: string;
   projectId: string;
@@ -3957,11 +3754,9 @@ export interface VideoGenerationJobInfo {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ProjectTaskSubscriptionParams {
   afterRevision?: number;
 }
-
 export interface ProjectTaskSnapshot {
   imageJobs?: ImageGenerationJobInfo[];
   projectId: string;
@@ -3972,7 +3767,6 @@ export interface ProjectTaskSnapshot {
   videoJobs: VideoGenerationJobInfo[];
   dubbingJobs?: DubbingJobInfo[];
 }
-
 export interface VideoGenerationPrepareParams {
   productionSource?: ProductionSource;
   shotId?: string;
@@ -3993,13 +3787,11 @@ export interface VideoGenerationPrepareParams {
   /** Worker-created submission parameters. IPC callers cannot provide this field. */
   mediaSubmissionParameters?: AdapterParameters;
 }
-
 export interface VideoGenerationAttachTaskParams {
   jobId: string;
   providerTaskId: string;
   projectSessionId?: string;
 }
-
 export interface VideoGenerationObserveParams {
   jobId: string;
   providerTaskId: string;
@@ -4007,19 +3799,16 @@ export interface VideoGenerationObserveParams {
   providerBody: unknown;
   projectSessionId?: string;
 }
-
 export interface VideoGenerationFailParams {
   jobId: string;
   failureKind: VideoGenerationFailureKind;
   message?: string;
   projectSessionId?: string;
 }
-
 export interface VideoGenerationJobParams {
   jobId: string;
   projectSessionId?: string;
 }
-
 export interface AssetListParams {
   kind?: string;
   sourceDocumentId?: string;
@@ -4034,17 +3823,14 @@ export interface AssetListParams {
   sort?: 'created-asc' | 'created-desc';
   cursor?: string;
 }
-
 export interface AssetRenameParams {
   assetId: string;
   name: string;
 }
-
 export interface AssetAliasUpdateParams {
   assetId: string;
   alias: string;
 }
-
 export interface AssetTagInfo {
   id: string;
   projectId: string;
@@ -4102,52 +3888,41 @@ export interface AssetGroupDeleteParams {
 export interface AssetGroupResolveParams {
   groupId: string;
 }
-
 export interface AssetDeleteParams {
   assetId: string;
   confirm?: boolean;
 }
-
 export interface AssetDeleteResult {
   deleted: true;
   referenceCount: number;
 }
-
 export interface AssetPurgeParams {
   assetId: string;
   confirm: boolean;
 }
-
 export interface AssetRestoreParams {
   assetId: string;
 }
-
 export interface AssetPreviewParams {
   assetId: string;
 }
-
 export interface AssetMediaSourceParams {
   assetId: string;
 }
-
 export interface AssetMediaSourceInfo {
   assetId: string;
   path: string;
   contentType: string;
 }
-
 export interface AssetRevealParams {
   assetId: string;
 }
-
 export interface AssetOpenParams {
   assetId: string;
 }
-
 export interface AssetRevealResult {
   path: string;
 }
-
 export interface AssetSourceInfo {
   assetId: string;
   jobId: string;
@@ -4155,7 +3930,6 @@ export interface AssetSourceInfo {
   sceneId?: string;
   sourceKind?: 'generation' | 'dubbing';
 }
-
 export interface WorkerMethodMap
   extends
     DubbingWorkerMethodMap,
@@ -4167,25 +3941,72 @@ export interface WorkerMethodMap
     ShotContinuityWorkerMethodMap,
     RoughCutWorkerMethodMap,
     FileTaskWorkerMethodMap {
-  'scene.media.resolve': { params: SceneMediaResolveParams; result: SceneMediaResolveResult };
-  'asset.thumbnail': { params: AssetMediaSourceParams; result: AssetMediaSourceInfo };
-  health: { params: Record<string, never>; result: HealthResult };
-  'sqlite.probe': { params: SqliteProbeParams; result: SqliteProbeResult };
-  'project.create': { params: ProjectCreateParams; result: ProjectInfo };
-  'project.createSample': { params: SampleProjectCreateParams; result: ProjectInfo };
-  'project.open': { params: ProjectOpenParams; result: ProjectInfo };
-  'project.close': { params: Record<string, never>; result: { closed: true } };
-  'project.current': { params: Record<string, never>; result: ProjectInfo | null };
-  'project.rename': { params: ProjectRenameParams; result: ProjectInfo };
+  'scene.media.resolve': {
+    params: SceneMediaResolveParams;
+    result: SceneMediaResolveResult;
+  };
+  'asset.thumbnail': {
+    params: AssetMediaSourceParams;
+    result: AssetMediaSourceInfo;
+  };
+  health: {
+    params: Record<string, never>;
+    result: HealthResult;
+  };
+  'sqlite.probe': {
+    params: SqliteProbeParams;
+    result: SqliteProbeResult;
+  };
+  'project.create': {
+    params: ProjectCreateParams;
+    result: ProjectInfo;
+  };
+  'project.createSample': {
+    params: SampleProjectCreateParams;
+    result: ProjectInfo;
+  };
+  'project.open': {
+    params: ProjectOpenParams;
+    result: ProjectInfo;
+  };
+  'project.close': {
+    params: Record<string, never>;
+    result: {
+      closed: true;
+    };
+  };
+  'project.current': {
+    params: Record<string, never>;
+    result: ProjectInfo | null;
+  };
+  'project.rename': {
+    params: ProjectRenameParams;
+    result: ProjectInfo;
+  };
   'project.structure.get': {
     params: ProjectStructureGetParams;
     result: ProjectStructureSnapshot;
   };
-  'project.recent': { params: Record<string, never>; result: RecentProjectInfo[] };
-  'project.integrity': { params: Record<string, never>; result: ProjectIntegrityResult };
-  'project.backup': { params: ProjectBackupParams; result: PathResult };
-  'project.export': { params: ProjectExportParams; result: PathResult };
-  'project.restore': { params: ProjectRestoreParams; result: ProjectInfo };
+  'project.recent': {
+    params: Record<string, never>;
+    result: RecentProjectInfo[];
+  };
+  'project.integrity': {
+    params: Record<string, never>;
+    result: ProjectIntegrityResult;
+  };
+  'project.backup': {
+    params: ProjectBackupParams;
+    result: PathResult;
+  };
+  'project.export': {
+    params: ProjectExportParams;
+    result: PathResult;
+  };
+  'project.restore': {
+    params: ProjectRestoreParams;
+    result: ProjectInfo;
+  };
   'provider.profile.list': {
     params: ProviderProfileListParams;
     result: ProviderProfileInfo[];
@@ -4278,18 +4099,30 @@ export interface WorkerMethodMap
     params: ProviderDefaultUpdateParams;
     result: ProviderDefaultInfo | null;
   };
-  'usage.list': { params: UsageQueryParams; result: UsageQueryResult };
-  'usage.rebuild': { params: Record<string, never>; result: UsageRebuildResult };
+  'usage.list': {
+    params: UsageQueryParams;
+    result: UsageQueryResult;
+  };
+  'usage.rebuild': {
+    params: Record<string, never>;
+    result: UsageRebuildResult;
+  };
   'maintenance.cache.inspect': {
     params: Record<string, never>;
     result: CacheInspectionResult;
   };
-  'maintenance.cache.clear': { params: Record<string, never>; result: CacheClearResult };
+  'maintenance.cache.clear': {
+    params: Record<string, never>;
+    result: CacheClearResult;
+  };
   'maintenance.researchCache.cleanup': {
     params: ResearchCacheCleanupParams;
     result: ResearchCacheCleanupResult;
   };
-  'maintenance.metrics': { params: Record<string, never>; result: WorkerMetricsSnapshot };
+  'maintenance.metrics': {
+    params: Record<string, never>;
+    result: WorkerMetricsSnapshot;
+  };
   'maintenance.contextSnapshots.cleanup': {
     params: ContextSnapshotCleanupParams;
     result: ContextSnapshotCleanupResult;
@@ -4302,74 +4135,181 @@ export interface WorkerMethodMap
     params: DiagnosticRevealParams;
     result: PathResult;
   };
-  'document.list': { params: Record<string, never>; result: DocumentSummary[] };
-  'document.archived.list': { params: Record<string, never>; result: DocumentSummary[] };
-  'novel.profile.get': { params: NovelProfileGetParams; result: NovelProfileInfo | null };
+  'document.list': {
+    params: Record<string, never>;
+    result: DocumentSummary[];
+  };
+  'document.archived.list': {
+    params: Record<string, never>;
+    result: DocumentSummary[];
+  };
+  'novel.profile.get': {
+    params: NovelProfileGetParams;
+    result: NovelProfileInfo | null;
+  };
   'novel.structure.get': {
     params: NovelStructureGetParams;
     result: NovelStructureSnapshot | null;
   };
-  'novel.profile.update': { params: NovelProfileUpdateParams; result: NovelProfileInfo };
-  'novel.volume.list': { params: NovelVolumeListParams; result: NovelVolumeInfo[] };
-  'novel.volume.save': { params: NovelVolumeSaveParams; result: NovelVolumeInfo };
-  'novel.chapter.list': { params: NovelChapterListParams; result: NovelChapterInfo[] };
-  'novel.chapter.save': { params: NovelChapterSaveParams; result: NovelChapterInfo };
-  'novel.chapter.archive': { params: NovelChapterArchiveParams; result: NovelChapterInfo };
-  'novel.chapter.restore': { params: NovelChapterRestoreParams; result: NovelChapterInfo };
-  'novel.import': { params: NovelImportParams; result: NovelImportResult };
-  'novel.binding.list': { params: NovelBindingListParams; result: NovelBindingInfo[] };
+  'novel.profile.update': {
+    params: NovelProfileUpdateParams;
+    result: NovelProfileInfo;
+  };
+  'novel.volume.list': {
+    params: NovelVolumeListParams;
+    result: NovelVolumeInfo[];
+  };
+  'novel.volume.save': {
+    params: NovelVolumeSaveParams;
+    result: NovelVolumeInfo;
+  };
+  'novel.chapter.list': {
+    params: NovelChapterListParams;
+    result: NovelChapterInfo[];
+  };
+  'novel.chapter.save': {
+    params: NovelChapterSaveParams;
+    result: NovelChapterInfo;
+  };
+  'novel.chapter.archive': {
+    params: NovelChapterArchiveParams;
+    result: NovelChapterInfo;
+  };
+  'novel.chapter.restore': {
+    params: NovelChapterRestoreParams;
+    result: NovelChapterInfo;
+  };
+  'novel.import': {
+    params: NovelImportParams;
+    result: NovelImportResult;
+  };
+  'novel.binding.list': {
+    params: NovelBindingListParams;
+    result: NovelBindingInfo[];
+  };
   'novel.context.consistencyReport': {
     params: Record<string, never>;
     result: NovelConsistencyReport;
   };
-  'novel.binding.save': { params: NovelBindingSaveParams; result: NovelBindingInfo };
+  'novel.binding.save': {
+    params: NovelBindingSaveParams;
+    result: NovelBindingInfo;
+  };
   'novel.export.prepare': {
     params: NovelMarkdownExportPrepareParams;
     result: NovelMarkdownExportJobInfo;
   };
-  'novel.export.reveal': { params: { jobId: string }; result: PathResult };
-  'novel.intent.list': { params: NovelPendingIntentListParams; result: AgentPendingIntentInfo[] };
-  'novel.intent.cancel': { params: NovelPendingIntentCancelParams; result: AgentPendingIntentInfo };
+  'novel.export.reveal': {
+    params: {
+      jobId: string;
+    };
+    result: PathResult;
+  };
+  'novel.intent.list': {
+    params: NovelPendingIntentListParams;
+    result: AgentPendingIntentInfo[];
+  };
+  'novel.intent.cancel': {
+    params: NovelPendingIntentCancelParams;
+    result: AgentPendingIntentInfo;
+  };
   'agent.partial.list': {
     params: AgentPartialArtifactListParams;
     result: AgentPartialArtifactInfo[];
   };
-  'agent.partial.recover': { params: AgentPartialArtifactRecoverParams; result: DocumentDetail };
+  'agent.partial.recover': {
+    params: AgentPartialArtifactRecoverParams;
+    result: DocumentDetail;
+  };
   'agent.partial.discard': {
     params: AgentPartialArtifactDiscardParams;
     result: AgentPartialArtifactInfo;
   };
-  'document.get': { params: DocumentGetParams; result: DocumentDetail };
-  'document.save': { params: DocumentSaveParams; result: DocumentDetail };
-  'document.draft.save': { params: DocumentDraftSaveParams; result: DocumentDetail };
-  'document.versions': { params: DocumentVersionsParams; result: DocumentVersionInfo[] };
-  'document.restore': { params: DocumentRestoreParams; result: DocumentDetail };
-  'document.archive': { params: DocumentArchiveParams; result: DocumentDetail };
-  'document.unarchive': { params: DocumentUnarchiveParams; result: DocumentDetail };
-  'document.review.submit': { params: DocumentReviewSubmitParams; result: DocumentReviewInfo };
+  'document.get': {
+    params: DocumentGetParams;
+    result: DocumentDetail;
+  };
+  'document.save': {
+    params: DocumentSaveParams;
+    result: DocumentDetail;
+  };
+  'document.draft.save': {
+    params: DocumentDraftSaveParams;
+    result: DocumentDetail;
+  };
+  'document.versions': {
+    params: DocumentVersionsParams;
+    result: DocumentVersionInfo[];
+  };
+  'document.restore': {
+    params: DocumentRestoreParams;
+    result: DocumentDetail;
+  };
+  'document.archive': {
+    params: DocumentArchiveParams;
+    result: DocumentDetail;
+  };
+  'document.unarchive': {
+    params: DocumentUnarchiveParams;
+    result: DocumentDetail;
+  };
+  'document.review.submit': {
+    params: DocumentReviewSubmitParams;
+    result: DocumentReviewInfo;
+  };
   'document.review.requestChanges': {
     params: DocumentReviewRequestChangesParams;
     result: DocumentReviewInfo;
   };
-  'document.review.reject': { params: DocumentReviewRejectParams; result: DocumentReviewInfo };
+  'document.review.reject': {
+    params: DocumentReviewRejectParams;
+    result: DocumentReviewInfo;
+  };
   'document.publish': {
     params: DocumentPublishParams;
-    result: { document: DocumentDetail; publication: DocumentPublicationInfo };
+    result: {
+      document: DocumentDetail;
+      publication: DocumentPublicationInfo;
+    };
   };
   'document.selfPublish': {
     params: DocumentSelfPublishParams;
-    result: { document: DocumentDetail; publication: DocumentPublicationInfo };
+    result: {
+      document: DocumentDetail;
+      publication: DocumentPublicationInfo;
+    };
   };
-  'document.unpublish': { params: DocumentUnpublishParams; result: DocumentDetail };
+  'document.unpublish': {
+    params: DocumentUnpublishParams;
+    result: DocumentDetail;
+  };
   'agent.task.createDocumentDraft': {
     params: AgentTaskCreateDocumentDraftParams;
     result: AgentTaskCreateDocumentDraftResult;
   };
-  'agent.task.list': { params: AgentTaskListParams; result: AgentTaskInfo[] };
-  'agent.task.get': { params: AgentTaskGetParams; result: AgentTaskDetail };
-  'agent.input.get': { params: { taskId: string; formId: string }; result: AgentInputForm };
-  'agent.input.submit': { params: AgentInputSubmitParams; result: AgentInputSubmitResult };
-  'agent.task.events': { params: AgentTaskEventsParams; result: AgentTaskEventsResult };
+  'agent.task.list': {
+    params: AgentTaskListParams;
+    result: AgentTaskInfo[];
+  };
+  'agent.task.get': {
+    params: AgentTaskGetParams;
+    result: AgentTaskDetail;
+  };
+  'agent.input.get': {
+    params: {
+      taskId: string;
+      formId: string;
+    };
+    result: AgentInputForm;
+  };
+  'agent.input.submit': {
+    params: AgentInputSubmitParams;
+    result: AgentInputSubmitResult;
+  };
+  'agent.task.events': {
+    params: AgentTaskEventsParams;
+    result: AgentTaskEventsResult;
+  };
   'agent.generation.prepare': {
     params: AgentGenerationPrepareParams;
     result: AgentGenerationPrepareResult;
@@ -4424,7 +4364,11 @@ export interface WorkerMethodMap
     }>;
   };
   'conversation.runtime.supplement': {
-    params: { generationId: string; content: string; idempotencyKey: string };
+    params: {
+      generationId: string;
+      content: string;
+      idempotencyKey: string;
+    };
     result: ChatMessageInfo;
   };
   'conversation.runtime.confirm': {
@@ -4443,7 +4387,12 @@ export interface WorkerMethodMap
     params: AgentGenerationExecuteToolsParams;
     result: AgentGenerationExecuteToolsResult;
   };
-  'agent.generation.cancel': { params: LlmGenerationGetParams; result: { cancelled: boolean } };
+  'agent.generation.cancel': {
+    params: LlmGenerationGetParams;
+    result: {
+      cancelled: boolean;
+    };
+  };
   'agent.generation.confirmTool': {
     params: AgentGenerationConfirmToolParams;
     result: AgentGenerationConfirmToolResult;
@@ -4464,36 +4413,75 @@ export interface WorkerMethodMap
     params: AgentProviderStepStartParams;
     result: Record<string, never>;
   };
-  'task.log.list': { params: TaskLogListParams; result: TaskLogPage };
+  'task.log.list': {
+    params: TaskLogListParams;
+    result: TaskLogPage;
+  };
   'generation.job.events.list': {
     params: GenerationJobEventsListParams;
     result: GenerationJobEventsPage;
   };
-  'scene.list': { params: { includeArchived?: boolean }; result: SceneInfo[] };
+  'scene.list': {
+    params: {
+      includeArchived?: boolean;
+    };
+    result: SceneInfo[];
+  };
   'production.lifecycle.change': {
     params: ProductionLifecycleParams;
     result: SceneInfo | ShotInfo;
   };
-  'production.read': { params: { target: ProductionTarget }; result: ProductionReadResult };
-  'production.compile': { params: ProductionCompileParams; result: ProductionCompileResult };
-  'production.defaults.get': { params: Record<string, never>; result: ProductionDefaultsInfo };
-  'production.defaults.save': {
-    params: { expectedRowVersion: number; settings: ProductionDefaults };
+  'production.read': {
+    params: {
+      target: ProductionTarget;
+    };
+    result: ProductionReadResult;
+  };
+  'production.compile': {
+    params: ProductionCompileParams;
+    result: ProductionCompileResult;
+  };
+  'production.defaults.get': {
+    params: Record<string, never>;
     result: ProductionDefaultsInfo;
   };
-  'scene.save': { params: SceneSaveParams; result: SceneInfo };
-  'shot.list': { params: ShotListParams; result: ShotInfo[] };
-  'shot.save': { params: ShotSaveParams; result: ShotInfo };
+  'production.defaults.save': {
+    params: {
+      expectedRowVersion: number;
+      settings: ProductionDefaults;
+    };
+    result: ProductionDefaultsInfo;
+  };
+  'scene.save': {
+    params: SceneSaveParams;
+    result: SceneInfo;
+  };
+  'shot.list': {
+    params: ShotListParams;
+    result: ShotInfo[];
+  };
+  'shot.save': {
+    params: ShotSaveParams;
+    result: ShotInfo;
+  };
   'shot.references.get': {
-    params: { shotId: string };
+    params: {
+      shotId: string;
+    };
     result: ShotReferenceBindingResult;
   };
   'shot.references.save': {
     params: ShotReferenceBindingSaveParams;
     result: ShotReferenceBindingResult;
   };
-  'shot.storyboard.save': { params: ShotStoryboardSaveParams; result: DocumentDetail };
-  'constraint.list': { params: Record<string, never>; result: ConstraintInfo[] };
+  'shot.storyboard.save': {
+    params: ShotStoryboardSaveParams;
+    result: DocumentDetail;
+  };
+  'constraint.list': {
+    params: Record<string, never>;
+    result: ConstraintInfo[];
+  };
   'agent.changeSet.create': {
     params: AgentChangeSetCreateParams;
     result: AgentChangeSetInfo;
@@ -4510,11 +4498,26 @@ export interface WorkerMethodMap
     params: AgentChangeSetRejectParams;
     result: AgentChangeSetInfo;
   };
-  'conversation.list': { params: ConversationListParams; result: ConversationPage };
-  'conversation.create': { params: ConversationCreateParams; result: ConversationInfo };
-  'conversation.update': { params: ConversationUpdateParams; result: ConversationInfo };
-  'conversation.archive': { params: ConversationArchiveParams; result: ConversationInfo };
-  'conversation.restore': { params: ConversationRestoreParams; result: ConversationInfo };
+  'conversation.list': {
+    params: ConversationListParams;
+    result: ConversationPage;
+  };
+  'conversation.create': {
+    params: ConversationCreateParams;
+    result: ConversationInfo;
+  };
+  'conversation.update': {
+    params: ConversationUpdateParams;
+    result: ConversationInfo;
+  };
+  'conversation.archive': {
+    params: ConversationArchiveParams;
+    result: ConversationInfo;
+  };
+  'conversation.restore': {
+    params: ConversationRestoreParams;
+    result: ConversationInfo;
+  };
   'conversation.modelPreference.get': {
     params: ConversationModelPreferenceGetParams;
     result: ConversationModelPreferenceInfo | null;
@@ -4525,24 +4528,52 @@ export interface WorkerMethodMap
   };
   'conversation.modelPreference.clear': {
     params: ConversationModelPreferenceClearParams;
-    result: { cleared: boolean };
+    result: {
+      cleared: boolean;
+    };
   };
   'conversation.promptTemplate.get': {
-    params: { conversationId: string };
+    params: {
+      conversationId: string;
+    };
     result: ConversationPromptTemplateInfo;
   };
   'conversation.promptTemplate.save': {
     params: ConversationPromptTemplateSaveParams;
     result: ConversationPromptTemplateInfo;
   };
-  'chat.message.list': { params: ChatMessageListParams; result: ChatMessagePage };
-  'chat.message.save': { params: ChatMessageSaveParams; result: ChatMessageInfo };
-  'chat.message.toDocument': { params: MessageDocumentParams; result: DocumentDetail };
-  'chat.message.toMemory': { params: MessageArtifactParams; result: CreatedArtifact };
-  'chat.message.toConstraint': { params: MessageConstraintParams; result: CreatedArtifact };
-  'context.preview': { params: ContextPreviewParams; result: ProductionContextInfo };
-  'llm.status': { params: Record<string, never>; result: LlmStatusResult };
-  'llm.generate': { params: LlmGenerateParams; result: LlmGenerationInfo };
+  'chat.message.list': {
+    params: ChatMessageListParams;
+    result: ChatMessagePage;
+  };
+  'chat.message.save': {
+    params: ChatMessageSaveParams;
+    result: ChatMessageInfo;
+  };
+  'chat.message.toDocument': {
+    params: MessageDocumentParams;
+    result: DocumentDetail;
+  };
+  'chat.message.toMemory': {
+    params: MessageArtifactParams;
+    result: CreatedArtifact;
+  };
+  'chat.message.toConstraint': {
+    params: MessageConstraintParams;
+    result: CreatedArtifact;
+  };
+  'context.preview': {
+    params: ContextPreviewParams;
+    result: ProductionContextInfo;
+  };
+  'llm.status': {
+    params: Record<string, never>;
+    result: LlmStatusResult;
+  };
+  'llm.generate': {
+    params: LlmGenerateParams;
+    result: LlmGenerationInfo;
+  };
   'llm.generation.prepare': {
     params: LlmGenerationPrepareParams;
     result: LlmGenerationPrepareResult;
@@ -4563,16 +4594,34 @@ export interface WorkerMethodMap
     params: LlmGenerationFailParams;
     result: LlmGenerationInfo;
   };
-  'llm.generation.get': { params: LlmGenerationGetParams; result: LlmGenerationInfo };
-  'llm.generation.cancel': { params: LlmGenerationGetParams; result: LlmGenerationInfo };
-  'llm.generation.retry': { params: LlmGenerationRetryParams; result: LlmGenerationInfo };
+  'llm.generation.get': {
+    params: LlmGenerationGetParams;
+    result: LlmGenerationInfo;
+  };
+  'llm.generation.cancel': {
+    params: LlmGenerationGetParams;
+    result: LlmGenerationInfo;
+  };
+  'llm.generation.retry': {
+    params: LlmGenerationRetryParams;
+    result: LlmGenerationInfo;
+  };
   'llm.generation.retryPrepare': {
     params: LlmGenerationRetryPrepareParams;
     result: LlmGenerationPrepareResult;
   };
-  'adapter.catalog': { params: Record<string, never>; result: AdapterCatalogResult };
-  'adapter.resolve': { params: AdapterResolveParams; result: AdapterDescriptor };
-  'adapter.validate': { params: AdapterValidateParams; result: AdapterValidationResult };
+  'adapter.catalog': {
+    params: Record<string, never>;
+    result: AdapterCatalogResult;
+  };
+  'adapter.resolve': {
+    params: AdapterResolveParams;
+    result: AdapterDescriptor;
+  };
+  'adapter.validate': {
+    params: AdapterValidateParams;
+    result: AdapterValidationResult;
+  };
   'generation.draft.get': {
     params: GenerationDraftGetParams;
     result: GenerationDraftInfo | null;
@@ -4661,33 +4710,106 @@ export interface WorkerMethodMap
     params: ProjectTaskSubscriptionParams;
     result: ProjectTaskSnapshot;
   };
-  'asset.list': { params: AssetListParams; result: AssetInfo[] };
-  'asset.preview': { params: AssetPreviewParams; result: ImagePreviewInfo };
-  'asset.mediaSource': { params: AssetMediaSourceParams; result: AssetMediaSourceInfo };
-  'asset.open': { params: AssetOpenParams; result: AssetRevealResult };
-  'asset.reveal': { params: AssetRevealParams; result: AssetRevealResult };
-  'asset.rename': { params: AssetRenameParams; result: AssetInfo };
-  'asset.alias.update': { params: AssetAliasUpdateParams; result: AssetInfo };
-  'asset.delete': { params: AssetDeleteParams; result: AssetDeleteResult };
-  'asset.restore': { params: AssetRestoreParams; result: AssetInfo };
-  'asset.purge': { params: AssetPurgeParams; result: { purged: true } };
-  'asset.source.locate': { params: AssetPreviewParams; result: AssetSourceInfo };
-  'tag.list': { params: AssetTagListParams; result: AssetTagInfo[] };
-  'tag.create': { params: AssetTagCreateParams; result: AssetTagInfo };
-  'tag.update': { params: AssetTagUpdateParams; result: AssetTagInfo };
-  'tag.delete': { params: AssetTagDeleteParams; result: { deleted: true } };
-  'asset.tags.replace': { params: AssetTagAssignmentParams; result: AssetInfo[] };
-  'asset.tags.add': { params: AssetTagAssignmentParams; result: AssetInfo[] };
-  'asset.tags.remove': { params: AssetTagAssignmentParams; result: AssetInfo[] };
-  'assetGroup.list': { params: AssetGroupListParams; result: AssetGroupInfo[] };
-  'assetGroup.create': { params: AssetGroupCreateParams; result: AssetGroupInfo };
-  'assetGroup.update': { params: AssetGroupUpdateParams; result: AssetGroupInfo };
-  'assetGroup.delete': { params: AssetGroupDeleteParams; result: { deleted: true } };
-  'assetGroup.resolve': { params: AssetGroupResolveParams; result: AssetInfo[] };
+  'asset.list': {
+    params: AssetListParams;
+    result: AssetInfo[];
+  };
+  'asset.preview': {
+    params: AssetPreviewParams;
+    result: ImagePreviewInfo;
+  };
+  'asset.mediaSource': {
+    params: AssetMediaSourceParams;
+    result: AssetMediaSourceInfo;
+  };
+  'asset.open': {
+    params: AssetOpenParams;
+    result: AssetRevealResult;
+  };
+  'asset.reveal': {
+    params: AssetRevealParams;
+    result: AssetRevealResult;
+  };
+  'asset.rename': {
+    params: AssetRenameParams;
+    result: AssetInfo;
+  };
+  'asset.alias.update': {
+    params: AssetAliasUpdateParams;
+    result: AssetInfo;
+  };
+  'asset.delete': {
+    params: AssetDeleteParams;
+    result: AssetDeleteResult;
+  };
+  'asset.restore': {
+    params: AssetRestoreParams;
+    result: AssetInfo;
+  };
+  'asset.purge': {
+    params: AssetPurgeParams;
+    result: {
+      purged: true;
+    };
+  };
+  'asset.source.locate': {
+    params: AssetPreviewParams;
+    result: AssetSourceInfo;
+  };
+  'tag.list': {
+    params: AssetTagListParams;
+    result: AssetTagInfo[];
+  };
+  'tag.create': {
+    params: AssetTagCreateParams;
+    result: AssetTagInfo;
+  };
+  'tag.update': {
+    params: AssetTagUpdateParams;
+    result: AssetTagInfo;
+  };
+  'tag.delete': {
+    params: AssetTagDeleteParams;
+    result: {
+      deleted: true;
+    };
+  };
+  'asset.tags.replace': {
+    params: AssetTagAssignmentParams;
+    result: AssetInfo[];
+  };
+  'asset.tags.add': {
+    params: AssetTagAssignmentParams;
+    result: AssetInfo[];
+  };
+  'asset.tags.remove': {
+    params: AssetTagAssignmentParams;
+    result: AssetInfo[];
+  };
+  'assetGroup.list': {
+    params: AssetGroupListParams;
+    result: AssetGroupInfo[];
+  };
+  'assetGroup.create': {
+    params: AssetGroupCreateParams;
+    result: AssetGroupInfo;
+  };
+  'assetGroup.update': {
+    params: AssetGroupUpdateParams;
+    result: AssetGroupInfo;
+  };
+  'assetGroup.delete': {
+    params: AssetGroupDeleteParams;
+    result: {
+      deleted: true;
+    };
+  };
+  'assetGroup.resolve': {
+    params: AssetGroupResolveParams;
+    result: AssetInfo[];
+  };
 }
-
 export type WorkerMethod = keyof WorkerMethodMap;
-
 export interface WorkerRequest<M extends WorkerMethod = WorkerMethod> {
   id: string;
   protocolVersion: typeof IPC_PROTOCOL_VERSION;
@@ -4695,7 +4817,6 @@ export interface WorkerRequest<M extends WorkerMethod = WorkerMethod> {
   params: WorkerMethodMap[M]['params'];
   scope?: ProjectRuntimeScope;
 }
-
 export interface WorkerError {
   code:
     | 'INVALID_REQUEST'
@@ -4724,7 +4845,6 @@ export interface WorkerError {
   operation?: string;
   details?: unknown;
 }
-
 export type WorkerResponse<M extends WorkerMethod = WorkerMethod> =
   | {
       id: string;

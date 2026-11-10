@@ -5,6 +5,7 @@ import type {
   AdapterDescriptor,
   AssetInfo,
   ImageGenerationJobInfo,
+  ProductionTarget,
   ProviderModelInfo,
   ProviderProfileInfo,
   VideoGenerationJobInfo,
@@ -13,7 +14,6 @@ import { officialVideoContracts } from '@ai-video/contracts';
 import { ProductionPanel } from './ProductionPanel';
 import { composeCharacterImagePrompt } from './character-image-prompt';
 import { callWorker } from './worker-client';
-
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
@@ -32,14 +32,12 @@ const providerProfile: ProviderProfileInfo = {
   createdAt: '2026-08-01T00:00:00.000Z',
   updatedAt: '2026-08-01T00:00:00.000Z',
 };
-
 const globalProviderProfile: ProviderProfileInfo = {
   ...providerProfile,
   id: '11111111-1111-4111-8111-111111111112',
   name: 'Vidu 国际站 B',
   baseUrl: 'https://api.vidu.com',
 };
-
 function providerModel(
   id: string,
   remoteModelId: string,
@@ -68,7 +66,6 @@ function providerModel(
     updatedAt: '2026-08-01T00:00:00.000Z',
   };
 }
-
 const providerModels: ProviderModelInfo[] = [
   providerModel('21111111-1111-4111-8111-111111111111', 'viduq1', 'Vidu Q1', 'image'),
   providerModel('21111111-1111-4111-8111-111111111112', 'viduq2', 'Vidu Q2', 'image'),
@@ -77,7 +74,6 @@ const providerModels: ProviderModelInfo[] = [
   providerModel('21111111-1111-4111-8111-111111111115', 'viduq3-drama', 'Vidu Q3-Drama', 'video'),
   providerModel('21111111-1111-4111-8111-111111111116', 'vidu2.0', 'Vidu 2.0', 'video'),
 ];
-
 function mockWorker(
   implementation: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   unavailableMediaIds: string[] = [],
@@ -99,7 +95,6 @@ function mockWorker(
     return implementation(method, params);
   }) as typeof callWorker);
 }
-
 /**
  * Paid submissions now await the shared confirmation card instead of a native
  * `window.confirm`, so every generate click needs an explicit approval.
@@ -110,7 +105,6 @@ async function submitPaidGeneration(buttonName: '生成图片' | '提交视频�
   fireEvent.click(button);
   fireEvent.click(await screen.findByRole('button', { name: '批准' }));
 }
-
 const descriptor: AdapterDescriptor = {
   key: 'TEXT_TO_IMAGE:vidu:viduq2:v2',
   capability: 'TEXT_TO_IMAGE',
@@ -120,7 +114,7 @@ const descriptor: AdapterDescriptor = {
   model: 'viduq2',
   modelLabel: 'Vidu Q2',
   apiVersion: 'v2',
-  schemaVersion: 1,
+  schemaVersion: 1 as const,
   endpoint: 'https://api.vidu.com/ent/v2/reference2image',
   documentationUrl: 'https://platform.vidu.com/docs/reference-to-image',
   credentialProvider: 'vidu',
@@ -148,13 +142,11 @@ const descriptor: AdapterDescriptor = {
     ],
   },
 };
-
 const catalog: AdapterCatalogResult = {
   capabilities: [{ key: 'TEXT_TO_IMAGE', label: '文生图' }],
   providers: [{ key: 'vidu', label: 'Vidu' }],
   adapters: [descriptor],
 };
-
 const videoDescriptor: AdapterDescriptor = {
   key: 'START_END_TO_VIDEO:vidu:viduq3-pro:v2',
   capability: 'START_END_TO_VIDEO',
@@ -164,7 +156,7 @@ const videoDescriptor: AdapterDescriptor = {
   model: 'viduq3-pro',
   modelLabel: 'Vidu Q3 Pro',
   apiVersion: 'v2',
-  schemaVersion: 1,
+  schemaVersion: 1 as const,
   endpoint: 'https://api.vidu.com/ent/v2/start-end2video',
   documentationUrl: 'https://platform.vidu.com/docs/image-to-video',
   credentialProvider: 'vidu',
@@ -200,13 +192,11 @@ const videoDescriptor: AdapterDescriptor = {
     ],
   },
 };
-
 const videoCatalog: AdapterCatalogResult = {
   capabilities: [{ key: 'START_END_TO_VIDEO', label: '首尾帧生视频' }],
   providers: [{ key: 'vidu', label: 'Vidu' }],
   adapters: [videoDescriptor],
 };
-
 const completeModeCatalog: AdapterCatalogResult = {
   capabilities: [
     { key: 'TEXT_TO_IMAGE', label: '文生图' },
@@ -246,7 +236,6 @@ const completeModeCatalog: AdapterCatalogResult = {
     },
   ],
 };
-
 function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobInfo {
   return {
     id: 'video-job',
@@ -270,15 +259,16 @@ function videoJob(status: VideoGenerationJobInfo['status']): VideoGenerationJobI
       pollDeadlineAt: '2099-01-01T00:00:00.000Z',
     },
     results: [],
-    elapsedMs: 1_000,
+    elapsedMs: 1000,
     createdAt: '2026-08-02T00:00:00.000Z',
     updatedAt: '2026-08-02T00:00:01.000Z',
   };
 }
-
 function imageJob(
   status: ImageGenerationJobInfo['status'],
-  options: { withPreview?: boolean } = {},
+  options: {
+    withPreview?: boolean;
+  } = {},
 ): ImageGenerationJobInfo {
   return {
     id: 'job',
@@ -310,7 +300,6 @@ function imageJob(
     updatedAt: '2026-08-02T00:00:01.000Z',
   };
 }
-
 function pendingSubmission(
   kind: 'image' | 'video',
   job: ImageGenerationJobInfo | VideoGenerationJobInfo,
@@ -332,7 +321,6 @@ function pendingSubmission(
     },
   };
 }
-
 const savedAsset: AssetInfo = {
   id: 'asset-generated',
   projectId: 'project',
@@ -342,17 +330,15 @@ const savedAsset: AssetInfo = {
   sizeBytes: 8192,
   createdAt: '2026-08-02T00:00:00.000Z',
 };
-
 const savedVideoAsset: AssetInfo = {
   id: 'video-asset-generated',
   projectId: 'project',
   kind: 'shot-video',
   relativePath: 'assets/videos/generated.mp4',
   contentHash: 'video-hash',
-  sizeBytes: 102_400,
+  sizeBytes: 102400,
   createdAt: '2026-08-02T00:05:00.000Z',
 };
-
 describe('ProductionPanel', () => {
   it('fills the full narrative scene and allows a model-sized production segment without changing scene order', async () => {
     const model: AdapterDescriptor = {
@@ -550,7 +536,6 @@ describe('ProductionPanel', () => {
     expect(screen.queryByText('图片已保存到本地素材库。')).not.toBeInTheDocument();
     expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
   });
-
   it('does not let an old image finally clear a newer submission', async () => {
     const completions: Array<(value: unknown) => void> = [];
     mockWorker((method) => {
@@ -591,7 +576,6 @@ describe('ProductionPanel', () => {
     });
     await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
   });
-
   it('selects HappyHorse by official contract without a parameter-template selection', async () => {
     const contract = officialVideoContracts.find(
       (item) => item.officialModelName === 'happyhorse-1.1-t2v',
@@ -661,9 +645,7 @@ describe('ProductionPanel', () => {
     expect(screen.getByLabelText(/时长（秒）/)).toHaveValue(5);
     expect(screen.queryByLabelText(/生成音频/)).not.toBeInTheDocument();
   });
-
   afterEach(() => cleanup());
-
   beforeEach(() => {
     cleanup();
     vi.resetAllMocks();
@@ -701,7 +683,6 @@ describe('ProductionPanel', () => {
       throw new Error(`Unexpected method ${method}`);
     });
   });
-
   it('seeds reference images from a shot workspace', async () => {
     render(
       <ProductionPanel
@@ -718,7 +699,6 @@ describe('ProductionPanel', () => {
     );
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
   });
-
   it('keeps seeded shot parameters when the project draft cannot be loaded', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -739,7 +719,6 @@ describe('ProductionPanel', () => {
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
     expect(screen.queryByText(/适配器解析失败/)).not.toBeInTheDocument();
   });
-
   it('declares shot image bindings in the visible prompt and the prepared request', async () => {
     const boundImageAdapter: AdapterDescriptor = {
       ...descriptor,
@@ -795,7 +774,6 @@ describe('ProductionPanel', () => {
         });
       return defaultCallWorker(method as never, params);
     }) as typeof callWorker);
-
     render(
       <ProductionPanel
         projectId="project"
@@ -810,7 +788,6 @@ describe('ProductionPanel', () => {
         onRequestSubmissionApproval={() => Promise.resolve(false)}
       />,
     );
-
     const prompt = await screen.findByRole('textbox', { name: /画面提示词/ });
     await waitFor(() => {
       expect(prompt).toHaveTextContent('【输入图片说明】');
@@ -818,7 +795,7 @@ describe('ProductionPanel', () => {
       expect(prompt).toHaveTextContent('场景「旧码头」的场景参考图');
     });
     expect(prompt.querySelectorAll('.prompt-reference-chip')).toHaveLength(2);
-
+    await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('image.generate.prepare', expect.anything()),
@@ -845,7 +822,6 @@ describe('ProductionPanel', () => {
       expect.anything(),
     );
   });
-
   it('submits the edited reference-image form without restoring fill-time image descriptions', async () => {
     const referenceAdapter: AdapterDescriptor = {
       ...descriptor,
@@ -911,7 +887,6 @@ describe('ProductionPanel', () => {
         });
       return defaultCallWorker(method as never, params);
     }) as typeof callWorker);
-
     render(
       <ProductionPanel
         projectId="project"
@@ -957,7 +932,6 @@ describe('ProductionPanel', () => {
       },
     });
   });
-
   it('keeps the requested capability when the current catalog has no compatible adapter', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -973,14 +947,11 @@ describe('ProductionPanel', () => {
       capability: 'START_END_TO_VIDEO' as const,
     };
     const view = render(<ProductionPanel {...props} />);
-
     expect(await screen.findByText('首帧与尾帧')).toBeInTheDocument();
     view.rerender(<ProductionPanel {...props} capability="REFERENCE_TO_IMAGE" />);
-
     expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
     expect(screen.queryByText('首帧与尾帧')).not.toBeInTheDocument();
   });
-
   it('seeds the image prompt and asset kind from a character document', async () => {
     render(
       <ProductionPanel
@@ -994,7 +965,6 @@ describe('ProductionPanel', () => {
     expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('林澈，灯塔守望员');
     expect(screen.getByLabelText('保存为')).toHaveValue('character');
   });
-
   it('keeps the complete character sheet through compilation and prepares the edited form verbatim', async () => {
     const previous = vi.mocked(callWorker).getMockImplementation()!;
     vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) => {
@@ -1043,7 +1013,6 @@ describe('ProductionPanel', () => {
       expect.anything(),
     );
   });
-
   it('prepares prop images with their source document and refreshes the owning gallery', async () => {
     const asset = { ...savedAsset, kind: 'prop' };
     const onAssetsChanged = vi.fn();
@@ -1105,7 +1074,6 @@ describe('ProductionPanel', () => {
     expect(await screen.findByText('图片已保存到本地素材库。')).toBeInTheDocument();
     expect(onAssetsChanged).toHaveBeenCalledWith([asset], asset.id);
   });
-
   it('renders schema fields and saves a validated per-shot draft', async () => {
     render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);
@@ -1119,10 +1087,8 @@ describe('ProductionPanel', () => {
     fireEvent.click(screen.getByText('更多设置'));
     expect(resolution).not.toBeVisible();
     expect(screen.getByText('专业参数')).toBeInTheDocument();
-
     fireEvent.change(prompt, { target: { value: '电影画面' } });
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('generation.draft.save', {
         shotId: 'shot',
@@ -1137,7 +1103,6 @@ describe('ProductionPanel', () => {
     expect(screen.getByRole('option', { name: '角色' })).toBeInTheDocument();
     expect(screen.queryByLabelText('自动保存到本地素材库')).not.toBeInTheDocument();
   });
-
   it('renders and submits schema parameters omitted from an explicit UI layout', async () => {
     const incomplete = {
       ...descriptor,
@@ -1156,7 +1121,6 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel shotId="shot" writable />);
     await screen.findByLabelText(/画面提示词/);
     fireEvent.click(screen.getByText('更多设置'));
@@ -1164,7 +1128,6 @@ describe('ProductionPanel', () => {
     const seed = await screen.findByLabelText('随机种子');
     fireEvent.change(seed, { target: { value: '123' } });
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('generation.draft.save', {
         shotId: 'shot',
@@ -1175,7 +1138,6 @@ describe('ProductionPanel', () => {
       }),
     );
   });
-
   it('merges current schema defaults into an older saved draft', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1192,23 +1154,19 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel shotId="shot" writable />);
     expect(await screen.findByLabelText('分辨率*')).toHaveValue('1080p');
   });
-
   it('remembers parameter values per adapter so switching models keeps the form', async () => {
     window.localStorage.clear();
     const { unmount } = render(<ProductionPanel shotId="shot" writable />);
     const prompt = await screen.findByLabelText(/画面提示词/);
     fireEvent.change(prompt, { target: { value: '记住这段提示词' } });
     unmount();
-
     // A fresh panel for the same adapter restores the remembered value.
     render(<ProductionPanel shotId="shot" writable />);
     expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('记住这段提示词');
   });
-
   it('never persists local image data URLs in the parameter memory', async () => {
     window.localStorage.clear();
     render(<ProductionPanel shotId="shot" writable />);
@@ -1216,17 +1174,19 @@ describe('ProductionPanel', () => {
     fireEvent.change(prompt, {
       target: { value: 'data:image/png;base64,iVBORw0KGgo=' },
     });
-
     expect(
       window.localStorage.getItem('ai-video.production-adapter-parameters') ?? '',
     ).not.toContain('data:image/png;base64,iVBORw0KGgo=');
   });
-
   it('uses the controlled production capability and removes the right-side mode selector', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(completeModeCatalog);
       if (method === 'adapter.resolve') {
-        const selection = params as { capability: string; model: string; apiVersion?: string };
+        const selection = params as {
+          capability: string;
+          model: string;
+          apiVersion?: string;
+        };
         return Promise.resolve(
           completeModeCatalog.adapters.find(
             (item) =>
@@ -1240,14 +1200,11 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel capability="REFERENCE_TO_VIDEO" shotId="shot" writable />);
-
     expect(screen.queryByLabelText('生产方式')).not.toBeInTheDocument();
     expect(await screen.findByRole('option', { name: 'Vidu Q3 Pro' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Vidu Q2' })).not.toBeInTheDocument();
   });
-
   it('does not persist a draft when adapter validation fails', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1262,13 +1219,11 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel shotId="shot" writable />);
     fireEvent.click(await screen.findByRole('button', { name: '保存草稿' }));
     expect(await screen.findByText('1 项参数需要修正')).toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('generation.draft.save', expect.anything());
   });
-
   it('shows an actionable settings entry when no media profile is ready', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1278,13 +1233,11 @@ describe('ProductionPanel', () => {
     });
     const onOpenProviderSettings = vi.fn();
     render(<ProductionPanel writable onOpenProviderSettings={onOpenProviderSettings} />);
-
     expect(await screen.findByText('还没有可用于制作的供应商连接')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '前往供应商与模型' }));
     expect(onOpenProviderSettings).toHaveBeenCalledTimes(1);
     expect(callWorker).not.toHaveBeenCalledWith('image.generate.prepare', expect.anything());
   });
-
   it('keeps multiple Vidu connections independently selectable', async () => {
     const globalModel = {
       ...providerModels.find((model) => model.remoteModelId === 'viduq2')!,
@@ -1298,7 +1251,11 @@ describe('ProductionPanel', () => {
       }
       if (method === 'provider.model.list') {
         return Promise.resolve(
-          (params as { profileId: string }).profileId === globalProviderProfile.id
+          (
+            params as {
+              profileId: string;
+            }
+          ).profileId === globalProviderProfile.id
             ? [globalModel]
             : providerModels,
         );
@@ -1308,12 +1265,10 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel shotId="shot" writable />);
     const profileSelect = await screen.findByLabelText('供应商连接');
     expect(screen.getByRole('option', { name: /Vidu 中国站 A/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Vidu 国际站 B/ })).toBeInTheDocument();
-
     fireEvent.change(profileSelect, { target: { value: globalProviderProfile.id } });
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('provider.model.list', {
@@ -1330,7 +1285,6 @@ describe('ProductionPanel', () => {
     );
     expect(profileSelect).toHaveValue(globalProviderProfile.id);
   });
-
   it('selects UniCompAPI media models without mixing Vidu adapters', async () => {
     const unicompProfile: ProviderProfileInfo = {
       ...providerProfile,
@@ -1371,14 +1325,22 @@ describe('ProductionPanel', () => {
       }
       if (method === 'provider.model.list') {
         return Promise.resolve(
-          (params as { profileId: string }).profileId === unicompProfile.id
+          (
+            params as {
+              profileId: string;
+            }
+          ).profileId === unicompProfile.id
             ? [unicompModel]
             : providerModels,
         );
       }
       if (method === 'adapter.resolve') {
         return Promise.resolve(
-          (params as { provider: string }).provider === 'unicompapi'
+          (
+            params as {
+              provider: string;
+            }
+          ).provider === 'unicompapi'
             ? unicompDescriptor
             : descriptor,
         );
@@ -1387,11 +1349,9 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel shotId="shot" writable />);
     const profileSelect = await screen.findByLabelText('供应商连接');
     expect(screen.getByRole('option', { name: 'UniCompAPI A · UniCompAPI' })).toBeInTheDocument();
-
     fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
     expect(await screen.findByRole('option', { name: 'Qwen Image' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Vidu Q2' })).not.toBeInTheDocument();
@@ -1406,8 +1366,7 @@ describe('ProductionPanel', () => {
     expect(await screen.findByLabelText(/画面提示词/)).toBeInTheDocument();
     expect(screen.queryByText('模型详情')).not.toBeInTheDocument();
   });
-
-  it('selects New API custom image models through the generic OpenAI Images adapter', async () => {
+  it('submits New API image parameters through the compatible adapter and shows returned size limits', async () => {
     const newApiProfile: ProviderProfileInfo = {
       ...providerProfile,
       id: '11111111-1111-4111-8111-111111111115',
@@ -1428,6 +1387,20 @@ describe('ProductionPanel', () => {
       apiVersion: 'v1',
       endpoint: 'https://api.openai.com/v1/images/generations',
       credentialProvider: 'custom',
+      parameterSchema: {
+        ...descriptor.parameterSchema,
+        required: ['prompt'],
+        properties: {
+          prompt: descriptor.parameterSchema.properties.prompt!,
+          size: { type: 'string', title: '尺寸' },
+        },
+      },
+      uiSchema: {
+        fields: [
+          { key: 'prompt', control: 'textarea', group: 'basic', order: 10 },
+          { key: 'size', control: 'text', group: 'basic', order: 40 },
+        ],
+      },
     };
     const newApiModel: ProviderModelInfo = {
       ...providerModels[0]!,
@@ -1453,23 +1426,45 @@ describe('ProductionPanel', () => {
       }
       if (method === 'provider.model.list') {
         return Promise.resolve(
-          (params as { profileId: string }).profileId === newApiProfile.id
+          (
+            params as {
+              profileId: string;
+            }
+          ).profileId === newApiProfile.id
             ? [newApiModel]
             : providerModels,
         );
       }
       if (method === 'adapter.resolve') return Promise.resolve(newApiDescriptor);
       if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'production.read' || method === 'production.compile')
+        return Promise.resolve({
+          target: (params as { target: ProductionTarget }).target,
+          rowVersion: 1,
+          parameters: {},
+          issues: [],
+        });
+      if (method === 'adapter.validate') return Promise.resolve({ valid: true, errors: [] });
+      if (method === 'image.generate.prepare') return Promise.resolve(imageJob('pending'));
+      if (method === 'media.generation.requestSubmission')
+        return Promise.resolve(pendingSubmission('image', imageJob('pending')));
+      if (method === 'media.generation.confirmSubmission')
+        return Promise.resolve({
+          kind: 'image',
+          job: {
+            ...imageJob('failed'),
+            error:
+              'Provider request failed with HTTP 400: invalid_request: size must be WIDTHxHEIGHT, multiples of 16, aspect ratio at most 3, 655360..8294400 pixels and each edge at most 3840',
+          },
+        });
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel capability="TEXT_TO_IMAGE" shotId="shot" writable />);
     const profileSelect = await screen.findByLabelText('供应商连接');
     expect(
       await screen.findByRole('option', { name: 'New API · 自定义 OpenAI 兼容' }),
     ).toBeInTheDocument();
-
     fireEvent.change(profileSelect, { target: { value: newApiProfile.id } });
     expect(await screen.findByRole('option', { name: 'gpt-image-2' })).toBeInTheDocument();
     await waitFor(() =>
@@ -1488,8 +1483,31 @@ describe('ProductionPanel', () => {
         modelId: 'gpt-image-2',
       }),
     );
+    const sizeSelect = await screen.findByRole('combobox', { name: '尺寸' });
+    fireEvent.change(sizeSelect, { target: { value: '1792x1008' } });
+    expect(sizeSelect).toHaveValue('1792x1008');
+    fireEvent.change(sizeSelect, { target: { value: 'custom' } });
+    fireEvent.change(screen.getByRole('textbox', { name: '自定义尺寸' }), {
+      target: { value: '1920x1080' },
+    });
+    fireEvent.change(screen.getByLabelText(/画面提示词/), { target: { value: '角色设定图' } });
+    await submitPaidGeneration('生成图片');
+    const errorNotice = await screen.findByText(/图片尺寸不符合兼容服务要求/);
+    expect(errorNotice).toHaveTextContent(
+      'Provider request failed with HTTP 400: invalid_request: size must be WIDTHxHEIGHT, multiples of 16, aspect ratio at most 3, 655360..8294400 pixels and each edge at most 3840',
+    );
+    expect(errorNotice).toBeVisible();
+    expect(callWorker).toHaveBeenCalledWith(
+      'image.generate.prepare',
+      expect.objectContaining({
+        adapterKey: newApiDescriptor.key,
+        providerProfileId: newApiProfile.id,
+        modelId: 'gpt-image-2',
+        parameters: { prompt: '角色设定图', size: '1920x1080' },
+      }),
+    );
+    expect(screen.getByRole('textbox', { name: '自定义尺寸' })).toHaveValue('1920x1080');
   });
-
   it('offers New API custom video models through the generic asynchronous video adapter', async () => {
     const newApiProfile: ProviderProfileInfo = {
       ...providerProfile,
@@ -1532,7 +1550,13 @@ describe('ProductionPanel', () => {
       if (method === 'provider.profile.list') return Promise.resolve([newApiProfile]);
       if (method === 'provider.model.list') {
         return Promise.resolve(
-          (params as { profileId: string }).profileId === newApiProfile.id ? [videoModel] : [],
+          (
+            params as {
+              profileId: string;
+            }
+          ).profileId === newApiProfile.id
+            ? [videoModel]
+            : [],
         );
       }
       if (method === 'adapter.resolve') return Promise.resolve(videoAdapter);
@@ -1540,9 +1564,7 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel capability="TEXT_TO_VIDEO" shotId="shot" writable />);
-
     expect(
       await screen.findByRole('option', { name: 'New API Video · 自定义 OpenAI 兼容' }),
     ).toBeInTheDocument();
@@ -1556,7 +1578,6 @@ describe('ProductionPanel', () => {
       }),
     );
   });
-
   it('refreshes provider connections after settings changes without remounting', async () => {
     const unicompProfile: ProviderProfileInfo = {
       ...providerProfile,
@@ -1601,7 +1622,11 @@ describe('ProductionPanel', () => {
       if (method === 'provider.model.list') {
         modelListCalls += 1;
         return Promise.resolve(
-          (params as { profileId: string }).profileId === unicompProfile.id && modelListCalls > 1
+          (
+            params as {
+              profileId: string;
+            }
+          ).profileId === unicompProfile.id && modelListCalls > 1
             ? [unicompModel]
             : [],
         );
@@ -1611,24 +1636,20 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     const { rerender } = render(
       <ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={0} writable />,
     );
     expect(await screen.findByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
-
     rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={1} writable />);
     const profileSelect = await screen.findByLabelText('供应商连接');
     expect(
       await screen.findByRole('option', { name: 'UniCompAPI A · UniCompAPI' }),
     ).toBeInTheDocument();
     fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
-
     expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
     rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={2} writable />);
     expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
   });
-
   it('uses the full adapter key and locks the API version during resolution', async () => {
     const v3 = { ...descriptor, key: 'TEXT_TO_IMAGE:vidu:viduq2:v3', apiVersion: 'v3' };
     mockWorker((method, params) => {
@@ -1637,7 +1658,13 @@ describe('ProductionPanel', () => {
       }
       if (method === 'adapter.resolve') {
         return Promise.resolve(
-          (params as { apiVersion?: string }).apiVersion === 'v3' ? v3 : descriptor,
+          (
+            params as {
+              apiVersion?: string;
+            }
+          ).apiVersion === 'v3'
+            ? v3
+            : descriptor,
         );
       }
       if (method === 'generation.draft.get') return Promise.resolve(null);
@@ -1646,7 +1673,6 @@ describe('ProductionPanel', () => {
     });
     render(<ProductionPanel shotId="shot" writable />);
     const model = await screen.findByLabelText('模型');
-
     await waitFor(() =>
       expect(Array.from((model as HTMLSelectElement).options).map((option) => option.text)).toEqual(
         ['Vidu Q2', 'Vidu Q2'],
@@ -1654,10 +1680,8 @@ describe('ProductionPanel', () => {
     );
     await waitFor(() => expect(model).toBeEnabled());
     expect(model).toHaveValue(`21111111-1111-4111-8111-111111111112::${descriptor.key}`);
-
     const v3OptionKey = '21111111-1111-4111-8111-111111111112::' + v3.key;
     fireEvent.change(model, { target: { value: v3OptionKey } });
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('adapter.resolve', {
         capability: v3.capability,
@@ -1669,7 +1693,6 @@ describe('ProductionPanel', () => {
     expect(model).toHaveValue(v3OptionKey);
     expect(screen.queryByText('模型详情')).not.toBeInTheDocument();
   });
-
   it('keeps production parameters free of the result preview and full asset list', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1691,16 +1714,13 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel expanded projectId="project" shotId="shot" writable />);
-
     expect(await screen.findByLabelText(/画面提示词/)).toBeInTheDocument();
     expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('素材列表')).not.toBeInTheDocument();
     expect(screen.queryByText('生成完成后将在此自动预览')).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('asset.list', {});
   });
-
   it('saves a generated image locally and refreshes its owning gallery without a result pane', async () => {
     const onAssetsChanged = vi.fn();
     const onOpenAssetLibrary = vi.fn();
@@ -1731,7 +1751,6 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(
       <ProductionPanel
         projectId="project"
@@ -1746,14 +1765,12 @@ describe('ProductionPanel', () => {
     });
     await waitFor(() => expect(screen.getByRole('button', { name: '生成图片' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: '生成图片' }));
-
     // The frozen draft is reviewed on the shared card, not a native dialog.
     expect(await screen.findByText(`${providerProfile.name} / Vidu Q2`)).toBeInTheDocument();
     expect(screen.getByText('草稿版本 v1')).toBeInTheDocument();
     expect(screen.getByText('prompt')).toBeInTheDocument();
     expect(screen.getByText('本次操作可能产生费用。')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '批准' }));
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
         jobId: 'job',
@@ -1768,7 +1785,6 @@ describe('ProductionPanel', () => {
     expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('asset.mediaSource', { assetId: savedAsset.id });
   });
-
   it('refreshes all images returned by one generation without loading result previews', async () => {
     const onAssetsChanged = vi.fn();
     const generated = [
@@ -1819,13 +1835,11 @@ describe('ProductionPanel', () => {
         ),
     ).toBe(false);
   });
-
   it('explains why draft save is blocked when no shot is selected', async () => {
     render(<ProductionPanel writable />);
     fireEvent.click(await screen.findByRole('button', { name: '保存草稿' }));
     expect(await screen.findByText('请先在左侧选择镜头后再保存草稿。')).toBeInTheDocument();
   });
-
   it('always saves generated images to the local asset library', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1848,13 +1862,11 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel projectId="project" shotId="shot" writable />);
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
     await submitPaidGeneration('生成图片');
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'media.generation.confirmSubmission',
@@ -1865,7 +1877,6 @@ describe('ProductionPanel', () => {
     expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
     expect(screen.queryByRole('img', { name: savedAsset.relativePath })).not.toBeInTheDocument();
   });
-
   it('keeps a prepared image job in submission_unknown when Provider acceptance is ambiguous', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(catalog);
@@ -1891,18 +1902,15 @@ describe('ProductionPanel', () => {
     fireEvent.change(await screen.findByLabelText(/画面提示词/), {
       target: { value: '电影画面' },
     });
-
     await submitPaidGeneration('生成图片');
-
     expect(
       await screen.findAllByText(
-        '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。',
+        /提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。/,
       ),
     ).not.toHaveLength(0);
     expect(callWorker).not.toHaveBeenCalledWith('image.generate.fail', expect.anything());
     expect(screen.queryByTitle('取消生成')).not.toBeInTheDocument();
   });
-
   it('submits a video task once and persists its provider task association', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -1913,7 +1921,11 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.prepare') {
         return Promise.resolve({
           ...videoJob('pending'),
-          request: (params as { parameters: VideoGenerationJobInfo['request'] }).parameters,
+          request: (
+            params as {
+              parameters: VideoGenerationJobInfo['request'];
+            }
+          ).parameters,
         });
       }
       if (method === 'media.generation.requestSubmission')
@@ -1922,7 +1934,6 @@ describe('ProductionPanel', () => {
         return Promise.resolve({ kind: 'video', job: videoJob('polling') });
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
     fireEvent.change(await screen.findByLabelText('首帧 URL'), {
       target: { value: 'https://example.invalid/start.png' },
@@ -1931,7 +1942,6 @@ describe('ProductionPanel', () => {
       target: { value: 'https://example.invalid/end.png' },
     });
     await submitPaidGeneration('提交视频任务');
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'video.generate.prepare',
@@ -1956,7 +1966,6 @@ describe('ProductionPanel', () => {
     expect(confirmDialog).not.toHaveBeenCalled();
     expect(await screen.findByText('视频任务已提交，项目后台正在处理。')).toBeInTheDocument();
   });
-
   it('persists the bounded provider detail when video submission is rejected', async () => {
     const message =
       'Provider 视频任务提交失败，HTTP 400：invalid_request：input_reference is required。';
@@ -1981,7 +1990,6 @@ describe('ProductionPanel', () => {
         });
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
     fireEvent.change(await screen.findByLabelText('首帧 URL'), {
       target: { value: 'https://example.invalid/start.png' },
@@ -1990,7 +1998,6 @@ describe('ProductionPanel', () => {
       target: { value: 'https://example.invalid/end.png' },
     });
     await submitPaidGeneration('提交视频任务');
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('media.generation.confirmSubmission', {
         jobId: 'video-job',
@@ -1999,13 +2006,9 @@ describe('ProductionPanel', () => {
       }),
     );
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.fail', expect.anything());
-    expect(
-      await screen.findAllByText(
-        '当前模型不接受这组参数。请检查必填项；如果界面参数与官方文档不一致，请更新模型 Schema 或更换模型。',
-      ),
-    ).not.toHaveLength(0);
+    expect(await screen.findAllByText(/当前模型不接受这组参数/)).not.toHaveLength(0);
+    expect(screen.getByText(/当前模型不接受这组参数/)).toHaveTextContent(message);
   });
-
   it('keeps a prepared video job in submission_unknown when Provider acceptance is ambiguous', async () => {
     const unknown: VideoGenerationJobInfo = {
       ...videoJob('pending'),
@@ -2028,7 +2031,6 @@ describe('ProductionPanel', () => {
         });
       throw new Error(`Unexpected method ${method}`);
     });
-
     const view = render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
     fireEvent.change(await screen.findByLabelText('首帧 URL'), {
       target: { value: 'https://example.invalid/start.png' },
@@ -2037,10 +2039,9 @@ describe('ProductionPanel', () => {
       target: { value: 'https://example.invalid/end.png' },
     });
     await submitPaidGeneration('提交视频任务');
-
     expect(
       await screen.findAllByText(
-        '提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。',
+        /提交结果未知。为避免重复扣费，系统不会自动重试，请先到 Provider 后台核对。/,
       ),
     ).not.toHaveLength(0);
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.fail', expect.anything());
@@ -2059,7 +2060,6 @@ describe('ProductionPanel', () => {
     expect(within(tasks).queryByText('正在提交', { exact: true })).not.toBeInTheDocument();
     expect(within(tasks).getByText(/生成服务未返回任务编号/)).toBeInTheDocument();
   });
-
   it('keeps dropped asset references bounded through drafts and submission', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2071,11 +2071,19 @@ describe('ProductionPanel', () => {
           id: 'draft',
           shotId: 'shot',
           adapterKey: videoDescriptor.key,
-          parameters: (params as { parameters: object }).parameters,
+          parameters: (
+            params as {
+              parameters: object;
+            }
+          ).parameters,
           updatedAt: '2026-08-01T12:00:00.000Z',
         });
       if (method === 'asset.preview') {
-        const id = (params as { assetId: string }).assetId;
+        const id = (
+          params as {
+            assetId: string;
+          }
+        ).assetId;
         return Promise.resolve({
           assetId: id,
           dataUrl: `data:image/png;base64,${id}`,
@@ -2145,7 +2153,6 @@ describe('ProductionPanel', () => {
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'asset.preview'),
     ).toHaveLength(0);
   });
-
   it('previews project asset references and preserves their values when reordering and saving', async () => {
     mockWorker((method, params) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2186,7 +2193,6 @@ describe('ProductionPanel', () => {
       });
     });
   });
-
   it('keeps an explicitly added image input until it is filled or removed', async () => {
     const gallery = structuredClone(videoDescriptor);
     gallery.parameterSchema.properties.images!.minItems = 1;
@@ -2219,7 +2225,6 @@ describe('ProductionPanel', () => {
     expect(extraImage).not.toBeInTheDocument();
     expect(screen.getByRole('img')).toBeInTheDocument();
   });
-
   it('previews and reorders local start and end frames and submits Data URLs once', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2234,11 +2239,9 @@ describe('ProductionPanel', () => {
         return Promise.resolve({ kind: 'video', job: videoJob('polling') });
       throw new Error(`Unexpected method ${method}`);
     });
-
     const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
     const jpeg = new Uint8Array([255, 216, 255, 224]);
     render(<ProductionPanel projectId="project" shotId="shot" writable assets={[]} />);
-
     fireEvent.change(await screen.findByLabelText('为首帧选择本地图片'), {
       target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
     });
@@ -2249,7 +2252,6 @@ describe('ProductionPanel', () => {
     await screen.findByRole('button', { name: '放大查看尾帧：end.jpg' });
     expect(screen.queryByText('start.png')).not.toBeInTheDocument();
     expect(screen.queryByText('end.jpg')).not.toBeInTheDocument();
-
     const startPreview = screen.getByRole('button', { name: '放大查看首帧：start.png' });
     const startSource = within(startPreview).getByRole('img').getAttribute('src');
     const endPreview = screen.getByRole('button', { name: '放大查看尾帧：end.jpg' });
@@ -2260,7 +2262,6 @@ describe('ProductionPanel', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(startPreview).toHaveFocus();
-
     const firstRow = startPreview.closest('.url-list-item')!;
     fireEvent.click(within(firstRow as HTMLElement).getByRole('button', { name: '下移' }));
     const reorderedStart = screen.getByRole('button', { name: '放大查看首帧：end.jpg' });
@@ -2270,15 +2271,20 @@ describe('ProductionPanel', () => {
     fireEvent.click(reorderedStart);
     expect(within(screen.getByRole('dialog')).getByRole('img')).toHaveAttribute('src', endSource);
     fireEvent.click(screen.getByRole('button', { name: '关闭图片预览' }));
-
     await submitPaidGeneration('提交视频任务');
-
     await waitFor(() => {
       const prepareCall = vi
         .mocked(callWorker)
         .mock.calls.find(([method]) => method === 'video.generate.prepare');
-      const images = (prepareCall?.[1] as { parameters?: { images?: unknown[] } } | undefined)
-        ?.parameters?.images;
+      const images = (
+        prepareCall?.[1] as
+          | {
+              parameters?: {
+                images?: unknown[];
+              };
+            }
+          | undefined
+      )?.parameters?.images;
       expect(images).toHaveLength(2);
       expect(images?.[0]).toEqual(expect.stringMatching(/^data:image\/jpeg;base64,/));
       expect(images?.[1]).toEqual(expect.stringMatching(/^data:image\/png;base64,/));
@@ -2287,7 +2293,6 @@ describe('ProductionPanel', () => {
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'video.generate.prepare'),
     ).toHaveLength(1);
   });
-
   it('replaces and clears a selected image without retaining its open preview', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2305,7 +2310,6 @@ describe('ProductionPanel', () => {
     const firstPreview = await screen.findByRole('button', { name: '放大查看首帧：first.png' });
     const firstSource = within(firstPreview).getByRole('img').getAttribute('src');
     fireEvent.click(firstPreview);
-
     fireEvent.change(picker, {
       target: {
         files: [new File([png, new Uint8Array([1])], 'replacement.png', { type: 'image/png' })],
@@ -2327,7 +2331,6 @@ describe('ProductionPanel', () => {
     expect(screen.queryByRole('img', { name: '首帧：replacement.png' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('首帧 URL')).toHaveValue('');
   });
-
   it('keeps unavailable asset inputs editable when their preview cannot be read', async () => {
     mockWorker(
       (method) => {
@@ -2363,7 +2366,6 @@ describe('ProductionPanel', () => {
       'https://example.invalid/replacement.png',
     );
   });
-
   it('keeps the existing URL after cancellation or an invalid local file selection', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2376,17 +2378,14 @@ describe('ProductionPanel', () => {
     const startUrl = await screen.findByLabelText('首帧 URL');
     fireEvent.change(startUrl, { target: { value: 'https://example.invalid/start.png' } });
     const picker = screen.getByLabelText('为首帧选择本地图片');
-
     fireEvent.change(picker, { target: { files: [] } });
     expect(startUrl).toHaveValue('https://example.invalid/start.png');
     fireEvent.change(picker, {
       target: { files: [new File(['gif'], 'bad.gif', { type: 'image/gif' })] },
     });
-
     expect(await screen.findByText('仅支持 PNG、JPEG/JPG 和 WebP 图片。')).toBeInTheDocument();
     expect(startUrl).toHaveValue('https://example.invalid/start.png');
   });
-
   it('does not persist a draft containing a selected local image', async () => {
     mockWorker((method) => {
       if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
@@ -2401,15 +2400,12 @@ describe('ProductionPanel', () => {
       target: { files: [new File([png], 'start.png', { type: 'image/png' })] },
     });
     await screen.findByRole('button', { name: '放大查看首帧：start.png' });
-
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
-
     expect(
       await screen.findByText('本地图片不会写入草稿，请改用公开 URL 后保存。'),
     ).toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('generation.draft.save', expect.anything());
   });
-
   it('resumes without resubmission and keeps local cancellation when remote cancellation fails', async () => {
     const polling = videoJob('polling');
     mockWorker((method) => {
@@ -2425,7 +2421,6 @@ describe('ProductionPanel', () => {
         });
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(
       <ProductionPanel
         projectId="project"
@@ -2442,9 +2437,7 @@ describe('ProductionPanel', () => {
       'media.generation.requestSubmission',
       expect.anything(),
     );
-
     fireEvent.click(screen.getByRole('button', { name: '取消任务' }));
-
     expect(
       await screen.findByText(
         '视频任务已取消，仅停止本地轮询；远端取消结果未知，Provider 任务可能仍会继续。',
@@ -2452,7 +2445,6 @@ describe('ProductionPanel', () => {
     ).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: 'video-job' });
   });
-
   it('opens the asset library when a completed video task is selected', async () => {
     const onOpenAssetLibrary = vi.fn();
     const completed = {
@@ -2474,7 +2466,6 @@ describe('ProductionPanel', () => {
       if (method === 'video.generate.list') return Promise.resolve([completed]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(
       <ProductionPanel
         projectId="project"
@@ -2485,13 +2476,11 @@ describe('ProductionPanel', () => {
         onOpenAssetLibrary={onOpenAssetLibrary}
       />,
     );
-
     expect(await screen.findByText(/结果已进入素材库/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '查看素材' }));
     expect(onOpenAssetLibrary).toHaveBeenCalledWith(savedVideoAsset.id);
     expect(screen.queryByLabelText('生成结果')).not.toBeInTheDocument();
   });
-
   it('renders Worker-owned task snapshots without polling or observing the Provider', async () => {
     const polling = videoJob('polling');
     mockWorker((method) => {
@@ -2501,7 +2490,6 @@ describe('ProductionPanel', () => {
       if (method === 'asset.list') return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(
       <ProductionPanel
         projectId="project"
@@ -2511,7 +2499,6 @@ describe('ProductionPanel', () => {
         videoJobs={[polling]}
       />,
     );
-
     expect(await screen.findByText('生成中')).toBeInTheDocument();
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.list', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('video.generate.observe', expect.anything());

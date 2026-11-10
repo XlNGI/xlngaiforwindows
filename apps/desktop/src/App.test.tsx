@@ -23,7 +23,6 @@ import { selectWorkerScope } from './worker-scope';
 import * as llmClient from './llm-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readMarkdownDocument } from './markdown-import-client';
-
 const windowApi = vi.hoisted(() => ({
   close: vi.fn().mockResolvedValue(undefined),
   isMaximized: vi.fn().mockResolvedValue(false),
@@ -31,7 +30,6 @@ const windowApi = vi.hoisted(() => ({
   onResized: vi.fn().mockResolvedValue(() => undefined),
   toggleMaximize: vi.fn().mockResolvedValue(undefined),
 }));
-
 describe('composeConversationPrompt', () => {
   it('attaches the editable conversation contract once and preserves an empty template', () => {
     expect(composeConversationPrompt('写一场雨夜追逐', '固定 1990 年代、冷色胶片风格')).toBe(
@@ -40,13 +38,11 @@ describe('composeConversationPrompt', () => {
     expect(composeConversationPrompt('  写一场戏  ', '  ')).toBe('  写一场戏  ');
   });
 });
-
 describe('inferAgentCapability', () => {
   it('treats prompt rewriting about video as a text Agent task', () => {
     expect(inferAgentCapability('把这个视频改写为 AI 视频生成提示词')).toBe('document');
     expect(inferAgentCapability('分析附件中的运镜并总结')).toBe('document');
   });
-
   it('reserves media capabilities for explicit generation actions', () => {
     expect(inferAgentCapability('生成一个视频')).toBe('video');
     expect(inferAgentCapability('帮我生成龙在天空翱翔的视频')).toBe('video');
@@ -55,14 +51,12 @@ describe('inferAgentCapability', () => {
     expect(inferAgentCapability('生成角色三视图提示词')).toBe('document');
   });
 });
-
 describe('resolveAgentRunModelSelection', () => {
   const agentModel = { providerProfileId: 'agent-profile', modelId: 'agent-model' };
   const rememberedAgentModel = {
     providerProfileId: 'remembered-profile',
     modelId: 'remembered-model',
   };
-
   it('uses the selected conversation Agent model for every capability hint', () => {
     expect(resolveAgentRunModelSelection('video', undefined, undefined, agentModel)).toEqual(
       agentModel,
@@ -71,7 +65,6 @@ describe('resolveAgentRunModelSelection', () => {
       agentModel,
     );
   });
-
   it('prefers an explicit Agent selection and otherwise restores the conversation preference', () => {
     expect(
       resolveAgentRunModelSelection('video', rememberedAgentModel, undefined, agentModel),
@@ -80,7 +73,6 @@ describe('resolveAgentRunModelSelection', () => {
       rememberedAgentModel,
     );
   });
-
   it('does not let an older remembered preference replace the active Agent model', () => {
     expect(resolveAgentRunModelSelection('text', undefined, undefined, agentModel)).toEqual(
       agentModel,
@@ -90,7 +82,6 @@ describe('resolveAgentRunModelSelection', () => {
     ).toEqual(agentModel);
   });
 });
-
 describe('composeImageGenerationPrompt', () => {
   it('passes the Agent-authored request through without composing a UI prompt', () => {
     const result = composeImageGenerationPrompt('  直接生成角色三视图  ', {
@@ -101,16 +92,14 @@ describe('composeImageGenerationPrompt', () => {
     expect(result).not.toContain('角色三视图提示词');
     expect(result).not.toContain('服装和发型保持一致');
   });
-
   it('does not truncate an authored request in the UI bridge', () => {
     const result = composeImageGenerationPrompt('生成角色图', {
       title: '长文档',
-      content: 'x'.repeat(10_000),
+      content: 'x'.repeat(10000),
     });
     expect(result).toBe('生成角色图');
   });
 });
-
 describe('buildAgentAttachments', () => {
   it('uses the encoded image type after compression while preserving the original display name', () => {
     expect(
@@ -119,7 +108,7 @@ describe('buildAgentAttachments', () => {
           id: 'compressed',
           name: 'reference.png',
           mimeType: 'image/png',
-          size: 2_358_559,
+          size: 2358559,
           kind: 'image',
           dataUrl: 'data:image/jpeg;base64,/9j/',
         },
@@ -128,16 +117,15 @@ describe('buildAgentAttachments', () => {
       { name: 'reference.png', mimeType: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,/9j/' },
     ]);
   });
-
   it('sends a bounded video first frame instead of the full video data URL', () => {
     const attachments = buildAgentAttachments([
       {
         id: 'video-1',
         name: 'result.mp4',
         mimeType: 'video/mp4',
-        size: 8_000_000,
+        size: 8000000,
         kind: 'video',
-        dataUrl: `data:video/mp4;base64,${'x'.repeat(3_000_000)}`,
+        dataUrl: `data:video/mp4;base64,${'x'.repeat(3000000)}`,
         previewDataUrl: 'data:image/jpeg;base64,preview',
       },
     ]);
@@ -149,7 +137,6 @@ describe('buildAgentAttachments', () => {
     });
   });
 });
-
 describe('collectReferenceImageInputs', () => {
   it('uses uploaded images and video first-frame previews for image adapters', () => {
     expect(
@@ -175,32 +162,26 @@ describe('collectReferenceImageInputs', () => {
     ).toEqual(['data:image/png;base64,image', 'data:image/jpeg;base64,preview']);
   });
 });
-
 describe('normalizeImageDataUrl', () => {
   it('normalizes headers and removes whitespace from base64 payloads', () => {
     expect(normalizeImageDataUrl(' DATA:IMAGE/PNG;BASE64, iVBORw0KGgo=\n ')).toBe(
       'data:image/png;base64,iVBORw0KGgo=',
     );
   });
-
   it('rejects non-image or malformed data URLs', () => {
     expect(normalizeImageDataUrl('https://example.com/image.png')).toBeUndefined();
     expect(normalizeImageDataUrl('data:image/png;base64,not valid!')).toBeUndefined();
   });
 });
-
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => windowApi,
 }));
-
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
-
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
-
 vi.mock('./worker-client', () => ({
   callWorker: vi.fn((method: string) =>
     Promise.resolve(
@@ -226,11 +207,9 @@ vi.mock('./worker-client', () => ({
     ),
   ),
 }));
-
 vi.mock('./markdown-import-client', () => ({
   readMarkdownDocument: vi.fn(),
 }));
-
 describe('App', () => {
   /** Model/provider selects live behind the collapsed summary row. */
   function selectLlm(profileId: string, modelId: string): void {
@@ -238,7 +217,6 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('LLM 供应商连接'), { target: { value: profileId } });
     fireEvent.change(screen.getByLabelText('LLM 模型'), { target: { value: modelId } });
   }
-
   async function renderProjectWorkspace() {
     const project = {
       id: 'workspace-project',
@@ -247,7 +225,7 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
       mode: 'read-write' as const,
-      schemaVersion: 1,
+      schemaVersion: 1 as const,
     };
     const runtime = {
       project,
@@ -282,7 +260,6 @@ describe('App', () => {
       if (emptyListMethods.includes(method)) return Promise.resolve([]);
       return baselineWorker(method as never, params as never, scope as never);
     });
-
     const rendered = render(<App />);
     await waitFor(() =>
       expect(
@@ -293,7 +270,6 @@ describe('App', () => {
     );
     return rendered;
   }
-
   it('archives the current scene, closes its dirty shot editor, and restores saved content', async () => {
     await renderProjectWorkspace();
     const baseline = vi.mocked(callWorker).getMockImplementation()!;
@@ -301,7 +277,7 @@ describe('App', () => {
       id: 'lifecycle-scene',
       projectId: 'workspace-project',
       title: '可恢复场次',
-      videoPrompt: '保存的场次正文',
+      prompt: '保存的场次正文',
       position: 0,
       rowVersion: 0,
       createdAt: 'now',
@@ -323,16 +299,32 @@ describe('App', () => {
     vi.mocked(callWorker).mockImplementation((method: string, params: unknown, scope: unknown) => {
       if (method === 'scene.list')
         return Promise.resolve(
-          archived && !(params as { includeArchived?: boolean }).includeArchived
+          archived &&
+            !(
+              params as {
+                includeArchived?: boolean;
+              }
+            ).includeArchived
             ? []
             : [{ ...sceneInfo, rowVersion: version, archivedAt: archived ? 'now' : undefined }],
         );
       if (method === 'shot.list')
         return Promise.resolve(
-          archived && !(params as { includeArchived?: boolean }).includeArchived ? [] : [shotInfo],
+          archived &&
+            !(
+              params as {
+                includeArchived?: boolean;
+              }
+            ).includeArchived
+            ? []
+            : [shotInfo],
         );
       if (method === 'production.lifecycle.change') {
-        archived = (params as { archived: boolean }).archived;
+        archived = (
+          params as {
+            archived: boolean;
+          }
+        ).archived;
         version += 1;
         return Promise.resolve({
           ...sceneInfo,
@@ -386,7 +378,6 @@ describe('App', () => {
       expect.objectContaining({ projectId: 'workspace-project' }),
     );
   });
-
   it('archives a shot immediately after creating its first storyboard with the refreshed version', async () => {
     await renderProjectWorkspace();
     const baseline = vi.mocked(callWorker).getMockImplementation()!;
@@ -440,7 +431,13 @@ describe('App', () => {
       }
       if (method === 'document.get') return Promise.resolve(storyboard);
       if (method === 'production.lifecycle.change') {
-        if ((params as { expectedRowVersion: number }).expectedRowVersion !== 1)
+        if (
+          (
+            params as {
+              expectedRowVersion: number;
+            }
+          ).expectedRowVersion !== 1
+        )
           return Promise.reject(new Error('镜头已变化，请刷新后重试'));
         archived = true;
         return Promise.resolve({ ...shotInfo, rowVersion: 2, archivedAt: 'now' });
@@ -481,7 +478,6 @@ describe('App', () => {
       expect.objectContaining({ projectId: sceneInfo.projectId }),
     );
   });
-
   async function clickProjectNavigationItem(name: RegExp) {
     const findItem = () =>
       within(screen.getByRole('navigation', { name: '项目导航' })).getByRole('button', {
@@ -490,7 +486,6 @@ describe('App', () => {
     await waitFor(() => expect(findItem()).toBeEnabled());
     fireEvent.click(findItem());
   }
-
   function mockComposerSend(
     sendMethod: 'agent.run' | 'llm.generate' | 'chat.message.save',
     response: Promise<unknown>,
@@ -584,7 +579,7 @@ describe('App', () => {
           scopeType: 'project',
           scopeLabel: 'project',
           estimatedTokens: 1,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       return baselineWorker(method as never, params as never);
@@ -629,7 +624,6 @@ describe('App', () => {
             },
           };
   }
-
   beforeEach(() => {
     cleanup();
     selectWorkerScope(undefined);
@@ -671,7 +665,6 @@ describe('App', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
   });
-
   describe('generation status feedback', () => {
     it('refreshes committed documents and production while an Agent task is still running', async () => {
       const accepted = mockComposerSend('agent.run', Promise.resolve(null));
@@ -792,16 +785,13 @@ describe('App', () => {
           dispatched.mock.calls.filter(([event]) => event.type === 'production-source-updated'),
         ).toHaveLength(1),
       );
-
       dispatched.mockRestore();
     });
-
     afterEach(() => {
       cleanup();
       if (vi.isMockFunction(llmClient.streamPreparedLlmGeneration))
         vi.mocked(llmClient.streamPreparedLlmGeneration).mockRestore();
     });
-
     it('keeps polling a prepared generation without announcing completion', async () => {
       const completed = mockComposerSend(
         'llm.generate',
@@ -836,7 +826,6 @@ describe('App', () => {
       expect(screen.getByText('回复结束').closest('article')).toBeInTheDocument();
       expect(screen.queryByText('生成完成')).not.toBeInTheDocument();
     });
-
     it.each(['agent.run', 'llm.generate'] as const)(
       'clears the previous completion while the next %s request is pending and running',
       async (method) => {
@@ -888,7 +877,6 @@ describe('App', () => {
         fireEvent.change(composer, { target: { value: '第一次请求' } });
         fireEvent.click(screen.getByTitle('发送消息'));
         await screen.findByText('回复结束');
-
         fireEvent.change(composer, { target: { value: '继续完善' } });
         fireEvent.click(screen.getByTitle('发送消息'));
         await waitFor(() => expect(requests).toBe(2));
@@ -912,7 +900,6 @@ describe('App', () => {
         expect(screen.queryByText(/^生成(?:已)?完成$/)).not.toBeInTheDocument();
       },
     );
-
     it.each([
       ['complete', '回复结束'],
       ['failed', '生成失败'],
@@ -972,7 +959,6 @@ describe('App', () => {
       if (status !== 'complete') expect(screen.queryByText('生成完成')).not.toBeInTheDocument();
     });
   });
-
   it('turns library drops into real attachments while keeping the composer and discards additions after unmounting', async () => {
     mockComposerSend('agent.run', Promise.resolve(null));
     const baseline = vi.mocked(callWorker).getMockImplementation()!;
@@ -986,7 +972,11 @@ describe('App', () => {
       return baseline(method, params);
     });
     const originalFetch = globalThis.fetch;
-    delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    delete (
+      window as unknown as {
+        __TAURI_INTERNALS__?: unknown;
+      }
+    ).__TAURI_INTERNALS__;
     const readFile = vi.spyOn(FileReader.prototype, 'readAsDataURL');
     const mediaFetch = vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3])));
     globalThis.fetch = mediaFetch;
@@ -1032,7 +1022,6 @@ describe('App', () => {
       readFile.mockRestore();
     }
   });
-
   it('sends a large PNG compressed to JPEG with consistent attachment metadata', async () => {
     mockComposerSend('agent.run', Promise.resolve(null));
     const image = document.createElement('img');
@@ -1058,7 +1047,7 @@ describe('App', () => {
       render(<App />);
       await screen.findByDisplayValue('输入草稿');
       selectLlm('composer-profile', 'composer-model');
-      const file = new File([new Uint8Array(2_358_559)], 'reference.png', { type: 'image/png' });
+      const file = new File([new Uint8Array(2358559)], 'reference.png', { type: 'image/png' });
       fireEvent.change(document.querySelector('input[type="file"]')!, {
         target: { files: [file] },
       });
@@ -1081,7 +1070,6 @@ describe('App', () => {
       toDataURL.mockRestore();
     }
   });
-
   it('continues question forms through ordinary agent.run with a stable key and preserves the composer and attachments', async () => {
     const accepted = mockComposerSend('agent.run', Promise.resolve(null));
     const baseline = vi.mocked(callWorker).getMockImplementation()!;
@@ -1144,7 +1132,9 @@ describe('App', () => {
     };
     vi.mocked(callWorker).mockImplementation(((
       method: string,
-      params: { answers?: AgentInputForm['answers'] },
+      params: {
+        answers?: AgentInputForm['answers'];
+      },
     ) => {
       if (method === 'agent.run') {
         form = { ...form, continuationGenerationId: 'composer-generation' };
@@ -1193,7 +1183,6 @@ describe('App', () => {
     expect(composer).toHaveValue('暂不发送的想法');
     expect(screen.getByText('笔记.txt')).toBeInTheDocument();
   });
-
   it.each(['chapters-to-script', 'script-to-media'] as const)(
     'launches %s through the same Agent with saved source metadata and preserves the composer',
     async (skillId) => {
@@ -1303,7 +1292,6 @@ describe('App', () => {
       await waitFor(() => expect(composer).toHaveValue('另外一条未发送的想法'));
     },
   );
-
   it.each([
     ['agent.run', false],
     ['agent.run', true],
@@ -1330,17 +1318,14 @@ describe('App', () => {
       fireEvent.click(screen.getByTitle('发送消息'));
       expect(vi.mocked(callWorker).mock.calls.filter(([name]) => name === method)).toHaveLength(1);
       if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
-
       await act(async () => {
         rejectRequest(new Error('请求暂时不可用'));
         await response.catch(() => undefined);
       });
-
       expect(await screen.findByText('请求暂时不可用')).toBeInTheDocument();
       expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : '发送中的原始草稿');
     },
   );
-
   it.each([
     ['agent.run', false],
     ['agent.run', true],
@@ -1365,17 +1350,14 @@ describe('App', () => {
       await waitFor(() => expect(callWorker).toHaveBeenCalledWith(method, expect.anything()));
       expect(composer).toHaveValue('发送中的原始草稿');
       if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
-
       await act(async () => {
         resolveRequest(accepted);
         await response;
       });
-
       await waitFor(() => expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : ''));
       expect(screen.getByText('发送中的原始草稿')).toBeInTheDocument();
     },
   );
-
   it.each([false, true])(
     'clears only the original draft after submitting attachment parameters (new draft: %s)',
     async (edit) => {
@@ -1395,7 +1377,7 @@ describe('App', () => {
         model: 'test',
         modelLabel: 'Test',
         apiVersion: 'v1',
-        schemaVersion: 1,
+        schemaVersion: 1 as const,
         endpoint: 'https://example.com/generate',
         documentationUrl: 'https://example.com/docs',
         credentialProvider: 'test',
@@ -1446,7 +1428,11 @@ describe('App', () => {
         .mock.calls.filter(([method]) => method === 'agent.run');
       expect(submitted[1]?.[1]).toHaveProperty('prompt');
       for (const [, params] of submitted) {
-        const prompt = (params as { prompt: string }).prompt;
+        const prompt = (
+          params as {
+            prompt: string;
+          }
+        ).prompt;
         expect(prompt.split('【本会话要求约束】')).toHaveLength(2);
         expect(prompt.split('[附件：参考资料.bin]')).toHaveLength(2);
         expect(prompt).toContain('固定清晨与冷色风格');
@@ -1459,7 +1445,6 @@ describe('App', () => {
       await waitFor(() => expect(composer).toHaveValue(edit ? '等待期间编辑的新草稿' : ''));
     },
   );
-
   it.each(['agent.run', 'llm.generate', 'chat.message.save'] as const)(
     'saves the latest editable requirements before %s receives the composed prompt',
     async (method) => {
@@ -1513,7 +1498,6 @@ describe('App', () => {
       });
     },
   );
-
   it('renders the M2 workspace areas and runtime health', async () => {
     const { container } = await renderProjectWorkspace();
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
@@ -1526,19 +1510,15 @@ describe('App', () => {
     expect(screen.getAllByText('项目 AI 助手').length).toBeGreaterThan(0);
     expect(await screen.findByText('本地服务正常')).toBeInTheDocument();
   });
-
   it('provides custom titlebar window controls', () => {
     render(<App />);
-
     fireEvent.click(screen.getByRole('button', { name: '最小化窗口' }));
     fireEvent.click(screen.getByRole('button', { name: '最大化窗口' }));
     fireEvent.click(screen.getByRole('button', { name: '关闭窗口' }));
-
     expect(windowApi.minimize).toHaveBeenCalledOnce();
     expect(windowApi.toggleMaximize).toHaveBeenCalledOnce();
     expect(windowApi.close).toHaveBeenCalledOnce();
   });
-
   it('toggles the conversation window from the topbar', async () => {
     const { container } = await renderProjectWorkspace();
     const topbarActions = container.querySelector('.topbar-actions');
@@ -1546,23 +1526,18 @@ describe('App', () => {
     const toggle = within(topbarActions as HTMLElement).getByRole('button', { name: '收起会话' });
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
     expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
-
     fireEvent.click(toggle);
-
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
     expect(
       within(topbarActions as HTMLElement).getByRole('button', { name: '打开会话' }),
     ).toHaveAttribute('aria-pressed', 'false');
-
     fireEvent.click(within(topbarActions as HTMLElement).getByRole('button', { name: '打开会话' }));
-
     expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
     expect(
       within(topbarActions as HTMLElement).getByRole('button', { name: '收起会话' }),
     ).toHaveAttribute('aria-pressed', 'true');
   });
-
   it.each([
     {
       nav: /^剧本/,
@@ -1598,28 +1573,21 @@ describe('App', () => {
       const editorPage = () => container.querySelector('.workspace-editor-page');
       expect(editorPage()).toBeInTheDocument();
       expect(editorPage()).toHaveTextContent(heading);
-
       fireEvent.click(screen.getByLabelText(close));
-
       expect(editorPage()).not.toBeInTheDocument();
       expect(container.querySelector('.workspace-conversation-page')).toBeInTheDocument();
-
       fireEvent.click(within(projectNav).getByRole('button', { name: nav }));
-
       expect(editorPage()).toBeInTheDocument();
       expect(editorPage()).toHaveTextContent(heading);
     },
   );
-
   it('closes and reopens the asset library without replacing the project page', async () => {
     const { container } = await renderProjectWorkspace();
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
     const openAssets = () =>
       fireEvent.click(within(projectNav).getByRole('button', { name: /^素材库/ }));
     const editorPage = container.querySelector('.workspace-editor-page');
-
     openAssets();
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('.workspace-assets-page')).not.toHaveTextContent(
       '请打开一个项目',
@@ -1627,17 +1595,13 @@ describe('App', () => {
     expect(container.querySelector('.workspace-editor-page')).toBe(editorPage);
     expect(editorPage).toHaveTextContent('剧本编辑器');
     fireEvent.click(screen.getByLabelText('关闭素材库'));
-
     expect(container.querySelector('.workspace-assets-page')).not.toBeInTheDocument();
     expect(container.querySelector('.workspace-editor-page')).toBe(editorPage);
     expect(editorPage).toBeVisible();
-
     openAssets();
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('.workspace-editor-page')).toBe(editorPage);
   });
-
   it.each(['小说', '剧本', '角色与场景', '场次与镜头', '任务日志'])(
     'keeps the asset library open beside the %s project page',
     async (page) => {
@@ -1645,23 +1609,18 @@ describe('App', () => {
       const projectNav = screen.getByRole('navigation', { name: '项目导航' });
       const openPage = () =>
         fireEvent.click(within(projectNav).getByRole('button', { name: new RegExp(`^${page}`) }));
-
       openPage();
       const editorPage = container.querySelector('.workspace-editor-page');
       fireEvent.click(within(projectNav).getByRole('button', { name: /^素材库/ }));
-
       expect(container.querySelector('.workspace-assets-page')).toBeVisible();
       expect(container.querySelector('.workspace-editor-page')).toBe(editorPage);
       expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent(page);
-
       fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
       openPage();
-
       expect(container.querySelector('.workspace-assets-page')).toBeVisible();
       expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent(page);
     },
   );
-
   it('clears asset filters and old assets when another project is opened', async () => {
     const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
     const firstProject = {
@@ -1742,7 +1701,6 @@ describe('App', () => {
         return Promise.resolve([]);
       return baselineWorker(method, params);
     });
-
     const { container } = render(<App />);
     await screen.findAllByText(firstProject.name);
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
@@ -1753,13 +1711,11 @@ describe('App', () => {
     });
     fireEvent.change(screen.getByLabelText('素材类型'), { target: { value: 'image' } });
     vi.mocked(openDialog).mockResolvedValue(secondProject.rootPath);
-
     const topbar = container.querySelector('.topbar') as HTMLElement;
     fireEvent.click(within(topbar).getByRole('button', { name: '选择项目' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /浏览项目目录/ }));
     await screen.findAllByText(secondProject.name);
     fireEvent.click(within(projectNav).getByRole('button', { name: /^素材库/ }));
-
     await waitFor(() =>
       expect(screen.getByPlaceholderText('搜索别名、文件名或标签')).toHaveValue(''),
     );
@@ -1768,14 +1724,12 @@ describe('App', () => {
     expect(screen.queryByRole('option', { name: /项目一素材/ })).not.toBeInTheDocument();
     expect(container.querySelector('.workspace-editor-page')).toBeVisible();
   });
-
   it('keeps conversation docked beside assets and production and reopens it from the topbar', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1100 });
     const { container } = await renderProjectWorkspace();
     fireEvent.click(screen.getByRole('button', { name: '文生图' }));
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
     fireEvent.click(within(projectNav).getByRole('button', { name: /^素材库/ }));
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('.workspace-conversation-page')).toBeVisible();
     expect(container.querySelector('.floating-window-conversation')).not.toBeInTheDocument();
@@ -1784,16 +1738,13 @@ describe('App', () => {
       { name: '收起会话' },
     );
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
-
     fireEvent.click(toggle);
-
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
     expect(
       within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
         name: '打开会话',
       }),
     ).toHaveAttribute('aria-pressed', 'false');
-
     fireEvent.click(
       within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
         name: '打开会话',
@@ -1801,7 +1752,6 @@ describe('App', () => {
     );
     expect(container.querySelector('.workspace-conversation-page')).toBeVisible();
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
-
     fireEvent.click(
       within(container.querySelector('.topbar-actions') as HTMLElement).getByRole('button', {
         name: '收起会话',
@@ -1810,7 +1760,6 @@ describe('App', () => {
     expect(container.querySelector('.workspace-conversation-page')).not.toBeInTheDocument();
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
   });
-
   it('shows the project startup layout and validates the create form before creating', async () => {
     const { container } = render(<App />);
     const startup = await screen.findByRole('region', { name: '项目启动页' });
@@ -1836,7 +1785,6 @@ describe('App', () => {
     expect(callWorker).not.toHaveBeenCalledWith('project.create', expect.anything());
     expect(callWorker).not.toHaveBeenCalledWith('project.runtime.attach', expect.anything());
   });
-
   it('filters recent projects and exposes them from the project picker', async () => {
     const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
     const recentProjects = [
@@ -1857,20 +1805,17 @@ describe('App', () => {
         : baselineWorker(method, params),
     );
     render(<App />);
-
     expect(await screen.findByRole('button', { name: '雾港来信' })).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox', { name: '搜索最近项目' }), {
       target: { value: '夏日' },
     });
     expect(screen.getByRole('button', { name: '夏日放映室' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '雾港来信' })).not.toBeInTheDocument();
-
     fireEvent.click(screen.getByRole('button', { name: '选择项目' }));
     expect(screen.getByRole('menuitem', { name: /雾港来信/ })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /浏览项目目录/ })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /新建项目/ })).toBeInTheDocument();
   });
-
   it('renames the open project from the project menu', async () => {
     const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
     let currentProject = {
@@ -1898,7 +1843,14 @@ describe('App', () => {
         ]);
       if (method === 'project.recent') return Promise.resolve(recentProjects);
       if (method === 'project.rename') {
-        currentProject = { ...currentProject, name: (params as { name: string }).name };
+        currentProject = {
+          ...currentProject,
+          name: (
+            params as {
+              name: string;
+            }
+          ).name,
+        };
         recentProjects = recentProjects.map((recent) => ({ ...recent, name: currentProject.name }));
         return Promise.resolve(currentProject);
       }
@@ -1916,7 +1868,6 @@ describe('App', () => {
         return Promise.resolve([]);
       return baselineWorker(method, params);
     });
-
     const { container } = render(<App />);
     await screen.findAllByText('修改前名称');
     expect(document.querySelector('.app-shell')).not.toHaveAttribute('data-theme');
@@ -1929,28 +1880,27 @@ describe('App', () => {
     expect(within(topbar).queryByTitle('打开项目')).not.toBeInTheDocument();
     expect(within(topbar).queryByTitle('新建项目')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: '修改项目名称' }));
-
     fireEvent.change(screen.getByRole('textbox', { name: '项目名称' }), {
       target: { value: '修改后名称' },
     });
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
-
     expect(await screen.findAllByText('修改后名称')).not.toHaveLength(0);
     expect(screen.queryByRole('dialog', { name: '修改项目名称' })).not.toBeInTheDocument();
     expect(
-      vi
-        .mocked(callWorker)
-        .mock.calls.some(
-          ([method, params]) =>
-            method === 'project.rename' && (params as { name?: string }).name === '修改后名称',
-        ),
+      vi.mocked(callWorker).mock.calls.some(
+        ([method, params]) =>
+          method === 'project.rename' &&
+          (
+            params as {
+              name?: string;
+            }
+          ).name === '修改后名称',
+      ),
     ).toBe(true);
   });
-
   it('selects a project directory with the native folder dialog before opening', async () => {
     vi.mocked(openDialog).mockResolvedValue('D:\\Projects\\existing-project');
     const { container } = render(<App />);
-
     const topbar = container.querySelector('.topbar') as HTMLElement;
     fireEvent.click(within(topbar).getByRole('button', { name: '选择项目' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /浏览项目目录/ }));
@@ -1965,7 +1915,6 @@ describe('App', () => {
       }),
     );
   });
-
   it('creates and opens one initial conversation for a newly created project', async () => {
     const project = {
       id: 'new-project',
@@ -1974,7 +1923,7 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
       mode: 'read-write' as const,
-      schemaVersion: 1,
+      schemaVersion: 1 as const,
     };
     const runtime = {
       project,
@@ -2004,7 +1953,7 @@ describe('App', () => {
           scopeType: 'project',
           scopeLabel: project.name,
           estimatedTokens: 0,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       if (method === 'conversation.runtime.list' || method === 'agent.task.list')
@@ -2050,7 +1999,6 @@ describe('App', () => {
         return Promise.resolve([]);
       return Promise.resolve(null);
     });
-
     render(<App />);
     const startup = screen.getByRole('region', { name: '项目启动页' });
     fireEvent.click(within(startup).getByRole('button', { name: '新建项目' }));
@@ -2062,7 +2010,6 @@ describe('App', () => {
       target: { value: project.rootPath },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: '创建项目' }));
-
     expect(await screen.findByDisplayValue('新会话')).toBeInTheDocument();
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'conversation.create'),
@@ -2071,7 +2018,6 @@ describe('App', () => {
       vi.mocked(callWorker).mock.calls.find(([method]) => method === 'conversation.create')?.[1],
     ).toEqual({ scopeType: 'project' });
   });
-
   it('opens an existing project with its existing conversation and creates no new one', async () => {
     const project = {
       id: 'existing-project',
@@ -2080,7 +2026,7 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
       mode: 'read-write' as const,
-      schemaVersion: 1,
+      schemaVersion: 1 as const,
     };
     const runtime = {
       project,
@@ -2115,7 +2061,7 @@ describe('App', () => {
           scopeType: 'project',
           scopeLabel: project.name,
           estimatedTokens: 0,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       if (method === 'conversation.runtime.list' || method === 'agent.task.list')
@@ -2161,16 +2107,13 @@ describe('App', () => {
         return Promise.resolve([]);
       return Promise.resolve(null);
     });
-
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '打开项目：Existing Project' }));
-
     expect(await screen.findByDisplayValue('Existing Conversation')).toBeInTheDocument();
     expect(
       vi.mocked(callWorker).mock.calls.some(([method]) => method === 'conversation.create'),
     ).toBe(false);
   });
-
   it('imports a selected Markdown file as a versioned project document', async () => {
     const project = {
       id: 'project',
@@ -2263,13 +2206,11 @@ describe('App', () => {
         return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<App />);
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '导入 Markdown' })).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole('button', { name: '导入 Markdown' }));
-
     await waitFor(() =>
       expect(openDialog).toHaveBeenCalledWith({
         directory: false,
@@ -2292,17 +2233,14 @@ describe('App', () => {
     expect(await screen.findByLabelText('文档内容')).toHaveValue('# 第一章\n\n故事开始。');
     expect(screen.getByText('已导入为草稿 第一章 · 版本 v1')).toBeInTheDocument();
   });
-
   it('expands production UI across the central workspace when a production mode is selected', async () => {
     const { container } = await renderProjectWorkspace();
     fireEvent.click(screen.getByRole('button', { name: '文生图' }));
-
     expect(container.querySelector('.app-shell')).toHaveAttribute(
       'data-navigation-mode',
       'production',
     );
     expect(container.querySelector('.production-panel')).toHaveClass('expanded');
-
     fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
     expect(container.querySelector('.app-shell')).toHaveAttribute(
       'data-navigation-mode',
@@ -2310,7 +2248,6 @@ describe('App', () => {
     );
     expect(container.querySelector('.production-panel')).not.toBeInTheDocument();
   });
-
   it('keeps production open while switching the adjacent project page', async () => {
     const { container } = await renderProjectWorkspace();
     fireEvent.click(screen.getByRole('button', { name: '文生图' }));
@@ -2319,7 +2256,6 @@ describe('App', () => {
         name: /^小说/,
       }),
     );
-
     expect(container.querySelector('.workspace-production-page')).toBeVisible();
     expect(container.querySelector('.workspace-editor-page')).toBeVisible();
     expect(container.querySelector('.app-shell')).toHaveAttribute(
@@ -2327,7 +2263,6 @@ describe('App', () => {
       'production',
     );
   });
-
   it.each(['小说', '剧本', '角色与场景', '场次与镜头', '任务日志'])(
     'keeps the %s page out of image and video production',
     async (page) => {
@@ -2336,46 +2271,36 @@ describe('App', () => {
       const projectNav = screen.getByRole('navigation', { name: '项目导航' });
       fireEvent.click(within(projectNav).getByRole('button', { name: new RegExp(`^${page}`) }));
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();
-
       fireEvent.click(screen.getByRole('button', { name: '文生图' }));
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();
       expect(container.querySelector('[data-pane-id="editor"]')).toBeInTheDocument();
       expect(container.querySelector('.workspace-production-page')).toBeVisible();
-
       fireEvent.click(screen.getByRole('button', { name: '视频制作' }));
       fireEvent.click(screen.getByRole('button', { name: '文生视频' }));
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();
-
       fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
       expect(container.querySelector('.workspace-editor-page')).toBeVisible();
       expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent(page);
     },
   );
-
   it('keeps the asset library and project page open beside production', async () => {
     const { container } = await renderProjectWorkspace();
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
     fireEvent.click(within(projectNav).getByRole('button', { name: /^素材库/ }));
     fireEvent.click(screen.getByRole('button', { name: '文生图' }));
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('.workspace-editor-page')).toBeVisible();
     expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('剧本');
     expect(container.querySelector('.workspace-production-page')).toBeVisible();
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('角色与场景');
     expect(container.querySelector('.workspace-production-page')).toBeVisible();
-
     fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
-
     expect(container.querySelector('.workspace-assets-page')).toBeVisible();
     expect(container.querySelector('[data-pane-id="editor"]')).toHaveTextContent('角色与场景');
     expect(container.querySelector('.workspace-production-page')).not.toBeInTheDocument();
   });
-
   it('opens a chapter artifact from the task log in the novel page', async () => {
     const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
     const chapter = {
@@ -2498,7 +2423,6 @@ describe('App', () => {
         return Promise.resolve([]);
       return baselineWorker(method, params);
     });
-
     render(<App />);
     await screen.findAllByText('Page Boundary Project');
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
@@ -2514,7 +2438,6 @@ describe('App', () => {
     expect(screen.queryByDisplayValue('仅属于小说页面的正文')).not.toBeInTheDocument();
     expect(screen.queryByText(chapter.title)).not.toBeInTheDocument();
   });
-
   it('offers a sample project on first use and sends the selected absolute path', async () => {
     render(<App />);
     const startup = await screen.findByRole('region', { name: '项目启动页' });
@@ -2522,12 +2445,10 @@ describe('App', () => {
     fireEvent.click(within(startup).getByRole('button', { name: '新建项目' }));
     const sampleButton = await screen.findByRole('button', { name: '创建示例项目' });
     expect(sampleButton).toBeDisabled();
-
     fireEvent.change(screen.getByLabelText('项目绝对目录'), {
       target: { value: 'D:\\Projects\\sample-drama' },
     });
     fireEvent.click(sampleButton);
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('project.runtime.createSample', {
         rootPath: 'D:\\Projects\\sample-drama',
@@ -2535,7 +2456,6 @@ describe('App', () => {
       }),
     );
   });
-
   it('keeps observing the running parent when a newer document is waiting for review', async () => {
     mockComposerSend('chat.message.save', Promise.resolve(null));
     const baselineWorker = vi.mocked(callWorker).getMockImplementation()!;
@@ -2574,7 +2494,12 @@ describe('App', () => {
     const events = new Promise<unknown>((resolve) => {
       resolveEvents = resolve;
     });
-    vi.mocked(callWorker).mockImplementation(((method: string, params: { taskId?: string }) => {
+    vi.mocked(callWorker).mockImplementation(((
+      method: string,
+      params: {
+        taskId?: string;
+      },
+    ) => {
       if (method === 'conversation.promptTemplate.get')
         return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
       if (method === 'agent.task.list') return Promise.resolve([review.task, active.task]);
@@ -2606,18 +2531,15 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTitle('发送消息')).toBeEnabled());
     expect(screen.getByRole('textbox', { name: '会话消息' })).toHaveValue('？');
   });
-
   it('opens the settings center with restore controls when no project is open', async () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: '设置中心' }));
-
     expect(await screen.findByRole('dialog', { name: '项目维护' })).toBeInTheDocument();
     expect(screen.getByText('从 SQLite 备份恢复')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '恢复并打开项目' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: '供应商与模型' }));
     expect(await screen.findByRole('button', { name: /添加第一个供应商/ })).toBeInTheDocument();
   });
-
   it('does not merge a streaming message into another conversation', () => {
     const messages = [
       {
@@ -2653,10 +2575,8 @@ describe('App', () => {
       },
       sources: [],
     };
-
     expect(mergeGenerationMessage(messages, 'conversation-b', generation)).toBe(messages);
   });
-
   it('keeps the conversation workspace on the project scope', async () => {
     let resolveProjectConversations!: (value: ConversationInfo[]) => void;
     const projectConversations = new Promise<ConversationInfo[]>((resolve) => {
@@ -2748,12 +2668,20 @@ describe('App', () => {
       if (method === 'provider.profile.list') return Promise.resolve([]);
       if (method === 'video.generate.list') return Promise.resolve([]);
       if (method === 'conversation.list') {
-        return (params as { scopeType: string }).scopeType === 'project'
+        return (
+          params as {
+            scopeType: string;
+          }
+        ).scopeType === 'project'
           ? projectConversations.then((items) => ({ items }))
           : Promise.resolve({ items: [sceneConversation] });
       }
       if (method === 'chat.message.list') {
-        const conversationId = (params as { conversationId: string }).conversationId;
+        const conversationId = (
+          params as {
+            conversationId: string;
+          }
+        ).conversationId;
         return Promise.resolve({
           items: [
             {
@@ -2768,14 +2696,18 @@ describe('App', () => {
         });
       }
       if (method === 'context.preview') {
-        const conversationId = (params as { conversationId: string }).conversationId;
+        const conversationId = (
+          params as {
+            conversationId: string;
+          }
+        ).conversationId;
         return Promise.resolve({
           version: 1,
           scopeType: conversationId === sceneConversation.id ? 'scene' : 'project',
           scopeId: conversationId === sceneConversation.id ? 'scene' : undefined,
           scopeLabel: 'scope',
           estimatedTokens: 1,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       }
@@ -2793,18 +2725,15 @@ describe('App', () => {
     });
     render(<App />);
     await waitFor(() => expect(callWorker).toHaveBeenCalledWith('shot.list', { sceneId: 'scene' }));
-
     await act(async () => {
       resolveProjectConversations([projectConversation]);
       await Promise.resolve();
     });
-
     expect(await screen.findByText('过期项目消息')).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '旧项目会话' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: '场次会话' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '场次' })).not.toBeInTheDocument();
   });
-
   it('ignores an in-flight generation poll after switching conversations', async () => {
     const conversationA: ConversationInfo = {
       id: 'conversation-a',
@@ -2853,7 +2782,6 @@ describe('App', () => {
     const stalePoll = new Promise<LlmGenerationInfo>((resolve) => {
       resolveStalePoll = resolve;
     });
-
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'conversation.promptTemplate.get')
         return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
@@ -2913,7 +2841,11 @@ describe('App', () => {
       if (method === 'conversation.list')
         return Promise.resolve({ items: [conversationA, conversationB] });
       if (method === 'chat.message.list') {
-        const conversationId = (params as { conversationId: string }).conversationId;
+        const conversationId = (
+          params as {
+            conversationId: string;
+          }
+        ).conversationId;
         return Promise.resolve({
           items:
             conversationId === conversationB.id
@@ -2936,7 +2868,7 @@ describe('App', () => {
           scopeType: 'project',
           scopeLabel: 'project',
           estimatedTokens: 1,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       }
@@ -2955,7 +2887,6 @@ describe('App', () => {
         return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<App />);
     const conversationSelect = await screen.findByDisplayValue('会话 A');
     fireEvent.change(screen.getByLabelText('会话消息'), { target: { value: '生成内容' } });
@@ -2966,11 +2897,9 @@ describe('App', () => {
         vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
       ).toHaveLength(1),
     );
-
     fireEvent.change(conversationSelect, { target: { value: conversationB.id } });
     expect(await screen.findByText('会话 B 当前消息')).toBeInTheDocument();
     expect(screen.getByTitle('发送消息')).toBeInTheDocument();
-
     await act(async () => {
       resolveStalePoll(streaming);
       await Promise.resolve();
@@ -2978,13 +2907,11 @@ describe('App', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 350));
     });
-
     expect(screen.queryByTitle('停止生成')).not.toBeInTheDocument();
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
     ).toHaveLength(1);
   });
-
   it.each([
     ['帮我生成一个小说', 'selected'],
     ['帮我生成一个小说', 'novel-reference'],
@@ -3170,7 +3097,6 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
     };
-
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'conversation.promptTemplate.get')
         return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
@@ -3255,7 +3181,11 @@ describe('App', () => {
       }
       if (method === 'agent.changeSet.list' && isSceneProposal)
         return Promise.resolve(
-          (params as { includeTerminal?: boolean }).includeTerminal && sceneProposalGenerated
+          (
+            params as {
+              includeTerminal?: boolean;
+            }
+          ).includeTerminal && sceneProposalGenerated
             ? [
                 {
                   ...sceneProposal,
@@ -3277,7 +3207,7 @@ describe('App', () => {
                   id: 'applied-scene',
                   projectId: 'project',
                   title: '生成的庭院',
-                  videoPrompt: '司机转身，他没有开口。',
+                  prompt: '司机转身，他没有开口。',
                   position: 0,
                   rowVersion: 0,
                   createdAt: 'now',
@@ -3292,15 +3222,16 @@ describe('App', () => {
             id: 'applied-shot',
             sceneId: 'applied-scene',
             title: '庭院远景',
-            prompt: '清晨的庭院镜头提示词',
-            authoringIR: {
-              schemaVersion: 1,
-              kind: 'shot',
+
+            ...{
               prompt: '清晨的庭院镜头提示词',
-              references: {
-                characterDocumentIds: [],
-                sceneDocumentIds: [createdDocument.id],
-                propDocumentIds: [],
+              bindings: {
+                schemaVersion: 1 as const,
+                ...{
+                  characterDocumentIds: [],
+                  sceneDocumentIds: [createdDocument.id],
+                  propDocumentIds: [],
+                },
               },
             },
             position: 0,
@@ -3311,7 +3242,11 @@ describe('App', () => {
           },
         ]);
       if (method === 'scene.save' && isSceneProposal) {
-        const videoPrompt = (params as { videoPrompt?: string }).videoPrompt;
+        const prompt = (
+          params as {
+            prompt?: string;
+          }
+        ).prompt;
         sceneRowVersion += 1;
         return Promise.resolve({
           id: 'applied-scene',
@@ -3319,7 +3254,7 @@ describe('App', () => {
           title: '生成的庭院',
           position: 0,
           rowVersion: sceneRowVersion,
-          ...(videoPrompt ? { videoPrompt } : {}),
+          ...(prompt ? { prompt } : {}),
           createdAt: 'now',
           updatedAt: 'now',
         });
@@ -3431,7 +3366,11 @@ describe('App', () => {
           id: 'batch-original',
           conversationId: conversation.id,
           role: 'user' as const,
-          content: (params as { content: string }).content,
+          content: (
+            params as {
+              content: string;
+            }
+          ).content,
           status: 'complete' as const,
           createdAt: 'now',
         });
@@ -3442,7 +3381,7 @@ describe('App', () => {
           scopeType: 'project' as const,
           scopeLabel: 'project',
           estimatedTokens: 1,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       if (method === 'conversation.modelPreference.set')
@@ -3454,7 +3393,14 @@ describe('App', () => {
           confirmedAt: 'now',
           updatedAt: 'now',
         });
-      if (method === 'agent.run' && (params as { prompt?: string }).prompt === '续写小说下一章') {
+      if (
+        method === 'agent.run' &&
+        (
+          params as {
+            prompt?: string;
+          }
+        ).prompt === '续写小说下一章'
+      ) {
         return Promise.resolve({
           status: 'pending_intent' as const,
           capability: 'novel' as const,
@@ -3472,7 +3418,10 @@ describe('App', () => {
         });
       }
       if (method === 'agent.run') {
-        const run = params as { providerProfileId?: string; modelId?: string };
+        const run = params as {
+          providerProfileId?: string;
+          modelId?: string;
+        };
         if (!run.modelId && ['missing_model', 'model_unavailable'].includes(batchModelState))
           return Promise.resolve({
             status: 'needs_model_selection' as const,
@@ -3508,7 +3457,6 @@ describe('App', () => {
         return Promise.resolve([]);
       throw new Error(`Unexpected method ${method}`);
     });
-
     render(<App />);
     await screen.findByDisplayValue('Project conversation');
     if (batchModelState === 'scene-proposal-open-page') {
@@ -3526,20 +3474,17 @@ describe('App', () => {
       target: { value: firstPrompt },
     });
     fireEvent.click(screen.getByTitle('发送消息'));
-
     const needsClarification = firstPrompt === '续写小说下一章';
     if (needsClarification) {
       expect(
         await screen.findByText('请补充要操作的小说章节或新章节标题，助手会继续当前任务。'),
       ).toBeInTheDocument();
       expect(screen.getByLabelText('会话消息')).toHaveValue(firstPrompt);
-
       fireEvent.change(screen.getByLabelText('会话消息'), {
         target: { value: 'Draft a project brief' },
       });
       fireEvent.click(screen.getByTitle('发送消息'));
     }
-
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(
         'agent.run',
@@ -3598,19 +3543,21 @@ describe('App', () => {
           'scene.save',
           expect.objectContaining({
             sceneId: 'applied-scene',
-            videoPrompt: '司机走进屋内，他坐下。',
+            prompt: '司机走进屋内，他坐下。',
             expectedRowVersion: 0,
           }),
         ),
       );
       expect(
-        vi
-          .mocked(callWorker)
-          .mock.calls.some(
-            ([method, params]) =>
-              method === 'scene.save' &&
-              (params as { sceneDocumentIds?: string[] }).sceneDocumentIds !== undefined,
-          ),
+        vi.mocked(callWorker).mock.calls.some(
+          ([method, params]) =>
+            method === 'scene.save' &&
+            (
+              params as {
+                sceneDocumentIds?: string[];
+              }
+            ).sceneDocumentIds !== undefined,
+        ),
       ).toBe(false);
       return;
     }
@@ -3630,13 +3577,15 @@ describe('App', () => {
       ).toHaveClass('active');
       expect(callWorker).toHaveBeenCalledWith('document.get', { documentId: createdDocument.id });
       expect(
-        vi
-          .mocked(callWorker)
-          .mock.calls.some(
-            ([method, params]) =>
-              method === 'document.get' &&
-              (params as { documentId: string }).documentId === 'other-task-document',
-          ),
+        vi.mocked(callWorker).mock.calls.some(
+          ([method, params]) =>
+            method === 'document.get' &&
+            (
+              params as {
+                documentId: string;
+              }
+            ).documentId === 'other-task-document',
+        ),
       ).toBe(false);
       return;
     }
@@ -3691,7 +3640,6 @@ describe('App', () => {
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'document.list'),
     ).toHaveLength(2);
   });
-
   it('splits script documents from character and scene prompts', async () => {
     const archivedOutlineSummary = {
       id: 'd-outline',
@@ -3833,7 +3781,12 @@ describe('App', () => {
           },
         ]);
       if (method === 'document.get') {
-        const isCharacter = (params as { documentId: string }).documentId === 'd-character';
+        const isCharacter =
+          (
+            params as {
+              documentId: string;
+            }
+          ).documentId === 'd-character';
         const id = isCharacter ? 'd-character' : 'd-outline';
         return Promise.resolve({
           id,
@@ -3929,11 +3882,9 @@ describe('App', () => {
     expect(screen.queryByText('小说章节一')).not.toBeInTheDocument();
     expect(screen.queryByText('第一集分镜')).not.toBeInTheDocument();
     expect(screen.getByText('所有镜头保持冷色调')).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole('button', { name: /^角色与场景/ }));
     expect(screen.getByText('角色设定')).toBeInTheDocument();
     expect(screen.getByText('场景设定')).toBeInTheDocument();
-
     fireEvent.click(screen.getByLabelText('选择文档 角色设定'));
     fireEvent.click(screen.getByLabelText('选择文档 场景设定'));
     expect(screen.getByText('已选 2 项')).toBeInTheDocument();
@@ -3941,7 +3892,6 @@ describe('App', () => {
     expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
     expect(screen.queryByText('生产约束记录')).not.toBeInTheDocument();
     expect(screen.queryByText('所有镜头保持冷色调')).not.toBeInTheDocument();
-
     const projectNav = screen.getByRole('navigation', { name: '项目导航' });
     fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
     const scriptFilters = screen.getByRole('group', { name: '文档类型筛选' });
@@ -3949,27 +3899,21 @@ describe('App', () => {
       'aria-pressed',
       'true',
     );
-
     fireEvent.click(within(scriptFilters).getByRole('button', { name: '约束' }));
     expect(screen.getByText('剧情约束')).toBeInTheDocument();
     expect(screen.queryByText('项目计划')).not.toBeInTheDocument();
     fireEvent.click(within(scriptFilters).getByRole('button', { name: '全部' }));
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
     const filters = screen.getByRole('group', { name: '文档类型筛选' });
-
     fireEvent.click(within(filters).getByRole('button', { name: '角色' }));
     expect(screen.getByText('角色设定')).toBeInTheDocument();
     expect(screen.queryByText('场景设定')).not.toBeInTheDocument();
-
     fireEvent.click(within(filters).getByRole('button', { name: '场景' }));
     expect(screen.getByText('场景设定')).toBeInTheDocument();
     expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
-
     fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
     expect(screen.getByText('角色设定')).toBeInTheDocument();
     expect(screen.getByText('场景设定')).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole('button', { name: '打开文档 角色设定' }));
     expect(await screen.findByRole('region', { name: '提示词预览' })).toHaveTextContent(
       '角色专属正文',
@@ -4000,20 +3944,17 @@ describe('App', () => {
     fireEvent.change(screen.getByPlaceholderText('搜索别名、文件名或标签'), {
       target: { value: '夜景素材' },
     });
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
     expect(screen.queryByText('角色设定')).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '提示词预览' })).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText('搜索别名、文件名或标签')).toHaveValue('夜景素材');
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: '文档在独立窗口打开' })).not.toBeInTheDocument();
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
     expect(screen.getByRole('region', { name: '提示词预览' })).toHaveTextContent(
       '未保存的角色修改',
     );
     expect(screen.getByPlaceholderText('搜索别名、文件名或标签')).toHaveValue('夜景素材');
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
     fireEvent.click(screen.getByRole('button', { name: /项目大纲/ }));
     expect(await screen.findByRole('region', { name: '文档内容预览' })).toHaveTextContent(
@@ -4042,7 +3983,6 @@ describe('App', () => {
     fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
     expect(screen.queryByDisplayValue('未保存的剧本修改')).not.toBeInTheDocument();
     expect(screen.queryByText('项目大纲')).not.toBeInTheDocument();
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
     const documentDirectory = screen.getByRole('complementary', { name: '项目文档目录' });
     expect(within(documentDirectory).queryByText('文档', { exact: true })).not.toBeInTheDocument();
@@ -4070,7 +4010,6 @@ describe('App', () => {
         expectedDocumentRowVersion: 0,
       }),
     );
-
     fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
     const lifecycleFilters = screen.getByRole('group', { name: '文档生命周期筛选' });
     fireEvent.click(within(lifecycleFilters).getByRole('button', { name: '已归档' }));
@@ -4098,7 +4037,6 @@ describe('App', () => {
       ).toHaveLength(2),
     );
   });
-
   it('publishes an edited document in one action without a separate review step', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
       if (method === 'conversation.promptTemplate.get')
@@ -4258,7 +4196,6 @@ describe('App', () => {
     fireEvent.click(await screen.findByRole('region', { name: '文档内容预览' }));
     const editor = await screen.findByLabelText('文档内容');
     fireEvent.change(editor, { target: { value: '# 大纲 v2' } });
-
     // One click both saves the edit and publishes it as the authority version.
     fireEvent.click(screen.getByRole('button', { name: '保存并发布' }));
     await waitFor(() =>
@@ -4274,7 +4211,6 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: '提交审核' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeInTheDocument();
   });
-
   it.each(['character', 'scene'] as const)(
     'strictly filters the directory while preserving the opened %s editor',
     async (kind) => {
@@ -4415,7 +4351,6 @@ describe('App', () => {
         target: { value: '尚未保存的编辑内容' },
       });
       fireEvent.blur(screen.getByLabelText('提示词'));
-
       const filters = screen.getByRole('group', { name: '文档类型筛选' });
       const directory = screen.getByRole('complementary', { name: '项目文档目录' });
       for (const label of ['道具', kind === 'scene' ? '角色' : '场景']) {
@@ -4434,7 +4369,6 @@ describe('App', () => {
       );
     },
   );
-
   it.each([
     ['character', false],
     ['scene', false],
@@ -4467,9 +4401,25 @@ describe('App', () => {
           version: 1,
           state: 'draft' as const,
           contentMarkdown: '林澈，灯塔守望员',
+          bindings:
+            kind === 'character'
+              ? { schemaVersion: 1 as const, voiceDocumentId: 'voice-prompt' }
+              : undefined,
           createdAt: 'now',
         },
         currentVersionId: 'v-1',
+      };
+      const voicePromptDocument = {
+        ...character,
+        id: 'voice-prompt',
+        kind: 'voice' as const,
+        title: '林澈音色',
+        currentVersion: {
+          ...character.currentVersion,
+          contentMarkdown: '低沉清晰，语速平稳。',
+          sampleText: '灯塔还亮着。',
+          bindings: undefined,
+        },
       };
       const imageAdapter: AdapterDescriptor = {
         key: `${useReference ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE'}:vidu:viduq2:v2`,
@@ -4480,7 +4430,7 @@ describe('App', () => {
         model: 'viduq2',
         modelLabel: 'Vidu Q2',
         apiVersion: 'v2',
-        schemaVersion: 1,
+        schemaVersion: 1 as const,
         endpoint: 'https://api.vidu.com/ent/v2/text2image',
         documentationUrl: 'https://platform.vidu.com/docs',
         credentialProvider: 'vidu',
@@ -4588,8 +4538,16 @@ describe('App', () => {
           return Promise.resolve([
             { project, projectSessionId: 'image-production-session', active: true, state: 'ready' },
           ]);
-        if (method === 'document.list') return Promise.resolve([character]);
-        if (method === 'document.get') return Promise.resolve(character);
+        if (method === 'document.list')
+          return Promise.resolve(
+            kind === 'character' ? [character, voicePromptDocument] : [character],
+          );
+        if (method === 'document.get')
+          return Promise.resolve(
+            (params as { documentId: string }).documentId === 'voice-prompt'
+              ? voicePromptDocument
+              : character,
+          );
         if (method === 'document.versions') return Promise.resolve([]);
         if (method === 'scene.list')
           return Promise.resolve([
@@ -4617,7 +4575,13 @@ describe('App', () => {
         if (method === 'asset.list') {
           if (
             hasGeneratedCharacterAsset &&
-            (params as { sourceDocumentId?: string } | undefined)?.sourceDocumentId === character.id
+            (
+              params as
+                | {
+                    sourceDocumentId?: string;
+                  }
+                | undefined
+            )?.sourceDocumentId === character.id
           )
             return Promise.resolve([generatedCharacterAsset]);
           return Promise.resolve(
@@ -4745,6 +4709,53 @@ describe('App', () => {
       ).not.toBeInTheDocument();
       await screen.findByRole('region', { name: '提示词预览' });
       if (kind === 'character') {
+        const voicePrompt = screen.getByRole('region', { name: '角色音色提示词' });
+        expect(
+          await within(voicePrompt).findByRole('region', { name: '音色描述预览' }),
+        ).toHaveTextContent('低沉清晰，语速平稳。');
+        expect(within(voicePrompt).getByRole('region', { name: '试音文本预览' })).toHaveTextContent(
+          '灯塔还亮着。',
+        );
+        fireEvent.click(within(voicePrompt).getByRole('button', { name: '生成音色' }));
+        const designPanel = await screen.findByRole('region', { name: '按提示词设计新音色' });
+        expect(container.querySelector('.app-shell')).toHaveAttribute(
+          'data-navigation-mode',
+          'production',
+        );
+        expect(designPanel.closest('.workspace-production-page')).not.toBeNull();
+        expect(voicePrompt).not.toContainElement(designPanel);
+        expect(await within(designPanel).findByText('低沉清晰，语速平稳。')).toBeInTheDocument();
+        expect(within(designPanel).getByText('角色：角色设定')).toBeInTheDocument();
+        expect(within(designPanel).getByRole('button', { name: '确认生成新音色' })).toBeDisabled();
+        expect(
+          vi
+            .mocked(callWorker)
+            .mock.calls.some(([method]) => method === 'characterVoiceDesign.prepare'),
+        ).toBe(false);
+        const audioGroup = screen.getByRole('button', { name: '音频制作' });
+        if (audioGroup.getAttribute('aria-expanded') !== 'true') fireEvent.click(audioGroup);
+        fireEvent.click(screen.getByRole('button', { name: '音频生成' }));
+        expect(
+          screen.queryByRole('region', { name: '按提示词设计新音色' }),
+        ).not.toBeInTheDocument();
+        expect(container.querySelector('.production-panel')).not.toBeNull();
+        expect(container.querySelector('.app-shell')).toHaveAttribute(
+          'data-navigation-mode',
+          'production',
+        );
+        fireEvent.click(within(voicePrompt).getByRole('button', { name: '生成音色' }));
+        const reopenedPanel = await screen.findByRole('region', { name: '按提示词设计新音色' });
+        fireEvent.click(within(reopenedPanel).getByRole('button', { name: '关闭音色生成' }));
+        expect(
+          screen.queryByRole('region', { name: '按提示词设计新音色' }),
+        ).not.toBeInTheDocument();
+        expect(container.querySelector('.app-shell')).toHaveAttribute(
+          'data-navigation-mode',
+          'project',
+        );
+        expect(screen.getByRole('region', { name: '提示词预览' })).toHaveTextContent(
+          '林澈，灯塔守望员',
+        );
         const sceneBindings = screen.getByRole('region', { name: '场次绑定' });
         expect(
           within(sceneBindings).getByRole('button', { name: '第1场 · 灯塔' }),
@@ -4764,7 +4775,6 @@ describe('App', () => {
       );
       expect(screen.queryByLabelText('文档类型')).not.toBeInTheDocument();
       expect(screen.queryByText('约束条件')).not.toBeInTheDocument();
-
       if (kind === 'scene') {
         if (useReference) {
           await screen.findByRole('option', { name: '庭院主图' });
@@ -4816,7 +4826,6 @@ describe('App', () => {
         expect.objectContaining({ sourceDocumentId: character.id }),
         expect.objectContaining({ projectId: project.id }),
       );
-
       if (kind === 'character') {
         fireEvent.change(imagePrompt, { target: { value: '临时修改的画面提示词' } });
         const generateImageButton = screen.getByRole('button', { name: '生成图片' });
@@ -4839,7 +4848,6 @@ describe('App', () => {
           }),
           expect.objectContaining({ projectId: project.id }),
         );
-
         fireEvent.click(screen.getByRole('button', { name: '关闭生产参数' }));
         await waitFor(() =>
           expect(container.querySelector('.app-shell')).toHaveAttribute(
@@ -4855,7 +4863,6 @@ describe('App', () => {
       }
     },
   );
-
   it('shows and saves the shot storyboard document in the shot workspace', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
       if (method === 'conversation.promptTemplate.get')
@@ -4945,8 +4952,16 @@ describe('App', () => {
           updatedAt: 'now',
         });
       if (method === 'shot.storyboard.save') {
-        const title = (params as { title: string }).title;
-        const contentMarkdown = (params as { contentMarkdown: string }).contentMarkdown;
+        const title = (
+          params as {
+            title: string;
+          }
+        ).title;
+        const contentMarkdown = (
+          params as {
+            contentMarkdown: string;
+          }
+        ).contentMarkdown;
         return Promise.resolve({
           id: 'sb-1',
           projectId: 'project',
@@ -5007,7 +5022,6 @@ describe('App', () => {
     expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');
     fireEvent.click(await screen.findByRole('region', { name: '分镜内容预览' }));
     expect(screen.getByLabelText('分镜内容')).toHaveValue('# 分镜\n\n1. 远景。');
-
     fireEvent.change(screen.getByLabelText('分镜内容'), {
       target: { value: '# 分镜\n\n2. 中景。' },
     });
@@ -5020,9 +5034,10 @@ describe('App', () => {
       }),
     );
   });
-
   it('seeds shot prompt into image production from the shot workspace', async () => {
-    const compilePrompt: { value?: string } = {};
+    const compilePrompt: {
+      value?: string;
+    } = {};
     const project = {
       id: 'project',
       name: 'Shot Project',
@@ -5041,7 +5056,7 @@ describe('App', () => {
       model: 'viduq2',
       modelLabel: 'Vidu Q2',
       apiVersion: 'v2',
-      schemaVersion: 1,
+      schemaVersion: 1 as const,
       endpoint: 'https://api.vidu.com/ent/v2/text2image',
       documentationUrl: 'https://platform.vidu.com/docs',
       credentialProvider: 'vidu',
@@ -5228,7 +5243,6 @@ describe('App', () => {
         ),
     ).toHaveLength(0);
   });
-
   it('resolves mentioned character assets into reference-to-image production', async () => {
     const project = {
       id: 'project',
@@ -5268,7 +5282,7 @@ describe('App', () => {
       model: 'viduq2',
       modelLabel: 'Vidu Q2',
       apiVersion: 'v2',
-      schemaVersion: 1,
+      schemaVersion: 1 as const,
       endpoint: 'https://api.vidu.com/ent/v2/text2image',
       documentationUrl: 'https://platform.vidu.com/docs',
       credentialProvider: 'vidu',
@@ -5373,8 +5387,13 @@ describe('App', () => {
       if (method === 'project.recent' || method === 'constraint.list') return Promise.resolve([]);
       if (method === 'document.list') return Promise.resolve([character]);
       if (method === 'asset.list') {
-        const sourceDocumentId = (params as { sourceDocumentId?: string } | undefined)
-          ?.sourceDocumentId;
+        const sourceDocumentId = (
+          params as
+            | {
+                sourceDocumentId?: string;
+              }
+            | undefined
+        )?.sourceDocumentId;
         if (!sourceDocumentId || sourceDocumentId === character.id) {
           return Promise.resolve([characterAsset]);
         }
@@ -5447,7 +5466,13 @@ describe('App', () => {
           adapters: [imageAdapter, referenceAdapter],
         });
       if (method === 'adapter.resolve') {
-        const capability = (params as { capability?: string } | undefined)?.capability;
+        const capability = (
+          params as
+            | {
+                capability?: string;
+              }
+            | undefined
+        )?.capability;
         return Promise.resolve(
           capability === 'REFERENCE_TO_IMAGE' ? referenceAdapter : imageAdapter,
         );
@@ -5495,7 +5520,6 @@ describe('App', () => {
         ),
     ).toHaveLength(0);
   });
-
   it('reviews a direct paid image submission on the shared confirmation card', async () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
@@ -5619,7 +5643,7 @@ describe('App', () => {
           scopeType: 'project',
           scopeLabel: 'project',
           estimatedTokens: 1,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [],
         });
       if (method === 'agent.run')
@@ -5670,7 +5694,6 @@ describe('App', () => {
       target: { value: '生成一张角色图' },
     });
     fireEvent.click(screen.getByTitle('发送消息'));
-
     // The frozen draft is shown before the paid Provider call.
     const card = await screen.findByRole('alert');
     expect(card).toHaveTextContent('媒体供应商 / 图片模型');
@@ -5681,7 +5704,6 @@ describe('App', () => {
       'media.generation.confirmSubmission',
       expect.anything(),
     );
-
     fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith(

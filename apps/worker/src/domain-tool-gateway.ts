@@ -4,6 +4,7 @@ import type {
   ConversationTaskToolGrant,
   DomainToolResultV1,
   LlmToolDefinition,
+  PromptBindingIR,
 } from '@ai-video/contracts';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { validateToolArguments } from '@earendil-works/pi-ai';
@@ -16,6 +17,7 @@ import { AgentExecutionStore, createRepositories } from '@ai-video/persistence';
 import type { AgentToolCallRecord } from '@ai-video/domain';
 import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { inferDocumentKindFromDraft } from './document-kind.js';
+import { parseEpisodeStructureArguments, validateEpisodeReferences } from './episode-structure.js';
 
 export interface PiToolIdentity {
   taskId: string;
@@ -315,7 +317,8 @@ export class DomainToolGateway {
           | undefined;
         if (!task) throw new Error('Pi task no longer belongs to the current project.');
         if (definition.name === 'novel.episode.submit_structure') {
-          const structure = parseStructure(args);
+          const structure = parseEpisodeStructureArguments(JSON.stringify(args));
+          validateEpisodeReferences(database, project.id, structure);
           let nextSceneOrdinal = 0;
           const changeSet = this.changeSets.saveDraft({
             taskId: this.identity.taskId,
@@ -326,9 +329,14 @@ export class DomainToolGateway {
               return [
                 {
                   entityType: 'scene' as const,
-                  action: 'create' as const,
+                  action: scene.sceneId ? ('update' as const) : ('create' as const),
+                  ...(scene.sceneId
+                    ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
+                    : {}),
                   title: scene.title,
-                  sceneDocumentId: scene.sceneDocumentId,
+                  prompt: scene.prompt,
+                  bindings: scene.bindings,
+                  timing: scene.timing,
                 },
                 ...scene.shots.map((shot) => ({
                   entityType: 'shot' as const,
@@ -336,6 +344,8 @@ export class DomainToolGateway {
                   parentItemOrdinal: sceneOrdinal,
                   title: shot.title,
                   prompt: shot.prompt,
+                  bindings: shot.bindings,
+                  timing: shot.timing,
                 })),
               ];
             }),
@@ -344,11 +354,14 @@ export class DomainToolGateway {
         }
 
         const title = requiredString(args.title, 'title', 200);
-        const contentMarkdown = requiredString(args.contentMarkdown, 'contentMarkdown', 1_000_000);
+        requiredString(args.contentMarkdown, 'contentMarkdown', 1_000_000);
+        const contentMarkdown = args.contentMarkdown as string;
         const document = this.documents.writePiAgentDraftInTransaction(database, project, {
           taskId: this.identity.taskId,
           title,
           contentMarkdown,
+          bindings: args.bindings as PromptBindingIR | undefined,
+          sampleText: args.sampleText as string | undefined,
           kind: documentKindFor(kind, args.documentKind, title, contentMarkdown),
           scopeType: task.scope_type,
           scopeId: task.scope_id ?? undefined,
@@ -408,7 +421,16 @@ function documentKindFor(
   requested: unknown,
   title: string,
   contentMarkdown: string,
-): 'outline' | 'plan' | 'constraint' | 'character' | 'scene' | 'prop' | 'storyboard' | 'note' {
+):
+  | 'outline'
+  | 'plan'
+  | 'constraint'
+  | 'character'
+  | 'scene'
+  | 'prop'
+  | 'voice'
+  | 'storyboard'
+  | 'note' {
   if (kind === 'episode-outline') return 'plan';
   if (kind === 'character-prompts') return 'character';
   if (kind === 'scene-prompts') return 'scene';
@@ -420,55 +442,10 @@ function documentKindFor(
     requested === 'character' ||
     requested === 'scene' ||
     requested === 'prop' ||
+    requested === 'voice' ||
     requested === 'storyboard' ||
     requested === 'note'
   )
     return requested;
   throw new Error('documentKind is invalid.');
-}
-
-function parseStructure(args: ToolArguments): {
-  episodeTitle: string;
-  scenes: Array<{
-    title: string;
-    sceneDocumentId?: string;
-    shots: Array<{ title: string; prompt: string }>;
-  }>;
-} {
-  const episodeTitle = requiredString(args.episodeTitle, 'episodeTitle', 200);
-  if (!Array.isArray(args.scenes) || args.scenes.length < 1 || args.scenes.length > 20) {
-    throw new Error('scenes must contain between 1 and 20 items.');
-  }
-  const scenes = args.scenes.map((raw, sceneIndex) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error(`scene ${sceneIndex} must be an object.`);
-    }
-    const scene = raw as Record<string, unknown>;
-    if (Object.keys(scene).some((key) => !['title', 'sceneDocumentId', 'shots'].includes(key))) {
-      throw new Error(`scene ${sceneIndex} contains an unsupported field.`);
-    }
-    if (!Array.isArray(scene.shots) || scene.shots.length < 1 || scene.shots.length > 30) {
-      throw new Error(`scene ${sceneIndex} shots must contain between 1 and 30 items.`);
-    }
-    return {
-      title: requiredString(scene.title, `scene ${sceneIndex} title`, 200),
-      ...(scene.sceneDocumentId !== undefined
-        ? { sceneDocumentId: requiredString(scene.sceneDocumentId, 'sceneDocumentId', 200) }
-        : {}),
-      shots: scene.shots.map((rawShot, shotIndex) => {
-        if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
-          throw new Error(`shot ${sceneIndex}.${shotIndex} must be an object.`);
-        }
-        const shot = rawShot as Record<string, unknown>;
-        if (Object.keys(shot).some((key) => !['title', 'prompt'].includes(key))) {
-          throw new Error(`shot ${sceneIndex}.${shotIndex} contains an unsupported field.`);
-        }
-        return {
-          title: requiredString(shot.title, `shot ${sceneIndex}.${shotIndex} title`, 200),
-          prompt: requiredString(shot.prompt, `shot ${sceneIndex}.${shotIndex} prompt`, 2_000),
-        };
-      }),
-    };
-  });
-  return { episodeTitle, scenes };
 }

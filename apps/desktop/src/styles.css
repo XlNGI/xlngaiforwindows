@@ -1080,6 +1080,25 @@ button {
   opacity: 0.5;
 }
 
+.voice-design-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: 10px;
+  padding: 16px;
+  overflow: auto;
+  background: var(--panel-bg);
+}
+
+.voice-design-source {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+
 .dialog-backdrop {
   position: fixed;
   z-index: 1000;
@@ -5013,6 +5032,7 @@ button {
 .task-log-detail-error p {
   margin: 4px 0 0;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
   color: #d2a5a0;
   line-height: 1.5;
 }
@@ -6030,9 +6050,16 @@ button {
 
 .production-status-message {
   display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
   color: var(--text-muted);
   font-size: calc(10px * var(--ui-font-scale));
   line-height: 1.4;
+}
+
+.video-task-summary .error-copy {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .field-group {
@@ -11837,6 +11864,27 @@ button {
   gap: 10px;
   padding-top: 16px;
   border-top: 1px solid var(--border-subtle);
+}
+
+.character-voice-prompt {
+  display: grid;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.character-voice-prompt .markdown-editor-workspace {
+  flex: none;
+  resize: vertical;
+  overflow: auto;
+}
+
+.character-voice-description-editor {
+  min-height: 160px;
+}
+
+.character-voice-sample-editor {
+  min-height: 100px;
 }
 
 .bound-scene-links .button {

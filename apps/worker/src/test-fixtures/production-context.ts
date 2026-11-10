@@ -36,11 +36,8 @@ export function productionContextResults() {
     ...Array.from({ length: 7 }, (_, i) =>
       result(i, 'authoring', {
         authoring: {
-          schemaVersion: 1,
-          kind: 'shot',
-          prompt: `镜头${i}要求`.repeat(240),
-          references: { characterDocumentIds: ['document-0', 'document-1'] },
-          data: { manual: { instruction: `完整保留手动修改${i}` } },
+          prompt: `镜头${i}要求`.repeat(240) + `完整保留手动修改${i}`,
+          bindings: { schemaVersion: 1, characterDocumentIds: ['document-0', 'document-1'] },
         },
       }),
     ),
@@ -57,10 +54,10 @@ export function productionContextResults() {
       }),
     ),
     result(7, 'authoring', {
-      authoring: { schemaVersion: 1, kind: 'shot', prompt: '相邻镜头开场要求完整保留。' },
+      authoring: { prompt: '相邻镜头开场要求完整保留。' },
     }),
     result(8, 'authoring', {
-      authoring: { schemaVersion: 1, kind: 'shot', prompt: '相邻镜头收尾要求完整保留。' },
+      authoring: { prompt: '相邻镜头收尾要求完整保留。' },
     }),
   ];
 }

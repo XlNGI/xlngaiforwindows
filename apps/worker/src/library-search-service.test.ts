@@ -8,15 +8,12 @@ import { LibraryError, LibrarySearchService } from './library-search-service.js'
 import { NovelService } from './novel-service.js';
 import { createRepositories } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
-
 const directories: string[] = [];
 const services: ProjectService[] = [];
-
 afterEach(async () => {
   for (const service of services.splice(0)) service.close();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
-
 async function setup() {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-library-search-'));
   directories.push(directory);
@@ -31,25 +28,61 @@ async function setup() {
     library: new LibrarySearchService(projects),
   };
 }
-
 describe('LibrarySearchService', () => {
+  it('returns audition text on demand and rejects a superseded draft handle', async () => {
+    const { content, library } = await setup();
+    const voice = content.saveDocument({
+      kind: 'voice',
+      title: '原版音色',
+      contentMarkdown: '完整音色描述',
+      sampleText: '  原版试音。  ',
+    });
+    const identity = { taskId: 'voice-read', attemptId: 'voice-attempt' };
+    const hit = library
+      .search({ ...identity, query: '原版音色' })
+      .sources.find((s) => s.sourceId === voice.id)!;
+    expect(
+      library.read({ ...identity, sourceHandle: hit.sourceHandle }).sampleText,
+    ).toBeUndefined();
+    expect(
+      library.read({ ...identity, sourceHandle: hit.sourceHandle, readMode: 'source' }),
+    ).toMatchObject({
+      versionId: voice.currentVersion!.id,
+      sourceStatus: 'draft',
+      content: '完整音色描述',
+      sampleText: '  原版试音。  ',
+    });
+    const revised = content.saveDocument({
+      documentId: voice.id,
+      title: voice.title,
+      contentMarkdown: '新的音色描述',
+      sampleText: '新版试音',
+      expectedDocumentRowVersion: voice.rowVersion,
+    });
+    expect(() =>
+      library.read({ ...identity, sourceHandle: hit.sourceHandle, readMode: 'source' }),
+    ).toThrow('Library source is no longer available');
+    const current = library
+      .search({ ...identity, query: '原版音色' })
+      .sources.find((s) => s.sourceId === voice.id)!;
+    expect(
+      library.read({ ...identity, sourceHandle: current.sourceHandle, readMode: 'source' }),
+    ).toMatchObject({ versionId: revised.currentVersion!.id, sampleText: '新版试音' });
+  });
   it('returns open IR only on an explicit source read and pins it to the found document version', async () => {
     const { content, library } = await setup();
-    const contentIR = {
+    const bindings = {
       schemaVersion: 1 as const,
-      kind: 'prop' as const,
-      data: { material: '寒铁', mark: '逆鳞', dimensions: { length: 80, unit: 'cm' } },
     };
     const document = content.saveDocument({
       kind: 'prop',
       title: '逆鳞剑匣',
       contentMarkdown: '# 逆鳞剑匣\n寒铁打造，表面有旧刻痕。',
-      contentIR,
+      bindings,
     });
     const found = library.search({ taskId: 'ir-task', attemptId: 'ir-attempt', query: '逆鳞' });
     const source = found.sources.find((item) => item.sourceId === document.id)!;
     expect(source.versionId).toBe(document.currentVersion?.id);
-
     const proseOnly = library.read({
       taskId: 'ir-task',
       attemptId: 'ir-attempt',
@@ -57,30 +90,28 @@ describe('LibrarySearchService', () => {
       readMode: 'source',
     });
     expect(proseOnly.content).toContain('寒铁打造');
-    expect(proseOnly.contentIR).toBeUndefined();
-
+    expect(proseOnly.bindings).toBeUndefined();
     const withIR = library.read({
       taskId: 'ir-task',
       attemptId: 'ir-attempt',
       sourceHandle: source.sourceHandle,
       readMode: 'source',
-      includeContentIR: true,
+      includeBindings: true,
     });
     expect(withIR).toMatchObject({
       sourceId: document.id,
       versionId: document.currentVersion?.id,
-      contentIR,
+      bindings,
     });
     expect(() =>
       library.read({
         taskId: 'ir-task',
         attemptId: 'ir-attempt',
         sourceHandle: source.sourceHandle,
-        includeContentIR: true,
+        includeBindings: true,
       }),
     ).toThrow(/readMode="source"/);
   });
-
   it('finds unpublished markdown drafts and labels them as draft', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -110,7 +141,6 @@ describe('LibrarySearchService', () => {
     expect(read.candidateNote).toBe('未审核候选资料，不能当作已发布权威');
     expect(read.content).toContain('旧码头');
   });
-
   it('searches and reads plot constraint documents separately from production constraint records', async () => {
     const { content, library } = await setup();
     const document = content.saveDocument({
@@ -118,7 +148,6 @@ describe('LibrarySearchService', () => {
       title: '剧情约束',
       contentMarkdown: '林澈不得在第一幕得知灯塔秘密。',
     });
-
     const result = library.search({
       taskId: 'plot-constraint-task',
       attemptId: 'plot-constraint-attempt',
@@ -126,7 +155,6 @@ describe('LibrarySearchService', () => {
       sourceTypes: ['document'],
       kind: 'constraint',
     });
-
     expect(result.sources[0]).toMatchObject({
       sourceId: document.id,
       sourceType: 'document',
@@ -142,7 +170,6 @@ describe('LibrarySearchService', () => {
     });
     expect(read.content).toBe('林澈不得在第一幕得知灯塔秘密。');
   });
-
   it('returns the structural path used to locate a matching section', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -165,7 +192,6 @@ describe('LibrarySearchService', () => {
       structurePath: ['雾港剧本', '第一章 雨夜来客', '场景一 旧码头'],
     });
   });
-
   it('browses structure metadata before reading the same source', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -211,7 +237,6 @@ describe('LibrarySearchService', () => {
     expect(read.content).toContain('林澈在潮声里回头');
     expect(read.structurePath).toEqual(['结构导航文档', '第一章', '场景一 旧码头']);
   });
-
   it('indexes imported novel drafts without publishing', async () => {
     const { novels, library } = await setup();
     novels.importNovel({
@@ -240,7 +265,6 @@ describe('LibrarySearchService', () => {
       title: '第一章 雾港',
     });
   });
-
   it('finds a chapter by title even when the body does not repeat the location name', async () => {
     const { novels, library } = await setup();
     novels.importNovel({
@@ -287,7 +311,6 @@ describe('LibrarySearchService', () => {
       }),
     ).toThrow(LibraryError);
   });
-
   it('allows repeated searches while keeping returned handles task and attempt scoped', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -315,7 +338,6 @@ describe('LibrarySearchService', () => {
       }).status,
     ).toBe('read');
   });
-
   it('invalidates cached search candidates when project library content changes', async () => {
     const { content, library } = await setup();
     const document = content.saveDocument({
@@ -337,7 +359,6 @@ describe('LibrarySearchService', () => {
       library.search({ taskId: 'task', attemptId: 'attempt', query: '灯塔' }).resultCount,
     ).toBe(0);
   });
-
   it('explains an empty document filter and reads the actual novel-reference without a novel profile', async () => {
     const { content, novels, library, projects } = await setup();
     const document = content.saveDocument({
@@ -369,7 +390,6 @@ describe('LibrarySearchService', () => {
       }).content,
     ).toBe('# 二狗\n普通家庭出身，气运之子。');
   });
-
   it('indexes memories, constraints, conversations, and asset aliases', async () => {
     const { content, library, projects } = await setup();
     content.messageToConstraint({
@@ -436,7 +456,6 @@ describe('LibrarySearchService', () => {
       title: '雾港角色图',
     });
   });
-
   it('distinguishes published versions from later drafts', async () => {
     const { content, workflow, library } = await setup();
     const document = content.saveDocument({
@@ -480,7 +499,6 @@ describe('LibrarySearchService', () => {
     });
     expect(draftHit.sources[0]?.status).toBe('draft');
   });
-
   it('truncates library.read to maxChars', async () => {
     const { content, library } = await setup();
     content.saveDocument({
@@ -499,7 +517,6 @@ describe('LibrarySearchService', () => {
     expect(read.truncated).toBe(true);
     expect(read.content.length).toBe(12);
   });
-
   it('reads a novel chapter as an ordered source when requested', async () => {
     const { novels, library } = await setup();
     const chapterBody = `  开头线索。\n\n${'海雾中的灯塔。\n\n'.repeat(500)}结尾线索。  `;
@@ -523,7 +540,7 @@ describe('LibrarySearchService', () => {
       attemptId: 'source-attempt',
       sourceHandle: searched.sources[0]!.sourceHandle,
       readMode: 'source',
-      maxChars: 20_000,
+      maxChars: 20000,
     });
     expect(read.readMode).toBe('source');
     expect(read.content.trimStart().startsWith('开头线索。')).toBe(true);
@@ -531,7 +548,6 @@ describe('LibrarySearchService', () => {
     expect(read.content).toBe(chapterBody.trim());
     expect(read.truncated).toBe(false);
   });
-
   it('continues long source reads without gaps, overlaps, or crossing versions', async () => {
     const { content, library } = await setup();
     const body = '序章\n\n' + '这是带有段落的证据🧭。\n\n'.repeat(2400) + '最后的线索。';
@@ -567,7 +583,6 @@ describe('LibrarySearchService', () => {
     });
     expect(() => library.read(args)).toThrow('Library source is no longer available');
   });
-
   it('does not index incomplete streaming chat messages', async () => {
     const { content, library } = await setup();
     const conversation = content.createConversation({ scopeType: 'project' });
@@ -579,7 +594,6 @@ describe('LibrarySearchService', () => {
     });
     expect(library.search({ taskId: 't', attemptId: 'a', query: '灯塔正文' }).resultCount).toBe(0);
   });
-
   it('reports truncated search results and chunk positions without unrelated filler', async () => {
     const { novels, library } = await setup();
     novels.importNovel({

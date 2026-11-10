@@ -7,6 +7,7 @@ import type {
 import { VIDEO_PROMPT_AUTHORING_REQUIREMENTS } from '@ai-video/contracts';
 import {
   AgentProviderToolGateway,
+  boundedValidationError,
   type AgentProviderToolExecutor,
 } from './agent-provider-tool-gateway.js';
 import {
@@ -17,7 +18,8 @@ import {
   RESEARCH_AGENT_TOOLS,
 } from './agent-tool-definitions.js';
 import { PRODUCTION_AUTHORING_GUIDANCE } from './production-authoring-guidance.js';
-
+import { bundleCheckpointDefinition } from './agent-task-checkpoint-schema.js';
+import { preparedArgumentsDefinition } from './agent-prepared-arguments.js';
 const identity: LlmGenerationIdentity = {
   generationId: 'generation',
   attemptId: 'attempt',
@@ -25,7 +27,6 @@ const identity: LlmGenerationIdentity = {
   projectSessionId: 'session',
   conversationId: 'conversation',
 };
-
 function definition(
   name: LlmToolDefinition['name'] = 'document.create_draft',
   authorizationHandle = 'worker-only-handle',
@@ -41,7 +42,6 @@ function definition(
     authorizationHandle,
   };
 }
-
 function executor(
   executeResult: AgentGenerationExecuteToolsResult,
   confirmResult: AgentGenerationExecuteToolsResult = executeResult,
@@ -60,8 +60,70 @@ function executor(
     terminateGeneration: vi.fn<AgentProviderToolExecutor['terminateGeneration']>(() => 1),
   } satisfies AgentProviderToolExecutor;
 }
-
 describe('AgentProviderToolGateway', () => {
+  it('does not run bundle submission diagnostics on an unresolved prepared-argument reference', () => {
+    const submit = preparedArgumentsDefinition(
+      SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'production.bundle.submit')!,
+    );
+    const message = boundedValidationError(new Error('PREPARED_ARGUMENTS_PATCH_INVALID'), submit, {
+      preparedArguments: { resultId: 'same-task-result' },
+    });
+    expect(message).toContain('PREPARED_ARGUMENTS_PATCH_INVALID');
+    expect(message).not.toContain('BUNDLE_SUBMIT_INVALID');
+    expect(message).not.toContain('unsupported field');
+  });
+
+  it('provides authorized bundle tools immediately without a loader or unrelated write schemas', () => {
+    const checkpoint = bundleCheckpointDefinition(
+      SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'conversation.task.checkpoint')!,
+    );
+    const gateway = new AgentProviderToolGateway(
+      executor({}),
+      identity,
+      [
+        ...SYSTEM_AGENT_TOOLS.filter(
+          (tool) => ![checkpoint.name, 'document.submit_draft'].includes(tool.name),
+        ),
+        checkpoint,
+        ...LIBRARY_AGENT_TOOLS,
+      ],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      true,
+    );
+    expect(
+      gateway
+        .currentDefinitions()
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual([
+      'conversation.task.checkpoint',
+      'library.read',
+      'library.search',
+      'production.bundle',
+      'production.bundle.submit',
+      'production.skill.read',
+      'project.structure.get',
+    ]);
+    const supplied = gateway.currentDefinitions();
+    gateway.restoreSelection([]);
+    expect(gateway.currentDefinitions()).toEqual(supplied);
+    expect(gateway.tools().map((tool) => tool.name)).toContain('production.skill.read');
+    const prepare = gateway
+      .tools()
+      .find((tool) => tool.name === checkpoint.name)!.prepareArguments!;
+    expect(() => prepare({ operation: 'plan', deliverables: [] })).toThrow();
+    expect(() => prepare({ operation: 'review', conclusion: 'passed', issues: [] })).toThrow();
+    expect(() =>
+      prepare({ operation: 'result', resultId: 'actual-result', resultOffset: 0 }),
+    ).not.toThrow();
+    expect(checkpoint.parameters.properties).not.toHaveProperty('deliverables');
+    expect(checkpoint.description).toContain('does not use semantic review');
+    expect(JSON.stringify(checkpoint)).not.toContain('requirementAssessments');
+    expect(JSON.stringify(checkpoint)).not.toContain('reviewedTargetIds');
+  });
   it('separates new document fields from existing document CAS before business execution', () => {
     const definition = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'document.submit_draft')!;
     const gateway = new AgentProviderToolGateway(
@@ -79,14 +141,12 @@ describe('AgentProviderToolGateway', () => {
       contentMarkdown: '正文',
     };
     expect(() => prepare(create)).not.toThrow();
-    expect(() =>
-      prepare({ ...create, contentIR: { schemaVersion: 1, kind: 'plan', data: {} } }),
-    ).toThrow();
+    expect(() => prepare({ ...create, bindings: { schemaVersion: 1 as const } })).toThrow();
     expect(() =>
       prepare({
         ...create,
         documentKind: 'character',
-        contentIR: { schemaVersion: 1, kind: 'character', data: {} },
+        bindings: { schemaVersion: 1 as const },
       }),
     ).not.toThrow();
     for (const extra of [
@@ -113,7 +173,6 @@ describe('AgentProviderToolGateway', () => {
       }),
     ).toThrow();
   });
-
   it('reports only the selected checkpoint operation requirements without echoing notes', () => {
     const checkpoint = SYSTEM_AGENT_TOOLS.find(
       (tool) => tool.name === 'conversation.task.checkpoint',
@@ -216,7 +275,6 @@ describe('AgentProviderToolGateway', () => {
     expect(gateway.hasDefinition(checkpoint.name)).toBe(false);
     expect(gateway.currentDefinitions().map((tool) => tool.name)).toEqual([initial.name]);
   });
-
   it('delivers actual reference pixels as visual content while keeping metadata textual', async () => {
     const read = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'shot.continuity.read')!;
     const worker = executor({
@@ -246,7 +304,13 @@ describe('AgentProviderToolGateway', () => {
       .find((tool) => tool.name === read.name)!
       .execute('frames', { shotId: 'shot' });
     expect(result.content[0]?.type).toBe('text');
-    expect((result.content[0] as { text: string }).text).toContain('衔接基准');
+    expect(
+      (
+        result.content[0] as {
+          text: string;
+        }
+      ).text,
+    ).toContain('衔接基准');
     expect(result.content[1]).toEqual({
       type: 'image',
       mimeType: 'image/jpeg',
@@ -276,11 +340,8 @@ describe('AgentProviderToolGateway', () => {
         {
           shotId: 'shot-1',
           expectedRowVersion: 1,
-          authoringIR: {
-            schemaVersion: 1,
-            kind: 'shot',
+          ...{
             prompt: '固定机位，无配乐。',
-            data: { custom: '补充资料' },
           },
         },
       ],
@@ -291,7 +352,7 @@ describe('AgentProviderToolGateway', () => {
         shots: [
           {
             ...args.shots[0],
-            authoringIR: { ...args.shots[0]!.authoringIR, promptScope: 'complete' },
+            ...{ ...args.shots[0]!, promptScope: 'complete' },
           },
         ],
       }),
@@ -316,7 +377,6 @@ describe('AgentProviderToolGateway', () => {
         shotId: `shot-${i}`,
         expectedRowVersion: 1,
         estimatedDurationSeconds: 5,
-        rationale: '动作和停顿',
       })),
     };
     const worker = executor({
@@ -340,8 +400,8 @@ describe('AgentProviderToolGateway', () => {
       vi.fn(),
     );
     const tool = gateway.tools().find((item) => item.name === schema.name)!;
-    expect(schema.description).toContain('ProductionAuthoringIR=');
-    expect(schema.description).toContain('scene.submit_structure.shots creates NEW shots');
+    expect(schema.description).toContain('timing={estimatedDurationSeconds,locked?}');
+    expect(schema.description).toContain('This tool creates no shots or paid requests');
     expect(tool.prepareArguments!(args)).toEqual(args);
     expect(() =>
       tool.prepareArguments!({ shots: [{ ...args.shots[0], estimatedDurationSeconds: 0 }] }),
@@ -363,7 +423,6 @@ describe('AgentProviderToolGateway', () => {
       }),
     );
   });
-
   it('keeps batch size for field errors, and narrows only after truncated output', () => {
     const worker = executor({});
     const original = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!;
@@ -379,11 +438,8 @@ describe('AgentProviderToolGateway', () => {
         {
           title: '镜头',
           camera: 'PRIVATE_BODY',
-          authoringIR: {
-            schemaVersion: 1,
-            kind: 'shot',
+          ...{
             prompt: '完整提示词，含“引号”\n第二行',
-            data: { camera: { customField: 'PRIVATE_BODY' } },
           },
         },
       ],
@@ -397,7 +453,7 @@ describe('AgentProviderToolGateway', () => {
     }
     expect(message).toContain('shots[0].camera');
     expect(message).toContain('at most 4 ordered shots');
-    expect(message).toContain('authoringIR.data');
+    expect(message).toContain('prompt text, bindings and timing');
     expect(message).not.toContain('PRIVATE_BODY');
     expect(message).not.toContain('data.camera');
     expect(args).toEqual(snapshot);
@@ -405,11 +461,12 @@ describe('AgentProviderToolGateway', () => {
     const properties = () =>
       gateway.currentDefinitions()[0]!.parameters.properties as Record<
         string,
-        { maxItems: number }
+        {
+          maxItems: number;
+        }
       >;
     expect(properties().shots!.maxItems).toBe(4);
-
-    const validShot = { title: args.shots[0]!.title, authoringIR: args.shots[0]!.authoringIR };
+    const validShot = { title: args.shots[0]!.title, prompt: args.shots[0]!.prompt };
     const valid = { ...args, shots: [validShot] };
     expect(stage().prepareArguments!(valid)).toEqual(valid);
     expect(() =>
@@ -418,14 +475,14 @@ describe('AgentProviderToolGateway', () => {
         shots: [
           {
             ...validShot,
-            authoringIR: {
-              ...validShot.authoringIR,
-              references: { characterIds: ['PRIVATE_ID'] },
+            ...{
+              ...validShot,
+              bindings: { schemaVersion: 1, characterIds: ['PRIVATE_ID'] },
             },
           },
         ],
       }),
-    ).toThrow('shots[0].authoringIR.references.characterIds');
+    ).toThrow('shots[0].bindings.characterIds');
     expect(properties().shots!.maxItems).toBe(4);
     expect(stage().prepareArguments!({ ...valid, shots: [validShot, validShot] })).toEqual({
       ...valid,
@@ -439,10 +496,16 @@ describe('AgentProviderToolGateway', () => {
       /more than 1 items/i,
     );
     expect(
-      (original.parameters.properties as Record<string, { maxItems: number }>).shots!.maxItems,
+      (
+        original.parameters.properties as Record<
+          string,
+          {
+            maxItems: number;
+          }
+        >
+      ).shots!.maxItems,
     ).toBe(4);
   });
-
   it('does not load an unauthorized stage or redirect existing scene validation failures', async () => {
     const worker = executor({});
     const submit = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.submit_structure')!;
@@ -477,7 +540,6 @@ describe('AgentProviderToolGateway', () => {
       'scene.structure.stage',
     );
   });
-
   it('appends loaded schemas in first-load order, keeps the catalog stable and deduplicates workflow guidance', async () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(
@@ -560,7 +622,6 @@ describe('AgentProviderToolGateway', () => {
     expect(gateway.currentDefinitions()).toEqual(selection);
     expect(worker.executeTools).not.toHaveBeenCalled();
   });
-
   it('returns the full video writing guidance when the Agent loads video preparation', async () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(
@@ -581,12 +642,13 @@ describe('AgentProviderToolGateway', () => {
       });
     const output = loaded.content.find((block) => block.type === 'text');
     if (output?.type !== 'text') throw new Error('Expected tool loading instructions.');
-    const result = JSON.parse(output.text) as { instructions: string };
+    const result = JSON.parse(output.text) as {
+      instructions: string;
+    };
     expect(result.instructions).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
     expect(gateway.currentDefinitions().map((tool) => tool.name)).toContain('media.video.prepare');
     expect(worker.executeTools).not.toHaveBeenCalled();
   });
-
   it('propagates business rejections without a separate validation-attempt ceiling', async () => {
     const worker = executor({
       continuation: {
@@ -616,7 +678,6 @@ describe('AgentProviderToolGateway', () => {
     }
     expect(worker.executeTools).toHaveBeenCalledTimes(4);
   });
-
   it('does not report completion after exhausting the Worker quota', async () => {
     const worker = executor({});
     worker.executeTools.mockRejectedValue(new Error('AGENT_TOOL_QUOTA_EXHAUSTED: quota exhausted'));
@@ -732,14 +793,12 @@ describe('AgentProviderToolGateway', () => {
       vi.fn(),
       vi.fn(),
     );
-
     gateway.captureProviderCall('call-1', 'response-1', {
       inputTokens: 8,
       outputTokens: 3,
       totalTokens: 11,
     });
     const result = await gateway.tools()[0]!.execute('call-1', { title: 'Draft' });
-
     expect(worker.executeTools).toHaveBeenCalledWith({
       ...identity,
       providerResponseId: 'response-1',
@@ -759,7 +818,6 @@ describe('AgentProviderToolGateway', () => {
     expect(result.content).toEqual([{ type: 'text', text: '{"status":"draft_created"}' }]);
     expect(gateway.currentDefinitions()).toEqual([nextDefinition]);
   });
-
   it.each([true, false])(
     'returns an explicit confirmation decision to Worker (%s)',
     async (approved) => {
@@ -793,7 +851,6 @@ describe('AgentProviderToolGateway', () => {
       );
       const ask = vi.fn(() => Promise.resolve(approved));
       const gateway = new AgentProviderToolGateway(worker, identity, [definition()], ask, vi.fn());
-
       gateway.captureProviderCall('call-2', 'response-2');
       await expect(gateway.tools()[0]!.execute('call-2', {})).resolves.toMatchObject({
         content: [{ type: 'text', text: JSON.stringify({ approved }) }],
@@ -806,7 +863,6 @@ describe('AgentProviderToolGateway', () => {
       });
     },
   );
-
   it('returns an explicit media model selection to Worker without changing the Agent model', async () => {
     const request = {
       selectionToken: 'media-selection-token',
@@ -846,10 +902,8 @@ describe('AgentProviderToolGateway', () => {
       askMedia,
       askSubmission,
     );
-
     gateway.captureProviderCall('call-media', 'response-media');
     const result = await gateway.tools()[0]!.execute('call-media', { prompt: request.prompt });
-
     expect(askMedia).toHaveBeenCalledWith(request);
     expect(worker.selectMedia).toHaveBeenCalledWith({
       ...identity,
@@ -861,7 +915,6 @@ describe('AgentProviderToolGateway', () => {
       { type: 'text', text: '{"status":"polling","taskId":"media-job"}' },
     ]);
   });
-
   it('rejects calls without Provider response context before reaching Worker', async () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(
@@ -871,13 +924,11 @@ describe('AgentProviderToolGateway', () => {
       vi.fn(),
       vi.fn(),
     );
-
     await expect(gateway.tools()[0]!.execute('missing', {})).rejects.toThrow(
       'missing its Provider response context',
     );
     expect(worker.executeTools).not.toHaveBeenCalled();
   });
-
   it('exposes only the operations that are ready in the frozen plan', () => {
     const worker = executor({});
     const image = definition('media.image.prepare', 'image-handle');
@@ -889,14 +940,12 @@ describe('AgentProviderToolGateway', () => {
       vi.fn(),
       vi.fn(),
     );
-
     expect(gateway.currentDefinitions(['media.image.prepare'])).toEqual([image]);
     expect(gateway.tools(['media.video.prepare']).map((tool) => tool.name)).toEqual([
       'media.video.prepare',
     ]);
     expect(gateway.currentDefinitions([])).toEqual([]);
   });
-
   it('keeps authorized library retrieval available while restricting all other operations', async () => {
     const search = definition('library.search', 'search-handle');
     const read = definition('library.read', 'read-handle');
@@ -931,7 +980,6 @@ describe('AgentProviderToolGateway', () => {
     expect(planHooks.succeed).not.toHaveBeenCalled();
     expect(planHooks.fail).not.toHaveBeenCalled();
   });
-
   it('records planned tool success only after a successful Worker Tool Result', async () => {
     const worker = executor({
       continuation: {
@@ -955,10 +1003,8 @@ describe('AgentProviderToolGateway', () => {
       undefined,
       planHooks,
     );
-
     gateway.captureProviderCall('call-planned', 'response-planned');
     await gateway.tools()[0]!.execute('call-planned', { title: 'Dragon' });
-
     expect(planHooks.begin).toHaveBeenCalledWith('media.image.prepare');
     expect(planHooks.succeed).toHaveBeenCalledWith(
       'step-image',
@@ -967,7 +1013,6 @@ describe('AgentProviderToolGateway', () => {
     );
     expect(planHooks.fail).not.toHaveBeenCalled();
   });
-
   it('records a planned tool failure when Worker execution rejects', async () => {
     const worker = executor({});
     vi.mocked(worker.executeTools).mockRejectedValueOnce(new Error('Worker execution failed.'));
@@ -985,7 +1030,6 @@ describe('AgentProviderToolGateway', () => {
       undefined,
       planHooks,
     );
-
     gateway.captureProviderCall('call-failed', 'response-failed');
     await expect(gateway.tools()[0]!.execute('call-failed', {})).rejects.toThrow(
       'Worker execution failed.',
@@ -997,7 +1041,6 @@ describe('AgentProviderToolGateway', () => {
       expect.any(Error),
     );
   });
-
   it('uses the live authorization handle after Worker returns replacement tools', async () => {
     const search = definition('library.search', 'handle-one');
     const worker = executor({
@@ -1010,7 +1053,6 @@ describe('AgentProviderToolGateway', () => {
     });
     const gateway = new AgentProviderToolGateway(worker, identity, [search], vi.fn(), vi.fn());
     const tool = gateway.tools()[0]!;
-
     gateway.captureProviderCall('call-1', 'response-1');
     await tool.execute('call-1', { query: 'first' });
     gateway.captureProviderCall('call-2', 'response-2');
@@ -1022,7 +1064,6 @@ describe('AgentProviderToolGateway', () => {
       },
     });
     await tool.execute('call-2', { query: 'second' });
-
     expect(worker.executeTools).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1046,7 +1087,6 @@ describe('AgentProviderToolGateway', () => {
       }),
     );
   });
-
   it('keeps current tools when Worker omits a replacement set', async () => {
     const search = definition('library.search', 'handle-one');
     const worker = executor({
@@ -1057,20 +1097,16 @@ describe('AgentProviderToolGateway', () => {
       },
     });
     const gateway = new AgentProviderToolGateway(worker, identity, [search], vi.fn(), vi.fn());
-
     gateway.captureProviderCall('call-keep', 'response-keep');
     await gateway.tools()[0]!.execute('call-keep', { query: 'keep' });
     expect(gateway.currentDefinitions()).toEqual([search]);
   });
-
   it('forwards provider-step and terminal lifecycle operations', () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(worker, identity, [], vi.fn(), vi.fn());
-
     gateway.startProviderStep();
     gateway.completeProviderStep('response-final', 'stop', { totalTokens: 9 });
     gateway.terminate('failed');
-
     expect(worker.startProviderStep).toHaveBeenCalledWith(identity);
     expect(worker.completeProviderStep).toHaveBeenCalledWith({
       ...identity,
@@ -1081,7 +1117,6 @@ describe('AgentProviderToolGateway', () => {
     expect(worker.terminateGeneration).toHaveBeenCalledWith(identity.generationId, 'failed');
   });
 });
-
 it('freezes one read response, limits actual overlap to four and refreshes definitions once at the barrier', async () => {
   let release!: () => void;
   const barrier = new Promise<void>((resolve) => {

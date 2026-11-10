@@ -16,7 +16,11 @@ const executable = join(
 );
 const validationRoot = await mkdtemp(join(tmpdir(), 'ai-video-m7-sidecar-'));
 const projectRoot = join(validationRoot, 'sample-project');
-const child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+const child = spawn(executable, [], {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  windowsHide: true,
+  env: { ...process.env, AI_VIDEO_APP_DATA_DIR: join(validationRoot, 'app-data') },
+});
 const pending = new Map();
 let stdoutBuffer = '';
 let stderrTail = '';

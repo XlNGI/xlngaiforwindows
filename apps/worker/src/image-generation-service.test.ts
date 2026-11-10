@@ -40,6 +40,24 @@ async function setup(capacity = new ExecutionPool()) {
 }
 
 describe('ImageGenerationService', () => {
+  it('preserves custom image parameters without applying rules based on the remote model name', async () => {
+    const { service } = await setup();
+    const parameters = {
+      prompt: 'A character sheet',
+      size: '1920x1080',
+      response_format: 'url',
+      quality: 'auto',
+      style: 'standard',
+    };
+    const job = service.prepare({
+      adapterKey: 'TEXT_TO_IMAGE:custom:openai-images:v1',
+      modelId: 'gpt-image-2',
+      parameters,
+    });
+    expect(job.request).toEqual(parameters);
+    expect(service.list()[0]?.request).toEqual(parameters);
+  });
+
   it('rejects video adapters at the image service boundary', async () => {
     const { service } = await setup();
     expect(() =>
@@ -754,6 +772,28 @@ describe('ImageGenerationService', () => {
     expect(result.error).toContain('403');
     expect(service.listAssets({})).toHaveLength(0);
   });
+
+  it.each([400, 401, 429])(
+    'preserves the upstream HTTP %s message in the saved failed job',
+    async (status) => {
+      const { service } = await setup();
+      const job = service.prepare({
+        adapterKey: 'TEXT_TO_IMAGE:custom:openai-images:v1',
+        modelId: 'gpt-image-2',
+        parameters: { prompt: 'frame', size: '1920x1080' },
+      });
+      const message = 'Upstream rejected this request：请检查供应商参数。request_id=req_original';
+      const result = await service.complete({
+        jobId: job.id,
+        providerStatus: status,
+        providerBody: { error: { code: 'upstream_error', message } },
+      });
+      expect(result.error).toBe(
+        `Provider request failed with HTTP ${status}: upstream_error: ${message}`,
+      );
+      expect(service.get(job.id).error).toBe(result.error);
+    },
+  );
 
   it('explains that HTTP 401 may be caused by a region/key mismatch', async () => {
     const { service } = await setup();

@@ -532,6 +532,118 @@ fn context_management_real_long_requirements() {
     }
 }
 
+/// Run the captured production bundle through the same unified entry point as Desktop.
+#[test]
+#[ignore = "Requires an isolated captured bundle, real provider credentials and explicit acceptance environment"]
+fn context_management_real_bundle_agent_run() {
+    let directory = PathBuf::from(
+        std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").expect("isolated settings directory"),
+    );
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(directory.join("task-fixture.json")).expect("captured bundle fixture"),
+    )
+    .unwrap();
+    let root = PathBuf::from(fixture["projectRoot"].as_str().unwrap());
+    assert!(root
+        .canonicalize()
+        .unwrap()
+        .starts_with(directory.canonicalize().unwrap()));
+    let prompt = fixture["prompt"].as_str().unwrap();
+    assert!(
+        prompt.chars().count() > 8500,
+        "Must use the frozen full prompt"
+    );
+    let state = WorkerState::new(directory.clone()).expect("native Worker host");
+    let mut serial = 0;
+    let mut call = |method: &str, params: Value| -> Value {
+        serial += 1;
+        let response = state
+            .request(&json!({"id":format!("bundle-agent-run-{serial}"),"protocolVersion":1,"method":method,"params":params}))
+            .expect("Worker response");
+        assert_eq!(response["ok"], true, "{method}: {response}");
+        response["result"].clone()
+    };
+    call("project.open", json!({"rootPath":root}));
+    let conversation = call(
+        "conversation.create",
+        json!({"scopeType":"project","title":"隔离整包真实验收"}),
+    );
+    let requested_at = fixture["runRequestedAt"].as_str().unwrap();
+    let started = call(
+        "agent.run",
+        json!({
+            "conversationId":conversation["id"],
+            "prompt":prompt,
+            "providerProfileId":fixture["profile"],
+            "modelId":fixture["model"],
+            "capability":"text",
+            "productionSkillId":"script-to-media",
+            "productionWorkflowVersion":2,
+            "productionSources":fixture["productionSources"],
+            "productionRequestedAt":requested_at,
+            "researchMode":"network_disabled"
+        }),
+    );
+    assert_eq!(started["status"], "started", "{started}");
+    let mut runtime = started["stream"].clone();
+    runtime["taskId"] = started["agentTaskId"].clone();
+    runtime["mode"] = json!("document");
+    runtime["prompt"] = json!(prompt);
+    call("conversation.runtime.start", runtime);
+    let generation_id = started["stream"]["generationId"].as_str().unwrap();
+    let task_id = started["agentTaskId"].as_str().unwrap();
+    std::fs::write(
+        directory.join("run-identity.json"),
+        serde_json::to_vec_pretty(&json!({
+            "entryPoint":"agent.run (same as Desktop button)",
+            "actualUiClick":false,
+            "generationId":generation_id,
+            "taskId":task_id,
+            "conversationId":conversation["id"],
+            "projectRoot":root,
+            "promptHash":fixture["promptHash"],
+            "workerEntry":std::env::var("AI_VIDEO_CONTEXT_E2E_WORKER_ENTRY").ok()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let started_at = Instant::now();
+    let timeout_seconds = std::env::var("AI_VIDEO_CONTEXT_E2E_TIMEOUT_SECONDS")
+        .ok()
+        .map(|value| value.parse::<u64>().unwrap())
+        .unwrap_or(3600);
+    loop {
+        let generation = call("llm.generation.get", json!({"generationId":generation_id}));
+        let task = call("agent.task.get", json!({"taskId":task_id}));
+        std::fs::write(
+            directory.join("live-report.json"),
+            serde_json::to_vec_pretty(&json!({
+                "elapsedSeconds":started_at.elapsed().as_secs_f64(),
+                "generation":generation,
+                "task":task
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        match generation["status"].as_str().unwrap_or_default() {
+            "complete" => break,
+            "failed" | "cancelled" => panic!(
+                "Bundle agent.run failed; evidence at {}: {}",
+                directory.display(),
+                generation["error"]
+            ),
+            _ => {}
+        }
+        assert!(
+            started_at.elapsed() < Duration::from_secs(timeout_seconds),
+            "Bundle real-provider acceptance remains resumable at {}",
+            directory.display()
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
+    state.shutdown();
+}
+
 #[test]
 #[ignore = "Requires explicit real-provider acceptance environment and may incur text-model charges"]
 fn context_management_real_episode_with_worker_restart() {

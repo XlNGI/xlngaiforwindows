@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -10,10 +10,15 @@ import type {
   NativeDubbingPollParams,
   NativeDubbingSpeechParams,
   NativeDubbingSubmitParams,
+  NativeVoiceDesignParams,
   ProviderModelInfo,
   ProviderProfileInfo,
 } from '@ai-video/contracts';
-import { createRepositories, DubbingRepository } from '@ai-video/persistence';
+import {
+  createRepositories,
+  DubbingRepository,
+  VoiceReferenceRepository,
+} from '@ai-video/persistence';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AppSettingsService } from './app-settings-service.js';
 import { ContentService } from './content-service.js';
@@ -21,6 +26,7 @@ import { DubbingService, type DubbingServiceOptions } from './dubbing-service.js
 import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { ExecutionPool } from './execution-pool.js';
 import { NativeProviderRequestError } from './native-provider-bridge.js';
+import { materializeOfficialVideoInputs } from './official-video-inputs.js';
 import { ProjectService } from './project-service.js';
 import { emptyModelCapabilities } from './provider-registry.js';
 
@@ -34,6 +40,7 @@ const live: Array<{ directory: string; projects: ProjectService; service: Dubbin
 let fixtures: string;
 let wav: string;
 let mp3: string;
+let designMp3: string;
 let video: string;
 let lipVideo: string;
 
@@ -94,6 +101,52 @@ async function setupStandaloneAudio(options: DubbingServiceOptions = {}) {
   const service = new DubbingService(projects, settings, { runtime, ...options });
   live.push({ directory, projects, service });
   return { directory, projects, root, service };
+}
+
+async function setupVoiceDesign(
+  options: DubbingServiceOptions = {},
+  text = '你好，很高兴认识你。',
+) {
+  const f = await setupStandaloneAudio(options);
+  const content = new ContentService(f.projects);
+  const source = content.saveDocument({
+    kind: 'voice',
+    title: '设计音色',
+    contentMarkdown: '温柔明亮的青年女声，吐字清晰。',
+    sampleText: text,
+  });
+  const character = content.saveDocument({
+    kind: 'character',
+    title: '角色甲',
+    contentMarkdown: '短发，白色上衣。',
+    bindings: { schemaVersion: 1, voiceDocumentId: source.id },
+  });
+  return {
+    ...f,
+    content,
+    source,
+    character,
+    params: {
+      characterDocumentId: character.id,
+      voiceDocumentId: source.id,
+      expectedVoiceDocumentVersionId: source.currentVersionId!,
+      expectedCharacterRowVersion: character.rowVersion,
+      providerProfileId: speechId,
+      modelId: 'speech-2.8-hd' as const,
+    },
+  };
+}
+
+async function designOutput(raw: unknown) {
+  const p = raw as NativeVoiceDesignParams;
+  const path = join(p.projectRoot, p.outputRelativePath);
+  await copyFile(designMp3, path);
+  return {
+    relativePath: p.outputRelativePath,
+    mime: 'audio/mpeg',
+    sizeBytes: statSync(path).size,
+    voiceId: 'ttv-designed-new-voice',
+  };
 }
 
 async function setup(options: DubbingServiceOptions = {}) {
@@ -222,6 +275,7 @@ describe.runIf(process.platform === 'win32')(
       fixtures = await mkdtemp(join(tmpdir(), 'ai-video-dubbing-service-fixtures-'));
       wav = join(fixtures, 'dialogue.wav');
       mp3 = join(fixtures, 'dialogue.mp3');
+      designMp3 = join(fixtures, 'designed-voice.mp3');
       video = join(fixtures, 'scene.mp4');
       lipVideo = join(fixtures, 'lip.mp4');
       const encode = (args: string[]) =>
@@ -240,6 +294,15 @@ describe.runIf(process.platform === 'win32')(
         wav,
       ]);
       encode(['-i', wav, '-c:a', 'libmp3lame', mp3]);
+      encode([
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=520:sample_rate=48000:duration=3',
+        '-c:a',
+        'libmp3lame',
+        designMp3,
+      ]);
       encode([
         '-f',
         'lavfi',
@@ -639,6 +702,257 @@ describe.runIf(process.platform === 'win32')(
         mime: 'audio/mpeg',
       });
       expect(existsSync(f.service.audioSource(saved.audioId).path)).toBe(true);
+    });
+
+    it('designs a new voice from the exact saved description and atomically binds the preview and future TTS profile', async () => {
+      const request = vi.fn(async (method: string, raw: unknown) => {
+        expect(method).toBe('provider.dubbing.voiceDesign');
+        return designOutput(raw);
+      });
+      const f = await setupVoiceDesign({ native: { request } });
+      const cancelled = f.service.prepareVoiceDesign(f.params);
+      expect(request).not.toHaveBeenCalled();
+      expect(
+        await f.service.confirmVoiceDesign({
+          confirmationToken: cancelled.confirmation.confirmationToken,
+          approved: false,
+        }),
+      ).toEqual({ approved: false });
+      expect(request).not.toHaveBeenCalled();
+      const pending = f.service.prepareVoiceDesign(f.params);
+      expect(pending.confirmation.parameterSummary).toContainEqual({
+        key: '音色描述',
+        value: f.source.currentVersion!.contentMarkdown,
+      });
+      const result = await f.service.confirmVoiceDesign({
+        confirmationToken: pending.confirmation.confirmationToken,
+        approved: true,
+      });
+      expect(result.approved).toBe(true);
+      if (!result.approved) return;
+      expect(request).toHaveBeenCalledOnce();
+      expect(request.mock.calls[0]![1]).toEqual(
+        expect.objectContaining({
+          prompt: f.source.currentVersion!.contentMarkdown,
+          previewText: f.source.currentVersion!.sampleText,
+        }),
+      );
+      expect(request.mock.calls[0]![1]).not.toHaveProperty('voiceId');
+      expect(request.mock.calls[0]![1]).not.toHaveProperty('model');
+      expect(result.voiceProfile).toMatchObject({
+        characterDocumentId: f.character.id,
+        voiceId: 'ttv-designed-new-voice',
+        referenceAudioId: result.audio.id,
+        model: 'speech-2.8-hd',
+      });
+      expect(result.reference).toMatchObject({
+        characterDocumentId: f.character.id,
+        audioId: result.audio.id,
+      });
+      expect(f.service.listVoices()).toEqual([result.voiceProfile]);
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toThrow('过期');
+      f.projects.close();
+      f.projects.open(f.root);
+      expect(f.service.listVoices()).toEqual([result.voiceProfile]);
+      expect(f.service.listAudio()).toEqual([result.audio]);
+      expect(
+        f.projects.access(false, (db, project) =>
+          new VoiceReferenceRepository(db, project.id).list(),
+        ),
+      ).toEqual([result.reference]);
+      for (const [provider, contract, revision] of [
+        ['wan-video', 'cn.qwen.wan3-0-video', 3],
+        ['seedance-video', 'cn.bytedance.seedance2-5.video', 2],
+        ['minimax-video', 'cn.minimax.h3.video', 2],
+      ] as const) {
+        const url = `character-voice://${f.character.id}/${result.reference.versionId}`;
+        const input = materializeOfficialVideoInputs(f.projects, {
+          providerRegion: 'cn',
+          adapterKey: `REFERENCE_TO_VIDEO:${provider}:${contract}:contract-${revision}`,
+          parameters:
+            provider === 'wan-video'
+              ? {
+                  prompt: '使用音频1的音色说你好',
+                  media: [{ type: 'reference_audio', url }],
+                  duration: 5,
+                }
+              : {
+                  content: [{ type: 'audio_url', audio_url: { url }, role: 'reference_audio' }],
+                  duration: 5,
+                },
+        });
+        expect(input.references).toEqual([
+          expect.objectContaining({
+            audioId: result.audio.id,
+            characterDocumentId: f.character.id,
+            sha256: result.audio.contentHash,
+            contentType: 'audio/mpeg',
+          }),
+        ]);
+        expect(digest(await readFile(input.paths[0]!))).toBe(result.audio.contentHash);
+        expect(JSON.stringify(input.parameters)).toContain('controlled-file://');
+        expect(request).toHaveBeenCalledOnce();
+      }
+    });
+
+    it('refuses changed voice prompts before charging and never truncates a long audition', async () => {
+      const request = vi.fn();
+      const f = await setupVoiceDesign({ native: { request } });
+      const pending = f.service.prepareVoiceDesign(f.params);
+      f.content.saveDocument({
+        documentId: f.source.id,
+        kind: 'voice',
+        title: f.source.title,
+        contentMarkdown: '修改后的提示词',
+        sampleText: '新的台词',
+        expectedDocumentRowVersion: f.source.rowVersion,
+      });
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toThrow('已变化');
+      expect(request).not.toHaveBeenCalled();
+      const long = await setupVoiceDesign({ native: { request } }, '中'.repeat(501));
+      expect(() => long.service.prepareVoiceDesign(long.params)).toThrow('500');
+      expect(request).not.toHaveBeenCalled();
+    });
+
+    it('retains supplier failure codes locally without logging prompts or supplier bodies or retrying', async () => {
+      const failure = new NativeProviderRequestError({
+        code: 'PROVIDER_FAILED',
+        message: 'MiniMax 音色设计失败（错误码 1008）：账户余额不足',
+        retryable: false,
+        providerErrorCode: '1008',
+      });
+      const request = vi.fn(() => Promise.reject(failure));
+      const f = await setupVoiceDesign({ native: { request } });
+      const pending = f.service.prepareVoiceDesign(f.params);
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toBe(failure);
+      const files = readdirSync(join(f.root, 'cache/dubbing'));
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/\.mp3\.error\.json$/);
+      const { occurredAt, operationId, ...diagnostic } = JSON.parse(
+        await readFile(join(f.root, 'cache/dubbing', files[0]!), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(typeof occurredAt).toBe('string');
+      expect(typeof operationId).toBe('string');
+      expect(diagnostic).toEqual({
+        providerProfileId: speechId,
+        characterDocumentId: f.character.id,
+        voiceDocumentId: f.source.id,
+        code: 'PROVIDER_FAILED',
+        providerErrorCode: '1008',
+        submitted: true,
+        resultReceived: false,
+      });
+      expect(f.service.listAudio()).toEqual([]);
+      expect(f.service.listVoices()).toEqual([]);
+      expect(request).toHaveBeenCalledOnce();
+    });
+
+    it('preserves the generated voice ID and preview after a binding conflict without overwriting new user data', async () => {
+      const request = vi.fn(async (_method: string, raw: unknown) => {
+        const output = await designOutput(raw);
+        f.service.saveVoice({
+          characterDocumentId: f.character.id,
+          providerProfileId: speechId,
+          model: 'speech-2.8-hd',
+          voiceId: 'user-changed-voice',
+          speed: 1,
+          pitch: 0,
+        });
+        return output;
+      });
+      const f = await setupVoiceDesign({ native: { request } });
+      const pending = f.service.prepareVoiceDesign(f.params);
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toThrow('ttv-designed-new-voice');
+      expect(f.service.listVoices()[0]?.voiceId).toBe('user-changed-voice');
+      expect(f.service.listAudio()).toEqual([]);
+      const files = readdirSync(join(f.root, 'cache/dubbing'));
+      const manifest = files.find((name) => name.endsWith('.mp3.json'))!;
+      expect(
+        JSON.parse(await readFile(join(f.root, 'cache/dubbing', manifest), 'utf8')),
+      ).toMatchObject({ voiceId: 'ttv-designed-new-voice', characterDocumentId: f.character.id });
+      expect(existsSync(join(f.root, 'cache/dubbing', manifest.slice(0, -5)))).toBe(true);
+    });
+
+    it('serializes character voice designs and retains a known paid result in its original project after cancellation', async () => {
+      let finish: (() => void) | undefined;
+      const request = vi.fn(async (method: string, raw: unknown) => {
+        if (method !== 'provider.dubbing.voiceDesign') return { cancelled: true };
+        const output = await designOutput(raw);
+        await new Promise<void>((resolveResult) => {
+          finish = resolveResult;
+        });
+        return output;
+      });
+      const f = await setupVoiceDesign({ native: { request } });
+      const first = f.service.prepareVoiceDesign(f.params);
+      const second = f.service.prepareVoiceDesign(f.params);
+      const completion = f.service
+        .confirmVoiceDesign({
+          confirmationToken: first.confirmation.confirmationToken,
+          approved: true,
+        })
+        .catch((error: unknown) => error);
+      await expect.poll(() => Boolean(finish)).toBe(true);
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: second.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toThrow('声音任务');
+      const stopping = f.service.cancelAll();
+      f.projects.close();
+      f.projects.create(join(f.directory, 'other'), '另一个项目');
+      finish!();
+      const error = await completion;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('ttv-designed-new-voice');
+      await stopping;
+      expect(f.service.listAudio()).toEqual([]);
+      expect(f.service.listVoices()).toEqual([]);
+      expect(
+        request.mock.calls.filter(([method]) => method === 'provider.dubbing.voiceDesign'),
+      ).toHaveLength(1);
+      const manifest = readdirSync(join(f.root, 'cache/dubbing')).find((name) =>
+        name.endsWith('.mp3.json'),
+      )!;
+      expect(existsSync(join(f.root, 'cache/dubbing', manifest.slice(0, -5)))).toBe(true);
+    });
+
+    it('refuses a voice design result without a real new voice ID', async () => {
+      const request = vi.fn(async (_method: string, raw: unknown) => ({
+        ...(await designOutput(raw)),
+        voiceId: '',
+      }));
+      const f = await setupVoiceDesign({ native: { request } });
+      const pending = f.service.prepareVoiceDesign(f.params);
+      await expect(
+        f.service.confirmVoiceDesign({
+          confirmationToken: pending.confirmation.confirmationToken,
+          approved: true,
+        }),
+      ).rejects.toThrow('音色 ID');
+      expect(f.service.listVoices()).toEqual([]);
+      expect(f.service.listAudio()).toEqual([]);
     });
 
     it('generates an independent reusable audio sample without requiring a character voice', async () => {

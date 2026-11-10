@@ -4,10 +4,10 @@ import type {
   DocumentBindingRole,
   DocumentKind,
   NovelWritingAction,
-  ProjectContentIR,
+  PromptBindingIR,
 } from '@ai-video/contracts';
 import { rebuildLibraryChunksForDocument } from '@ai-video/persistence';
-import { DOCUMENT_KINDS, validateProjectContentIR } from '@ai-video/contracts';
+import { DOCUMENT_KINDS, validatePromptBindings } from '@ai-video/contracts';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectService } from './project-service.js';
@@ -18,7 +18,6 @@ import {
   RESOURCE_ARGUMENT_KEYS,
   resolveWriteResource,
 } from './project-resource-map.js';
-
 const KINDS = new Set<DocumentKind>(DOCUMENT_KINDS);
 const ROLES = new Set<DocumentBindingRole>([
   'work-outline',
@@ -27,7 +26,6 @@ const ROLES = new Set<DocumentBindingRole>([
   'timeline',
   'style-guide',
 ]);
-
 type ParentTask = {
   id: string;
   project_id: string;
@@ -39,28 +37,28 @@ type ParentTask = {
   scope_id: string | null;
   request_snapshot_json: string;
 };
-
 /** One model submission owns one artifact; the parent workflow controls review and completion. */
 export class AgentDraftSubmissionService {
   constructor(
     private readonly projects: ProjectService,
     private readonly documents: DocumentWorkflowService,
   ) {}
-
   submit(
     operation: 'document.submit_draft' | 'novel.chapter.write_draft',
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
     artifactKey = identity.toolCallId,
-    compatibility?: { useParentArtifact: boolean },
+    compatibility?: {
+      useParentArtifact: boolean;
+    },
   ): Record<string, unknown> {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const parent = this.requireParent(database, identity, !!compatibility);
         const resource = resolveWriteResource(database, project, args)!;
         const title = text(args.title, 'title', 200);
-        const contentMarkdown = text(args.contentMarkdown, 'contentMarkdown', 1_000_000);
-        let contentIR = args.contentIR as ProjectContentIR | undefined;
+        const contentMarkdown = text(args.contentMarkdown, 'contentMarkdown', 1000000);
+        let bindings = args.bindings as PromptBindingIR | undefined;
         const parentSnapshot = JSON.parse(parent.request_snapshot_json) as Record<string, unknown>;
         const productionSkillId =
           parentSnapshot.productionSkillId === 'script-to-media' ? 'script-to-media' : undefined;
@@ -111,14 +109,17 @@ export class AgentDraftSubmissionService {
           if (action === 'create_chapter') {
             if (resource.kind !== 'workspace' || resource.locator.workspace !== 'novel')
               throw new Error('New novel chapters require the 小说 workspace resourceId.');
-            if (
-              args.chapterId !== undefined ||
-              args.documentId !== undefined ||
-              args.expectedChapterRowVersion !== undefined ||
-              args.expectedDocumentRowVersion !== undefined ||
-              args.baseVersionId !== undefined
-            )
-              throw new Error('New chapters cannot specify an existing target or CAS.');
+            for (const field of [
+              'chapterId',
+              'documentId',
+              'expectedChapterRowVersion',
+              'expectedDocumentRowVersion',
+              'baseVersionId',
+            ])
+              if (Object.hasOwn(args, field))
+                throw new Error(
+                  `CHAPTER_ARGUMENT_INVALID: action=create_chapter field=${field} forbidden; omit this field (including null), or use preparedArguments.deleteFields to remove it. Preserve the candidate body.`,
+                );
           } else {
             if (args.volumeId !== undefined || args.displayLabel !== undefined)
               throw new Error(
@@ -146,14 +147,22 @@ export class AgentDraftSubmissionService {
             )
               throw new Error('chapterId does not match the chapter resourceId.');
             if (integer(args.expectedChapterRowVersion) !== chapter.row_version)
-              throw new Error('Chapter row version is stale.');
+              throw new Error(
+                'CHAPTER_CAS_CONFLICT: action=' +
+                  action +
+                  ' field=expectedChapterRowVersion; read current chapter metadata before deciding whether to retry.',
+              );
             expectedDocumentRowVersion = integer(args.expectedDocumentRowVersion);
             baseVersionId = nullableId(args.baseVersionId);
             if (
               expectedDocumentRowVersion !== chapter.document_row_version ||
               baseVersionId !== chapter.current_version_id
             )
-              throw new Error('Document row/base version is stale.');
+              throw new Error(
+                'CHAPTER_CAS_CONFLICT: action=' +
+                  action +
+                  ' field=expectedDocumentRowVersion,baseVersionId; read current document metadata before deciding whether to retry.',
+              );
           }
           const orchestration = new AgentOrchestrationService(this.projects);
           const prepared = orchestration.prepareNovelTask({
@@ -205,7 +214,8 @@ export class AgentDraftSubmissionService {
             ...RESOURCE_ARGUMENT_KEYS,
             'title',
             'contentMarkdown',
-            'contentIR',
+            'bindings',
+            'sampleText',
             'documentKind',
             'documentId',
             'expectedDocumentRowVersion',
@@ -225,7 +235,11 @@ export class AgentDraftSubmissionService {
                 `SELECT kind FROM documents WHERE id = ? AND project_id = ? AND lifecycle_status = 'active'
             AND NOT EXISTS (SELECT 1 FROM novel_chapters WHERE document_id = documents.id)`,
               )
-              .get(documentId, project.id) as { kind: string } | undefined;
+              .get(documentId, project.id) as
+              | {
+                  kind: string;
+                }
+              | undefined;
             if (!target)
               throw new Error(
                 'Writable project document was not found; chapters require novel.chapter.write_draft.',
@@ -243,7 +257,7 @@ export class AgentDraftSubmissionService {
             args.baseVersionId !== undefined
           )
             throw new Error(
-              'New documents cannot specify CAS for an existing target. Omit expectedDocumentRowVersion and baseVersionId entirely, including null; source versions belong in provenance. Retry with the same complete contentMarkdown/contentIR.',
+              'New documents cannot specify CAS for an existing target. Omit expectedDocumentRowVersion and baseVersionId entirely, including null; source versions belong in provenance. Retry with the same complete contentMarkdown/bindings.',
             );
           if (args.documentId === undefined) {
             if (kind === 'storyboard' && !compatibility)
@@ -273,10 +287,12 @@ export class AgentDraftSubmissionService {
             !ROLES.has(text(args.bindingRole, 'bindingRole', 80) as DocumentBindingRole)
           )
             throw new Error('Invalid novel reference binding role.');
-          if (contentIR !== undefined) {
-            if (!['character', 'scene', 'prop'].includes(kind))
-              throw new Error('contentIR is only valid for character, scene or prop documents.');
-            contentIR = validateProjectContentIR(contentIR, kind as 'character' | 'scene' | 'prop');
+          if (bindings !== undefined) {
+            if (!['character', 'scene', 'prop', 'voice'].includes(kind))
+              throw new Error(
+                'bindings is only valid for character, scene, prop or voice documents.',
+              );
+            bindings = validatePromptBindings(bindings);
           }
           taskId = compatibility?.useParentArtifact ? parent.id : randomUUID();
           if (!compatibility?.useParentArtifact)
@@ -317,7 +333,8 @@ export class AgentDraftSubmissionService {
           taskId,
           title,
           contentMarkdown,
-          contentIR,
+          bindings,
+          sampleText: args.sampleText as string | undefined,
           kind,
           scopeType: parent.scope_type,
           scopeId: parent.scope_id ?? undefined,
@@ -383,7 +400,6 @@ export class AgentDraftSubmissionService {
       })(),
     );
   }
-
   private requireParent(
     database: Database.Database,
     identity: AgentSystemToolIdentity,
@@ -408,7 +424,6 @@ export class AgentDraftSubmissionService {
     return parent;
   }
 }
-
 function text(value: unknown, label: string, maximum: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum)
     throw new Error(`Invalid ${label}.`);

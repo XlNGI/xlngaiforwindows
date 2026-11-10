@@ -164,16 +164,37 @@ describe('DomainToolGateway', () => {
       .find((tool) => tool.name === 'document.create_draft')!;
     await character.execute('call-character', {
       title: '角色提示词',
-      contentMarkdown: '# 角色',
+      contentMarkdown: '  # 角色\ne\u0301\n',
       documentKind: 'character',
+      bindings: { schemaVersion: 1 },
     });
+    const savedCharacter = new ContentService(project)
+      .listDocuments()
+      .find((d) => d.kind === 'character')!;
+    expect(
+      new DocumentWorkflowService(project).getDocument(savedCharacter.id).currentVersion,
+    ).toMatchObject({ contentMarkdown: '  # 角色\ne\u0301\n', bindings: { schemaVersion: 1 } });
+    const bindings = { schemaVersion: 1 as const, characterDocumentIds: [savedCharacter.id] };
     const structure = gateway
       .tools(plans.availableToolGrants('task-1'))
       .find((tool) => tool.name === 'novel.episode.submit_structure')!;
     await structure.execute('call-structure', {
       episodeTitle: '第 1 集',
       scenes: [
-        { title: '旧码头', shots: [{ title: '远景', prompt: '海雾中的旧码头。' }] },
+        {
+          title: '旧码头',
+          prompt: '  海雾\ne\u0301\n',
+          bindings,
+          timing: { estimatedDurationSeconds: 8 },
+          shots: [
+            {
+              title: '远景',
+              prompt: '  海雾中的旧码头。\ne\u0301\n',
+              bindings,
+              timing: { estimatedDurationSeconds: 4, locked: true },
+            },
+          ],
+        },
         { title: '街道', shots: [{ title: '近景', prompt: '雨中的街道。' }] },
         { title: '房间', shots: [{ title: '特写', prompt: '桌上的信。' }] },
       ],
@@ -189,6 +210,17 @@ describe('DomainToolGateway', () => {
         .map((item) => item.parentItemOrdinal),
     ).toEqual([0, 2, 4]);
     const content = new ContentService(project);
+    const wharf = content.listScenes().find((s) => s.title === '旧码头')!;
+    expect(wharf).toMatchObject({
+      prompt: '  海雾\ne\u0301\n',
+      bindings,
+      timing: { estimatedDurationSeconds: 8 },
+    });
+    expect(content.listShots(wharf.id)[0]).toMatchObject({
+      prompt: '  海雾中的旧码头。\ne\u0301\n',
+      bindings,
+      timing: { estimatedDurationSeconds: 4, locked: true },
+    });
     for (const [title, shotTitle] of [
       ['旧码头', '远景'],
       ['街道', '近景'],

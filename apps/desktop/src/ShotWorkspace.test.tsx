@@ -4,7 +4,7 @@ import type {
   AssetInfo,
   DocumentSummary,
   ProductionReadResult,
-  ProductionShotAuthoringIR,
+  PromptRecord,
   SceneMediaResolveResult,
 } from '@ai-video/contracts';
 import {
@@ -14,12 +14,10 @@ import {
   shotReferenceImageSelections,
 } from './ShotWorkspace';
 import { callWorker } from './worker-client';
-
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`,
 }));
-
 const characterDoc: DocumentSummary = {
   id: 'character-doc',
   projectId: 'project',
@@ -31,7 +29,6 @@ const characterDoc: DocumentSummary = {
   createdAt: 'now',
   updatedAt: 'now',
 };
-
 const sceneDoc: DocumentSummary = {
   id: 'scene-doc',
   projectId: 'project',
@@ -43,7 +40,6 @@ const sceneDoc: DocumentSummary = {
   createdAt: 'now',
   updatedAt: 'now',
 };
-
 const characterAsset: AssetInfo = {
   id: 'character-asset',
   projectId: 'project',
@@ -53,7 +49,6 @@ const characterAsset: AssetInfo = {
   sizeBytes: 2048,
   createdAt: 'now',
 };
-
 const sceneAsset: AssetInfo = {
   id: 'scene-asset',
   projectId: 'project',
@@ -63,7 +58,6 @@ const sceneAsset: AssetInfo = {
   sizeBytes: 2048,
   createdAt: 'now',
 };
-
 const firstFrameAsset: AssetInfo = {
   id: 'first-frame-asset',
   projectId: 'project',
@@ -73,13 +67,11 @@ const firstFrameAsset: AssetInfo = {
   sizeBytes: 2048,
   createdAt: 'now',
 };
-
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   window.localStorage.clear();
 });
-
 function renderWorkspace(
   overrides: Partial<import('react').ComponentProps<typeof ShotWorkspace>> = {},
 ) {
@@ -91,8 +83,8 @@ function renderWorkspace(
     shotTitle: '镜头一',
     shotStatus: 'draft',
     shotPosition: 0,
-    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '雨夜里林澈回头', references: {} },
     prompt: '雨夜里林澈回头',
+    bindings: { schemaVersion: 1 },
     writable: true,
     assets: [characterAsset, sceneAsset, firstFrameAsset],
     documents: [characterDoc, sceneDoc],
@@ -112,7 +104,6 @@ function renderWorkspace(
   const view = render(<ShotWorkspace {...props} />);
   return { ...view, onGenerateImage, onGenerateVideo, props };
 }
-
 describe('shot reference storage', () => {
   it('keeps an explicit first-frame role when that asset is also a character or scene reference', () => {
     const refs = {
@@ -135,7 +126,6 @@ describe('shot reference storage', () => {
     expect(loadShotReferences('project', 'other')).toEqual({});
   });
 });
-
 describe('ShotWorkspace', () => {
   it('fills every confirmed source image for still generation and every final reference for video', async () => {
     vi.mocked(callWorker).mockImplementation(async (method) => {
@@ -229,18 +219,18 @@ describe('ShotWorkspace', () => {
     const onPromptChange = vi.fn();
     renderWorkspace({
       onPromptChange,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '雨夜里林澈回头',
-        references: {
-          characterDocumentIds: [characterDoc.id],
-          sceneDocumentIds: [sceneDoc.id],
-          propDocumentIds: [],
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{
+            characterDocumentIds: [characterDoc.id],
+            sceneDocumentIds: [sceneDoc.id],
+            propDocumentIds: [],
+          },
         },
       },
     });
-
     fireEvent.click(await screen.findByRole('region', { name: '镜头提示词预览' }));
     const prompt = await screen.findByRole('textbox', { name: '镜头提示词' });
     await waitFor(() =>
@@ -251,21 +241,20 @@ describe('ShotWorkspace', () => {
     expect(prompt.querySelectorAll('.prompt-reference-chip')).toHaveLength(2);
     expect(onPromptChange).not.toHaveBeenCalled();
   });
-
   it('shows IR document references separately from image selection state', async () => {
     renderWorkspace({
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '雨夜里林澈回头',
-        references: {
-          characterDocumentIds: [characterDoc.id, 'missing-character'],
-          sceneDocumentIds: [sceneDoc.id],
-          propDocumentIds: ['missing-prop'],
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{
+            characterDocumentIds: [characterDoc.id, 'missing-character'],
+            sceneDocumentIds: [sceneDoc.id],
+            propDocumentIds: ['missing-prop'],
+          },
         },
       },
     });
-
     const summary = await screen.findByRole('region', { name: '提示词资料引用' });
     expect(within(summary).getByText('林澈')).toBeInTheDocument();
     expect(within(summary).getByText('旧码头')).toBeInTheDocument();
@@ -273,7 +262,6 @@ describe('ShotWorkspace', () => {
     expect(summary).not.toHaveTextContent('未选择');
     expect(screen.getAllByRole('option', { name: '未选择' }).length).toBeGreaterThan(0);
   });
-
   it('shows progress and prevents duplicate clicks while resolving references for the form', async () => {
     const pendingReads: Array<(value: ProductionReadResult) => void> = [];
     let finishMedia: ((value: SceneMediaResolveResult) => void) | undefined;
@@ -284,7 +272,12 @@ describe('ShotWorkspace', () => {
       if (method === 'production.read')
         return new Promise<ProductionReadResult>((resolve) => pendingReads.push(resolve));
       if (method === 'scene.media.resolve') {
-        const ids = (params as { characterDocumentIds?: string[] }).characterDocumentIds ?? [];
+        const ids =
+          (
+            params as {
+              characterDocumentIds?: string[];
+            }
+          ).characterDocumentIds ?? [];
         if (!ids.length) return Promise.resolve({ characters: [], voices: [], assets: [] });
         return new Promise<SceneMediaResolveResult>((resolve) => {
           finishMedia = resolve;
@@ -299,24 +292,24 @@ describe('ShotWorkspace', () => {
       return Promise.resolve([]);
     });
     const { onGenerateImage } = renderWorkspace({
+      bindings: undefined,
       documents: [characterDoc],
-      authoringIR: undefined,
     });
     await waitFor(() => expect(pendingReads).toHaveLength(1));
     pendingReads[0]!({
       target: { kind: 'shot', id: 'shot' },
       rowVersion: 1,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '当前镜头',
-        references: { characterDocumentIds: [characterDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ characterDocumentIds: [characterDoc.id] },
+        },
       },
       issues: [],
     });
     await screen.findByLabelText('林澈角色参考图');
     await waitFor(() => expect(pendingReads).toHaveLength(1));
-
     const fillButton = screen.getByRole('button', { name: '填充本镜图片表单' });
     fireEvent.click(fillButton);
     expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定并填充画面表单');
@@ -327,11 +320,9 @@ describe('ShotWorkspace', () => {
       voices: [],
       assets: [characterAsset],
     });
-
     await waitFor(() => expect(onGenerateImage).toHaveBeenCalledOnce());
     expect(screen.queryByText(/正在解析本镜绑定/)).not.toBeInTheDocument();
   });
-
   it.each([
     ['image', '填充本镜图片表单'],
     ['video', '填充本镜视频表单'],
@@ -350,22 +341,18 @@ describe('ShotWorkspace', () => {
       onPrepareGenerate,
       onSaveReferenceBindings,
     });
-
     fireEvent.click(screen.getByRole('button', { name: buttonName }));
-
     expect(onPrepareGenerate).toHaveBeenCalledWith(mode, '雨夜里林澈回头', expect.any(Object));
     expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定');
     await waitFor(() => expect(onSaveReferenceBindings).toHaveBeenCalledOnce());
     expect(onGenerateImage).not.toHaveBeenCalled();
     expect(onGenerateVideo).not.toHaveBeenCalled();
-
     finishBindingSave?.();
     await waitFor(() => {
       if (mode === 'image') expect(onGenerateImage).toHaveBeenCalledOnce();
       else expect(onGenerateVideo).toHaveBeenCalledOnce();
     });
   });
-
   it.each(
     (['scoped', 'all-visible', 'legacy', 'empty'] as const).flatMap((state) =>
       (['image', 'video'] as const).map((mode) => ({ state, mode })),
@@ -377,17 +364,21 @@ describe('ShotWorkspace', () => {
       id: 'absent-image',
       relativePath: 'assets/absent.png',
     };
-    vi.mocked(callWorker).mockImplementation(((method: string, params: { assetId?: string }) => {
+    vi.mocked(callWorker).mockImplementation(((
+      method: string,
+      params: {
+        assetId?: string;
+      },
+    ) => {
       if (method === 'production.read')
         return Promise.resolve({
-          authoringIR: {
-            schemaVersion: 1,
-            kind: 'shot',
+          ...{
             prompt: state === 'all-visible' ? '收尾顾清影出现在二楼栏边。' : '当前镜头',
             ...(state === 'legacy'
               ? {}
               : {
-                  references: {
+                  bindings: {
+                    schemaVersion: 1,
                     characterDocumentIds:
                       state === 'empty'
                         ? []
@@ -417,7 +408,7 @@ describe('ShotWorkspace', () => {
       return Promise.resolve([]);
     }) as typeof callWorker);
     const { onGenerateImage, onGenerateVideo } = renderWorkspace({
-      authoringIR: undefined,
+      bindings: undefined,
       ...(state === 'legacy'
         ? {
             referenceBindings: {
@@ -464,7 +455,6 @@ describe('ShotWorkspace', () => {
         screen.getByLabelText(`${state === 'scoped' ? '林澈' : '顾清影'}角色参考图`),
       ).toBeInTheDocument();
   });
-
   it('keeps confirmed continuity frames when opening image production from the ordinary shot action', async () => {
     vi.mocked(callWorker).mockImplementation((method) =>
       Promise.resolve(
@@ -615,16 +605,16 @@ describe('ShotWorkspace', () => {
       });
     },
   );
-
   it.each(['provided', 'loaded'] as const)(
     'finishes filling after resolving a default character and receiving the saved bindings (%s IR)',
     async (irSource) => {
       let finishSave: (() => void) | undefined;
-      const authoringIR: ProductionShotAuthoringIR = {
-        schemaVersion: 1,
-        kind: 'shot',
+      const authoringIR: PromptRecord = {
         prompt: '雨夜里林澈回头',
-        references: { characterDocumentIds: [characterDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ characterDocumentIds: [characterDoc.id] },
+        },
       };
       vi.mocked(callWorker).mockImplementation((method) =>
         Promise.resolve(
@@ -637,12 +627,12 @@ describe('ShotWorkspace', () => {
                 assets: [characterAsset],
               }
             : method === 'production.read'
-              ? { target: { kind: 'shot', id: 'shot' }, rowVersion: 0, authoringIR, issues: [] }
+              ? { target: { kind: 'shot', id: 'shot' }, rowVersion: 0, ...authoringIR, issues: [] }
               : [],
         ),
       );
       const view = renderWorkspace({
-        authoringIR: irSource === 'provided' ? authoringIR : undefined,
+        ...(irSource === 'provided' ? authoringIR : { bindings: undefined }),
         onSaveReferenceBindings: (bindings) =>
           new Promise<void>((resolve) => {
             finishSave = resolve;
@@ -664,7 +654,6 @@ describe('ShotWorkspace', () => {
       );
     },
   );
-
   it.each(['project', 'shot', 'references', 'prompt'] as const)(
     'discards a pending fill when its %s changes',
     async (changed) => {
@@ -732,7 +721,11 @@ describe('ShotWorkspace', () => {
               ? { characters: [], voices: [], assets: [] }
               : method === 'asset.mediaSource'
                 ? {
-                    assetId: (params as { assetId: string }).assetId,
+                    assetId: (
+                      params as {
+                        assetId: string;
+                      }
+                    ).assetId,
                     path: 'D:/frame.png',
                     contentType: 'image/png',
                   }
@@ -756,7 +749,6 @@ describe('ShotWorkspace', () => {
       ).toBe(false);
     },
   );
-
   it("shows only this shot's declared cast and generates with its resolved character images", async () => {
     const otherCharacter = { ...characterDoc, id: 'other-character', title: '沈舟' };
     const otherImage = { ...characterAsset, id: 'other-image', relativePath: 'assets/other.png' };
@@ -775,7 +767,11 @@ describe('ShotWorkspace', () => {
           ? media
           : method === 'asset.mediaSource'
             ? {
-                assetId: (params as { assetId: string }).assetId,
+                assetId: (
+                  params as {
+                    assetId: string;
+                  }
+                ).assetId,
                 path: 'D:/ref.png',
                 contentType: 'image/png',
               }
@@ -783,14 +779,15 @@ describe('ShotWorkspace', () => {
       ),
     );
     const { onGenerateVideo } = renderWorkspace({
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '林澈和沈舟在旧码头对峙。',
-        references: {
-          characterDocumentIds: [characterDoc.id, otherCharacter.id],
-          sceneDocumentIds: [sceneDoc.id],
-          propDocumentIds: [],
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{
+            characterDocumentIds: [characterDoc.id, otherCharacter.id],
+            sceneDocumentIds: [sceneDoc.id],
+            propDocumentIds: [],
+          },
         },
       },
       referenceBindings: {
@@ -820,7 +817,6 @@ describe('ShotWorkspace', () => {
     );
     expect(loadShotReferences('project', 'shot')).toEqual({});
   });
-
   it('shows generated shot images inline and opens an enlarged preview', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'asset.list') return Promise.resolve([firstFrameAsset]);
@@ -850,7 +846,11 @@ describe('ShotWorkspace', () => {
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'asset.list')
         return Promise.resolve(
-          (params as { sourceDocumentId?: string }).sourceDocumentId === sceneDoc.id
+          (
+            params as {
+              sourceDocumentId?: string;
+            }
+          ).sourceDocumentId === sceneDoc.id
             ? [sceneAsset]
             : [characterAsset],
         );
@@ -863,11 +863,12 @@ describe('ShotWorkspace', () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
     const { onGenerateVideo } = renderWorkspace({
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '远景，人物走过庭院',
-        references: { characterDocumentIds: [], sceneDocumentIds: [sceneDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ characterDocumentIds: [], sceneDocumentIds: [sceneDoc.id] },
+        },
       },
       assets: [],
       documents: [{ ...sceneDoc, id: 'same-title-other-document' }, sceneDoc],
@@ -886,7 +887,6 @@ describe('ShotWorkspace', () => {
       expect.objectContaining({ sourceDocumentId: 'same-title-other-document' }),
     );
   });
-
   it('keeps an explicit shot image override and can restore its declared scene default', async () => {
     saveShotReferences('project', 'shot', { sceneAssetId: firstFrameAsset.id });
     vi.mocked(callWorker).mockImplementation((method) => {
@@ -900,11 +900,12 @@ describe('ShotWorkspace', () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
     const { onGenerateVideo } = renderWorkspace({
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '庭院远景',
-        references: { characterDocumentIds: [], sceneDocumentIds: [sceneDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ characterDocumentIds: [], sceneDocumentIds: [sceneDoc.id] },
+        },
       },
       prompt: '庭院远景',
     });
@@ -929,13 +930,18 @@ describe('ShotWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '恢复默认场景图' }));
     expect(screen.getByLabelText('场景参考')).toHaveValue(sceneAsset.id);
   });
-
   it('ignores a stale default image when this shot changes its declared scene reference', async () => {
     let resolveOld!: (assets: AssetInfo[]) => void;
     const nextDoc = { ...sceneDoc, id: 'next-scene-document', title: '书房' };
     vi.mocked(callWorker).mockImplementation((method, params) => {
       if (method === 'asset.list') {
-        if ((params as { sourceDocumentId?: string }).sourceDocumentId === sceneDoc.id)
+        if (
+          (
+            params as {
+              sourceDocumentId?: string;
+            }
+          ).sourceDocumentId === sceneDoc.id
+        )
           return new Promise<AssetInfo[]>((resolve) => {
             resolveOld = resolve;
           });
@@ -950,11 +956,12 @@ describe('ShotWorkspace', () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
     const workspace = renderWorkspace({
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '旧码头',
-        references: { sceneDocumentIds: [sceneDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ sceneDocumentIds: [sceneDoc.id] },
+        },
       },
       documents: [sceneDoc, nextDoc],
     });
@@ -965,15 +972,15 @@ describe('ShotWorkspace', () => {
       shotTitle: '镜头',
       shotStatus: 'draft',
       shotPosition: 0,
-      prompt: '书房特写',
+      assets: [],
       writable: true,
-      assets: [sceneAsset, firstFrameAsset],
       documents: [sceneDoc, nextDoc],
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '书房特写',
-        references: { sceneDocumentIds: [nextDoc.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ sceneDocumentIds: [nextDoc.id] },
+        },
       },
       storyboardTitle: '',
       storyboardContent: '',
@@ -995,15 +1002,24 @@ describe('ShotWorkspace', () => {
   it('does not create reference relationships from names or prompt placeholders', async () => {
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
       if (method === 'asset.list') {
-        const sourceDocumentId = (params as { sourceDocumentId?: string } | undefined)
-          ?.sourceDocumentId;
+        const sourceDocumentId = (
+          params as
+            | {
+                sourceDocumentId?: string;
+              }
+            | undefined
+        )?.sourceDocumentId;
         if (sourceDocumentId === characterDoc.id) return Promise.resolve([characterAsset]);
         if (sourceDocumentId === sceneDoc.id) return Promise.resolve([sceneAsset]);
         return Promise.resolve([]);
       }
       if (method === 'asset.mediaSource') {
         return Promise.resolve({
-          assetId: (params as { assetId: string }).assetId,
+          assetId: (
+            params as {
+              assetId: string;
+            }
+          ).assetId,
           path: 'D:\\\\Project\\\\assets\\\\images\\\\ref.png',
           contentType: 'image/png',
         });
@@ -1029,25 +1045,20 @@ describe('ShotWorkspace', () => {
       expect.objectContaining({ sourceDocumentId: sceneDoc.id }),
     );
   });
-
   it('sends a binding-repair request for only the current shot prompt', async () => {
     const onRepairBindings = vi.fn().mockResolvedValue(undefined);
     renderWorkspace({
       prompt: '林澈在旧码头拿起收音机。',
       onRepairBindings,
     });
-
     fireEvent.click(screen.getByRole('button', { name: '修复绑定' }));
-
     await waitFor(() => expect(onRepairBindings).toHaveBeenCalledWith('林澈在旧码头拿起收音机。'));
     expect(await screen.findByText('修复请求已发送到会话。')).toBeVisible();
   });
-
   it('keeps generate-video disabled until a reference or mention exists', () => {
     renderWorkspace();
     expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeDisabled();
   });
-
   it('sends selected first-frame references to video generation', async () => {
     vi.mocked(callWorker).mockResolvedValue({
       assetId: firstFrameAsset.id,

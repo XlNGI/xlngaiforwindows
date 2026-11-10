@@ -6,6 +6,107 @@ import { ChatPanel } from './ChatPanel';
 
 afterEach(cleanup);
 
+it('shows bundle counts and click duration without treating saved drafts as verified', () => {
+  const detail = task('bundle', 'u1');
+  detail.deliveryReview = {
+    state: 'pending',
+    pendingTargetIds: [],
+    issueCount: 0,
+    bundle: {
+      businessSaved: true,
+      readbackVerified: false,
+      counts: { character: 2, scene: 1, prop: 1, voice: 2, shot: 1, storyScene: 1 },
+      requestedAt: '2026-11-09T00:00:00.000Z',
+      taskCreatedAt: '2026-11-09T00:00:05.000Z',
+      elapsedMs: 65000,
+      preparationMs: 5000,
+    },
+  };
+  render(
+    <ChatPanel
+      {...props({
+        messages: [message('u1', 'user'), message('a1', 'assistant', 'u1')],
+        agentTasks: [detail],
+      })}
+    />,
+  );
+  fireEvent.click(screen.getByText(/查看交付与质量/));
+  expect(screen.getByText(/草稿已保存/)).toHaveTextContent('待读回核对');
+  expect(screen.getByText(/草稿已保存/)).toHaveTextContent('点击后耗时 1 分 5 秒');
+  expect(screen.getByText(/草稿已保存/)).toHaveTextContent('音色样本 2');
+  expect(screen.getByText(/草稿已保存/)).toHaveTextContent('启动准备 5.0 秒');
+});
+
+it('opens a scoped delivery and shows the cited original requirement without treating an unconfirmed issue as verified', () => {
+  const detail = task('quality', 'u1');
+  detail.task.status = 'completed';
+  detail.documents = [
+    { documentId: 'doc', documentVersionId: 'v2', operation: 'create', createdAt: 'now' },
+  ];
+  const target = {
+    id: 'doc',
+    kind: 'document' as const,
+    title: '第一章',
+    version: 'v2',
+    state: 'needs_revision' as const,
+  };
+  detail.deliveryReview = {
+    state: 'needs_revision',
+    pendingTargetIds: ['doc'],
+    issueCount: 1,
+    targets: [target],
+    requirements: [{ id: 'requirement', text: '必须保留原对白及说话顺序。' }],
+    issues: [
+      {
+        id: 'issue',
+        targetId: 'doc',
+        targetVersion: 'v1',
+        description: '对白顺序待核实',
+        evidenceStatus: 'needs_correction',
+        requirementIds: ['requirement'],
+      },
+    ],
+  };
+  const onOpenReviewTarget = vi.fn();
+  render(
+    <ChatPanel
+      {...props({
+        messages: [message('u1', 'user'), message('a1', 'assistant', 'u1')],
+        agentTasks: [detail],
+        onOpenReviewTarget,
+      })}
+    />,
+  );
+  fireEvent.click(screen.getByText(/查看交付与质量/));
+  fireEvent.click(screen.getByRole('button', { name: '打开当前正文' }));
+  expect(onOpenReviewTarget).toHaveBeenCalledWith('project', target);
+  fireEvent.click(screen.getByRole('button', { name: '查看对应原始要求' }));
+  expect(screen.getByText('必须保留原对白及说话顺序。')).toBeVisible();
+  expect(screen.getByText(/待核实问题（证据需更正）/)).toBeVisible();
+  expect(screen.getByText(/问题来自较早版本/)).toBeVisible();
+});
+
+it('shows saved content separately from verified content, and waiting tasks do not appear to generate', () => {
+  const detail = task('saved', 'u1');
+  detail.task.status = 'completed';
+  detail.documents = [
+    { documentId: 'doc', documentVersionId: 'v1', operation: 'create', createdAt: 'now' },
+  ];
+  const state = props({
+    messages: [message('u1', 'user'), message('a1', 'assistant', 'u1')],
+    agentTasks: [detail],
+  });
+  const view = render(<ChatPanel {...state} />);
+  expect(screen.getByText('a1').closest('article')).toHaveTextContent('已保存 · 内容未核验');
+  detail.deliveryReview = { state: 'verified', pendingTargetIds: [], issueCount: 0 };
+  view.rerender(<ChatPanel {...state} />);
+  expect(screen.getByText('a1').closest('article')).toHaveTextContent('已保存 · 内容已核验');
+  detail.task.status = 'waiting_review';
+  view.rerender(<ChatPanel {...state} agentTask={detail} />);
+  expect(screen.getAllByText('等待用户操作').length).toBeGreaterThan(0);
+  expect(screen.queryByText('正在调用工具')).not.toBeInTheDocument();
+});
+
 const conversation: ConversationInfo = {
   id: 'conversation',
   projectId: 'project',

@@ -525,6 +525,8 @@ const methods = new Set<WorkerMethod>([
   'characterVoiceReference.save',
   'characterVoiceReference.generate',
   'characterVoiceReference.prepare',
+  'characterVoiceDesign.prepare',
+  'characterVoiceDesign.confirm',
   'characterVoiceReference.confirm',
   'audio.import',
   'audio.sample.prepare',
@@ -1895,6 +1897,16 @@ async function handleRequestCore(
             params as unknown as import('@ai-video/contracts').CharacterVoiceReferencePrepareParams,
           );
           break;
+        case 'characterVoiceDesign.prepare':
+          result = dubbingService.prepareVoiceDesign(
+            params as unknown as import('@ai-video/contracts').CharacterVoiceDesignPrepareParams,
+          );
+          break;
+        case 'characterVoiceDesign.confirm':
+          result = await dubbingService.confirmVoiceDesign(
+            params as unknown as import('@ai-video/contracts').CharacterVoiceReferenceConfirmParams,
+          );
+          break;
         case 'characterVoiceReference.confirm':
           result = await dubbingService.confirmVoiceReferenceSubmission(
             params as unknown as import('@ai-video/contracts').CharacterVoiceReferenceConfirmParams,
@@ -2465,6 +2477,9 @@ async function handleRequestCore(
               selectedChapterIds: agentParams.selectedChapterIds,
               targetPlatform: agentParams.targetPlatform,
               productionSkillId: agentParams.productionSkillId,
+              productionWorkflowVersion: agentParams.productionWorkflowVersion,
+              productionSources: agentParams.productionSources,
+              productionRequestedAt: agentParams.productionRequestedAt,
               ...(novelIntent ? { novelIntent } : {}),
             },
             undefined,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   generationErrorFeedback,
+  generationErrorDisplayText,
   generationEventSummary,
   generationPhaseLabel,
   generationStatusLabel,
@@ -9,6 +10,27 @@ import {
 } from './generation-feedback';
 
 describe('generation feedback', () => {
+  it.each([
+    [
+      'Provider request failed with HTTP 400: invalid_request: unknown parameter image_size',
+      'provider',
+    ],
+    [
+      'Provider request failed with HTTP 401: invalid_api_key: 密钥已过期，请重新创建。',
+      'provider',
+    ],
+    ['Submission status is unknown: upstream disconnected\nrequest_id=req_123', 'transport'],
+    ['上游模型暂不可用，请稍后再试。', 'provider'],
+  ] as const)(
+    'keeps the received error visible before supplementary guidance: %s',
+    (message, kind) => {
+      const displayed = generationErrorDisplayText(message, kind);
+      expect(displayed.startsWith(message)).toBe(true);
+      expect(displayed.split(message)).toHaveLength(2);
+      expect(displayed).toContain(generationErrorFeedback(message, kind).userMessage);
+    },
+  );
+
   it('preserves already-submitted and download outcomes when admission stops a later request', () => {
     expect(
       generationErrorFeedback(
@@ -85,6 +107,35 @@ describe('generation feedback', () => {
       technicalDetail:
         'Provider 视频任务提交失败，HTTP 400：invalid_request：input_reference is required。',
     });
+  });
+
+  it('explains image dimension failures while retaining the provider limits', () => {
+    const message =
+      'Provider request failed with HTTP 400: invalid_parameter: status_code=400, kind=invalid_request, message=size must be WIDTHxHEIGHT, multiples of 16, aspect ratio at most 3, 655360..8294400 pixels and each edge at most 3840';
+    const feedback = generationErrorFeedback(message);
+    expect(feedback.userMessage).toContain('16 的倍数');
+    expect(feedback.userMessage).toContain('3:1');
+    expect(feedback.userMessage).toContain('655360 至 8294400');
+    expect(feedback.userMessage).toContain('3840 像素');
+    expect(feedback.technicalDetail).toBe(message);
+  });
+
+  it('uses the limits returned by the compatible service rather than fixed model rules', () => {
+    const feedback = generationErrorFeedback(
+      'invalid_request: size must be WIDTHxHEIGHT, divisible by 8, aspect ratio at most 4, 262144..4194304 pixels and each edge at most 2048',
+    );
+    expect(feedback.userMessage).toContain('8 的倍数');
+    expect(feedback.userMessage).toContain('4:1');
+    expect(feedback.userMessage).toContain('262144 至 4194304');
+    expect(feedback.userMessage).toContain('2048 像素');
+    expect(feedback.userMessage).not.toContain('16 的倍数');
+  });
+
+  it('does not invent size limits omitted by the compatible service', () => {
+    const feedback = generationErrorFeedback('invalid_request: size must be WIDTHxHEIGHT');
+    expect(feedback.userMessage).toContain('宽x高');
+    expect(feedback.userMessage).not.toContain('倍数');
+    expect(feedback.userMessage).not.toContain('像素');
   });
 
   it('sets expectations without inventing a completion time', () => {

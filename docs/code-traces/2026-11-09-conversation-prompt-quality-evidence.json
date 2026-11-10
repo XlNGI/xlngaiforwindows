@@ -1,0 +1,842 @@
+{
+  "capturedAt": "2026-11-09T04:08:23.580Z",
+  "methodology": "Readonly SQLite transaction snapshot refreshed at capturedAt after task termination. Supersedes the original 11:37:25 capture; historical counts remain in the audit Markdown. The original JSON was refreshed during implementation rather than retained separately; no claim of byte-for-byte historical snapshot preservation.",
+  "task": {
+    "id": "fc6c70d8-6f99-4f18-b3c4-8f8555a52557",
+    "status": "failed",
+    "started_at": "2026-11-09T02:54:53.346Z",
+    "updated_at": "2026-11-09T03:40:59.914Z",
+    "completed_at": "2026-11-09T03:40:59.914Z"
+  },
+  "generationId": "f2b4c997-201d-4ddb-82f9-6d3c92018cd3",
+  "source": {
+    "documentId": "084f27a9-f1e2-453a-8b01-fbaca49d6a7c",
+    "versionId": "88138723-5c67-4e0b-9577-06bc37b050db",
+    "characters": 5422,
+    "hash": "7c4499b858d62255c9e7ddafaed02394505a35ca07e0b51b1d7835ed33430a39"
+  },
+  "constraints": {
+    "characters": 8547,
+    "hash": "f8e8ab422b35da7e21f0c351ed2e0d66285bbed3f285729249d8297bf9231d7d",
+    "requirements": [
+      {
+        "quote": "正文按“输入图片说明 → 视频目标 → 【基础设定】→ 【氛围与画质】→ 动态流程 → 负面约束”组织。",
+        "foundInConstraints": true
+      },
+      {
+        "quote": "动态流程：按本段相对时间从 0 秒写至自然内容结束，每个动作节拍明确起止秒数",
+        "foundInConstraints": true
+      },
+      {
+        "quote": "场次视频提示词包含整体设定、连续性规则和该场所有镜头的完整提示词，按顺序排列，不遗漏或只提供摘要。",
+        "foundInConstraints": true
+      }
+    ]
+  },
+  "configEvidence": {
+    "resultId": "02a22d7d-d336-41cd-a494-efd81134080a",
+    "time": "2026-11-09T02:55:24.004Z",
+    "promptContainsConstraintVerbatim": true,
+    "requirementQuotesPresent": [true, true, true]
+  },
+  "skill": {
+    "resultId": "be41108a-ed8c-40ed-b0ff-5c23c54d09d6",
+    "revision": 5,
+    "instructionsHash": "c84ef930310af69949aab15b3a698ae8e90acc79d667f4e636667f572603bdae",
+    "hasNoDialogueQuoteWrapperRule": false,
+    "requiredTextsExcerpt": "交付核验：读取源稿后，先为全部场次/镜头登记稳定的交付计划；在场次/镜头交付项 requiredTexts 中逐句登记本集必须保留的全部原对白，以及用户明确要求逐字保留的文字；无对白时省略。逐字项只复制源稿中的原句，不自行拼入说话者标签、引号或格式；说话者、语气与顺序在读回时另外核验，避免将格式差异误判为原句缺失。该清单跨压缩和重启保留，不能删除或缩减；Worker 对当前已保存的逐镜 prompt 正文逐项检查，audioPlan、备注、结构 ready 或最终回复不能替代正文。每个镜头保存后都要读回该镜头并单独"
+  },
+  "requestSummary": {
+    "count": 92,
+    "completed": 92,
+    "firstAt": "2026-11-09T02:54:53.377Z",
+    "lastAt": "2026-11-09T03:40:14.146Z"
+  },
+  "scenes": [
+    {
+      "id": "2cd7c3f9-9068-45cf-ba43-326abcb5a835",
+      "title": "场一｜秋雨中的抄经院",
+      "rowVersion": 0,
+      "promptCharacters": 138,
+      "promptHash": "b415258589070aabd6a2aa29cf56e1acc2a886fcc59f0df0e2bc343babe89820",
+      "promptExcerpt": "昭宁中后期，临渊城连续第五日秋雨。内景，抄经院潮湿灰暗，窗纸受潮发灰，案上是未写完的《安水录》。本场展示沈照从抄经停笔，到管事嬷嬷冒雨交付沾河泥的油布包并下达送往旧档房的禁令；保持古装轻玄幻、克制悬疑，不补写人物未确认的年龄、脸貌、服装颜色和发饰，不新增现代物件或无依据人物。",
+      "irPromptMatches": true,
+      "durationSeconds": 42,
+      "shotCount": 3,
+      "shotDurationSeconds": 42,
+      "exactChildPromptOccurrences": 0
+    },
+    {
+      "id": "11618d07-7387-4730-8096-5070cfbf416c",
+      "title": "场二｜积水巷与旧档房",
+      "rowVersion": 0,
+      "promptCharacters": 170,
+      "promptHash": "256a1677a3dcb9e2ef716a0eb453a2fb97a47966aa999981e241da2c5e71b118",
+      "promptExcerpt": "昭宁中后期，临渊城第五日秋雨，从抄经院至城西旧档房。外景积水巷与旧档房门廊连续相接，积水半尺，旧档房门锁着，门上三道褪色封条，门廊下风灯已熄。沈照抱着未拆油布包涉水送件，听见包裹像木桨碰船帮般叩响；她把包裹放在门槛内侧，触门后听见门内回声与死亡名册线索。异常只以声音、纸张和门缝渗水呈现，不新增实体孩子或未确认人物，不补造日期、造型与案情。",
+      "irPromptMatches": true,
+      "durationSeconds": 55,
+      "shotCount": 3,
+      "shotDurationSeconds": 52,
+      "exactChildPromptOccurrences": 0
+    },
+    {
+      "id": "3badf2b9-979c-4c2d-ba86-6e725773435d",
+      "title": "场三｜城南废井",
+      "rowVersion": 0,
+      "promptCharacters": 169,
+      "promptHash": "e61ff92e2df6ca4d33274c6a8ef99256c32fa42b2cd21fbef13c0174140ca1e6",
+      "promptExcerpt": "昭宁中后期，临渊城第五日秋雨将近傍晚，城南废井。旧水门河道改后以石板封住，井栏长青苔，井边石板有浅水；雨点落下而水面反常不破。沈照携带已散开的死亡名册与封包材料循叩响而来，依沈槐曾守井的记忆停在井边。她听见井下船歌与呼吸，移开石板，取得半掌长青铜舟钉。玄幻仅表现为反常静水、声音和舟钉微弱青光，不增加法阵或新能力；维持沈照未确认造型开放。",
+      "irPromptMatches": true,
+      "durationSeconds": 51,
+      "shotCount": 3,
+      "shotDurationSeconds": 51,
+      "exactChildPromptOccurrences": 0
+    },
+    {
+      "id": "f9d88b74-08d8-4ab6-bfdb-2d80624e627a",
+      "title": "场四｜舟钉回声与归来",
+      "rowVersion": 0,
+      "promptCharacters": 236,
+      "promptHash": "96c43f37717ba56974b926374a8e14a60cae29ef6fdb3d767c12b7a3b4ef0140",
+      "promptExcerpt": "昭宁中后期，临渊城第五日秋雨将近傍晚，城南废井至湿冷石街。承接沈照刚取出青铜舟钉、死亡名册与油布材料在身边的状态。舟钉回声呈现听觉与极短感官影像：白蘋渡、湿透小手按船舷、远处掀舱帘、低声“把名字收好，别让他们看见。”孩子只留下被截断的“顾——”，身份与生死不确认。沈照松手，舟钉落在石板；船歌停、雨声回来。远处更夫梆子和城门方向喊“关水门！河又涨了！”她用油布",
+      "irPromptMatches": true,
+      "durationSeconds": 44,
+      "shotCount": 3,
+      "shotDurationSeconds": 46,
+      "exactChildPromptOccurrences": 0
+    }
+  ],
+  "shots": [
+    {
+      "id": "ca0234ab-ace3-4e0a-81e2-73ccae64cf8d",
+      "sceneId": "11618d07-7387-4730-8096-5070cfbf416c",
+      "title": "2-1｜涉水与旧声",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:03:35.200Z",
+      "promptCharacters": 267,
+      "promptHash": "ada99c4485c812190520a64ffd83ab959f14f52974c602b84f775389a4bd5b1d",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 15,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 7
+        },
+        {
+          "kind": "action",
+          "startSeconds": 7,
+          "endSeconds": 10
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 10,
+          "endSeconds": 12
+        },
+        {
+          "kind": "action",
+          "startSeconds": 12,
+          "endSeconds": 15
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "4edb03a0-d575-45b3-ab33-a01e69889d5e",
+      "sceneId": "11618d07-7387-4730-8096-5070cfbf416c",
+      "title": "2-2｜旧档房门内回声",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:03:35.200Z",
+      "promptCharacters": 310,
+      "promptHash": "2bb4387f64a334e05f36f8f24636e579bdfbd88fde3bf8e41831ee8aac8e3f37",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 20,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 5
+        },
+        {
+          "kind": "action",
+          "startSeconds": 5,
+          "endSeconds": 8
+        },
+        {
+          "kind": "action",
+          "startSeconds": 8,
+          "endSeconds": 16
+        },
+        {
+          "kind": "action",
+          "startSeconds": 16,
+          "endSeconds": 20
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "c955cd37-db25-460e-9c6b-e059a6c0430f",
+      "sceneId": "11618d07-7387-4730-8096-5070cfbf416c",
+      "title": "2-3｜名册与转向废井",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:03:35.200Z",
+      "promptCharacters": 255,
+      "promptHash": "ceab285e1961a9b9535a92d994e5f3fb68abe76a199ab0c7189e14ab2889ce7f",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 17,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 6
+        },
+        {
+          "kind": "action",
+          "startSeconds": 6,
+          "endSeconds": 11
+        },
+        {
+          "kind": "camera",
+          "startSeconds": 11,
+          "endSeconds": 14
+        },
+        {
+          "kind": "action",
+          "startSeconds": 14,
+          "endSeconds": 17
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "7a077efe-f142-4394-ac15-ad2ef94073cc",
+      "sceneId": "2cd7c3f9-9068-45cf-ba43-326abcb5a835",
+      "title": "1-1｜停笔与雨声",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:00:31.371Z",
+      "promptCharacters": 253,
+      "promptHash": "237ed3a66d32c54306f3d78bd3f724d7bb769a38eccfe97be4eb8a77f7bfbf64",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 8,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 5
+        },
+        {
+          "kind": "pause",
+          "startSeconds": 5,
+          "endSeconds": 8
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "cd10941f-fda0-4323-a376-27c46bff4e34",
+      "sceneId": "2cd7c3f9-9068-45cf-ba43-326abcb5a835",
+      "title": "1-2｜包裹落案",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:00:31.371Z",
+      "promptCharacters": 379,
+      "promptHash": "52f0f8dd91d5d218f1775d4f9d482b8c9363632744c15cac125d9c44f45a0120",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 16,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 4
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 4,
+          "endSeconds": 7
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 7,
+          "endSeconds": 12
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 12,
+          "endSeconds": 16
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "24460289-5a91-4f64-b451-147c74a5c4db",
+      "sceneId": "2cd7c3f9-9068-45cf-ba43-326abcb5a835",
+      "title": "1-3｜禁令与离开",
+      "rowVersion": 2,
+      "updatedAt": "2026-11-09T03:32:03.196Z",
+      "promptCharacters": 386,
+      "promptHash": "bc4f2a91a672ba160febeb522e309bee828651e9dd03e769f6786d71c0c0d18e",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 18,
+      "beats": [
+        {
+          "kind": "dialogue",
+          "startSeconds": 0,
+          "endSeconds": 10
+        },
+        {
+          "kind": "action",
+          "startSeconds": 10,
+          "endSeconds": 14
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 14,
+          "endSeconds": 16
+        },
+        {
+          "kind": "pause",
+          "startSeconds": 16,
+          "endSeconds": 18
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "3680d4a4-7930-4129-852f-2b996a4b20cc",
+      "sceneId": "3badf2b9-979c-4c2d-ba86-6e725773435d",
+      "title": "3-1｜废井静水",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:05:59.976Z",
+      "promptCharacters": 312,
+      "promptHash": "ac0914cc065c1d88c7de8a3e0036b4be68c127e7bdc1cdc2f09eca61231d7aa5",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 14,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 7
+        },
+        {
+          "kind": "pause",
+          "startSeconds": 7,
+          "endSeconds": 11
+        },
+        {
+          "kind": "camera",
+          "startSeconds": 11,
+          "endSeconds": 14
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "3e703c28-f123-4622-9a8e-8bf4a99e5135",
+      "sceneId": "3badf2b9-979c-4c2d-ba86-6e725773435d",
+      "title": "3-2｜井下船歌",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:05:59.976Z",
+      "promptCharacters": 296,
+      "promptHash": "5e4fbeda730db0cf1af1a470481fb0c0661b0625b831a8a9dee215a04103bdb1",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 18,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 5
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 5,
+          "endSeconds": 10
+        },
+        {
+          "kind": "action",
+          "startSeconds": 10,
+          "endSeconds": 15
+        },
+        {
+          "kind": "pause",
+          "startSeconds": 15,
+          "endSeconds": 18
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "8d22beee-2cb1-4309-acb7-9e0bb66b80e7",
+      "sceneId": "3badf2b9-979c-4c2d-ba86-6e725773435d",
+      "title": "3-3｜石板与舟钉",
+      "rowVersion": 1,
+      "updatedAt": "2026-11-09T03:33:29.699Z",
+      "promptCharacters": 279,
+      "promptHash": "04f6fa35908e6ec9b9bf0c2a3854d22c26525a3eaf7252409738257352c28435",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 19,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 5
+        },
+        {
+          "kind": "action",
+          "startSeconds": 5,
+          "endSeconds": 11
+        },
+        {
+          "kind": "action",
+          "startSeconds": 11,
+          "endSeconds": 15
+        },
+        {
+          "kind": "action",
+          "startSeconds": 15,
+          "endSeconds": 19
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "c87edc08-e2fa-4c7f-b2e3-88cf466a9080",
+      "sceneId": "f9d88b74-08d8-4ab6-bfdb-2d80624e627a",
+      "title": "4-1｜舟钉回声",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:07:31.460Z",
+      "promptCharacters": 310,
+      "promptHash": "8dd03bacdddbbdf960be5ae657579d9be928def9714329c794f496f91609e430",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 16,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 5
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 5,
+          "endSeconds": 11
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 11,
+          "endSeconds": 14
+        },
+        {
+          "kind": "action",
+          "startSeconds": 14,
+          "endSeconds": 16
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "d7083d6c-ed23-440f-b8eb-3faa6910480c",
+      "sceneId": "f9d88b74-08d8-4ab6-bfdb-2d80624e627a",
+      "title": "4-2｜水门与收钉",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:07:31.460Z",
+      "promptCharacters": 275,
+      "promptHash": "635bcf1d801625dab27ae9e901617fd37eda671eb67de7c8b049dcebb7a2c392",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 14,
+      "beats": [
+        {
+          "kind": "action",
+          "startSeconds": 0,
+          "endSeconds": 4
+        },
+        {
+          "kind": "dialogue",
+          "startSeconds": 4,
+          "endSeconds": 8
+        },
+        {
+          "kind": "action",
+          "startSeconds": 8,
+          "endSeconds": 14
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    },
+    {
+      "id": "c3914115-a73e-4803-81cc-b5e7c8ded254",
+      "sceneId": "f9d88b74-08d8-4ab6-bfdb-2d80624e627a",
+      "title": "4-3｜“回来”",
+      "rowVersion": 0,
+      "updatedAt": "2026-11-09T03:07:31.460Z",
+      "promptCharacters": 300,
+      "promptHash": "01ec17e0cf7809c56fb984bb6d08451a2bf8ab5cff73203f275dfa823edb9848",
+      "irPromptMatches": true,
+      "hasBaseHeader": false,
+      "hasAtmosphereHeader": false,
+      "hasNumericSeconds": false,
+      "durationSeconds": 16,
+      "beats": [
+        {
+          "kind": "dialogue",
+          "startSeconds": 0,
+          "endSeconds": 3
+        },
+        {
+          "kind": "pause",
+          "startSeconds": 3,
+          "endSeconds": 8
+        },
+        {
+          "kind": "action",
+          "startSeconds": 8,
+          "endSeconds": 13
+        },
+        {
+          "kind": "camera",
+          "startSeconds": 13,
+          "endSeconds": 16
+        }
+      ],
+      "hasAudioPlan": false,
+      "referenceCount": 0
+    }
+  ],
+  "checkpointFailures": [
+    {
+      "id": "ebb4c256-a26e-443e-8216-d4b1799531de",
+      "time": "2026-11-09T02:58:18.770Z",
+      "status": "failed",
+      "operation": "plan",
+      "errorMessage": ""
+    },
+    {
+      "id": "71822b88-73cd-4435-bfc0-4b765c4db2d9",
+      "time": "2026-11-09T03:01:12.741Z",
+      "status": "failed",
+      "operation": "plan",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "Cannot weaken registered deliverables. To correct a model-estimated quantity or document kind, reuse the same key and provide revisionReason. Include discovered targetIds; future IDs need not exist yet. Preserve requiredTexts, required references and all prior targets; original user requirements remain binding."
+    },
+    {
+      "id": "7786ea34-fa21-4525-8b47-9ba5ffc64ab2",
+      "time": "2026-11-09T03:02:07.162Z",
+      "status": "failed",
+      "operation": "plan",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "deliverables[0].origin: confirmed user obligations and their requirement sources cannot be removed."
+    },
+    {
+      "id": "f89a1dff-37f8-4a3f-8f09-cf14eee90b7b",
+      "time": "2026-11-09T03:12:19.935Z",
+      "status": "failed",
+      "operation": "partial",
+      "errorMessage": ""
+    },
+    {
+      "id": "d7f5a070-e5da-4300-906b-f409e55db0f3",
+      "time": "2026-11-09T03:13:01.238Z",
+      "status": "failed",
+      "operation": "partial",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REPAIR_REQUIRED: [{\"key\":\"chapter-scenes\",\"toolName\":\"scene.structure.stage\",\"minimumCount\":4,\"origin\":\"user_requirement\",\"sourceRequirementIds\":[\"original\"],\"requireReferences\":true,\"requiredTexts\":[\"沈照。\",\"嬷嬷。\",\"把这册送到旧档房去。今日就送，别留在手里。\",\"旧档房不是封了吗？\",\"封的是门，不是要送进去的东西。\",\"别拆，别问。送到门口，交给看门的人。\",\"看门的人今日当值吗？\",\"在不在，都交。\",\"别关闸。\",\"旧东西会留脾气，别什么都往心里装。"
+    },
+    {
+      "id": "a454bb04-6ff8-42c3-b121-b1c67164b0cd",
+      "time": "2026-11-09T03:13:28.262Z",
+      "status": "failed",
+      "operation": "plan",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "deliverables[0].origin: confirmed user obligations and their requirement sources cannot be removed."
+    },
+    {
+      "id": "4d1e8baa-1f32-40cd-8b8d-04ca215220cc",
+      "time": "2026-11-09T03:15:45.348Z",
+      "status": "failed",
+      "operation": "plan",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "deliverables[0].origin: confirmed user obligations and their requirement sources cannot be removed."
+    },
+    {
+      "id": "62c1d1f4-1daa-4ffa-8385-9a6e0fc3b2c8",
+      "time": "2026-11-09T03:33:13.971Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "b47903f899135089d0d6b1ea7951625dc0713376e6f08f4b4df1d6d126bdba19",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已逐镜核对四场十二镜的当前 authoringIR、timing/beats 与源计划草稿。镜头顺序、动作连续性、对白原句、声音、机位与自然时长均已核验；1-3 已完成一次最小格式修订并读回证据。当前阶段仅完成镜头内容验收，引用关系待第二阶段制作资料创建后建立。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_STALE: No content finding recorded. Read operation=state pendingActions and use the current Worker reviewId. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"14bdffa3-1dc6-4dc8-9274-54a26764b703\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs\",\"toolName\":\"conversation.task.ch"
+    },
+    {
+      "id": "f458f2cc-72e7-4e04-9257-31afada42fa1",
+      "time": "2026-11-09T03:34:30.098Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "14bdffa3-1dc6-4dc8-9274-54a26764b703",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已核对四场十二镜当前正文、对白原句、动作连续性、机位、声音与自然时长。1-3 已完成最小对白格式修订；3-3 已移除源稿未确认的舟钉锈色与发光描述。当前未发现新的具体内容缺陷；references 仍待第二阶段资料创建后绑定。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_STALE: No content finding recorded. Read operation=state pendingActions and use the current Worker reviewId. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs\",\"toolName\":\"conversation.task.ch"
+    },
+    {
+      "id": "0f578de6-8a84-4b3d-b104-73bbc5f7297b",
+      "time": "2026-11-09T03:35:17.451Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已按最新已读证据逐镜复核十二镜正文、对白、timing与beats。1-3修正了对白格式，3-3移除了无依据的舟钉锈色和发光。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_NOT_READY: No content finding recorded. Follow operation=state pendingActions to read only missing current versions or repair structural data. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs"
+    },
+    {
+      "id": "1e3105e2-6b8f-4199-b8c2-a5227352604f",
+      "time": "2026-11-09T03:38:22.707Z",
+      "status": "failed",
+      "operation": "partial",
+      "errorMessage": ""
+    },
+    {
+      "id": "b0d9473e-c87f-49ce-bbaa-4e3ef50fd60f",
+      "time": "2026-11-09T03:38:37.015Z",
+      "status": "failed",
+      "operation": "partial",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REPAIR_REQUIRED: [{\"key\":\"chapter-scenes\",\"toolName\":\"scene.structure.stage\",\"minimumCount\":4,\"origin\":\"user_requirement\",\"sourceRequirementIds\":[\"original\"],\"requireReferences\":true,\"requiredTexts\":[\"沈照。\",\"嬷嬷。\",\"把这册送到旧档房去。今日就送，别留在手里。\",\"旧档房不是封了吗？\",\"封的是门，不是要送进去的东西。\",\"别拆，别问。送到门口，交给看门的人。\",\"看门的人今日当值吗？\",\"在不在，都交。\",\"别关闸。\",\"旧东西会留脾气，别什么都往心里装。"
+    },
+    {
+      "id": "a1e10a0a-52ee-46b3-b8e4-c3e044d52066",
+      "time": "2026-11-09T03:40:14.015Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "十二镜均已逐镜读回并核对本集对白与提示词正文，版本及 timing/beats 可用；本阶段 references 按 Skill 规定保持空数组，待第二阶段素材资料保存后补齐。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_NOT_READY: No content finding recorded. Follow operation=state pendingActions to read only missing current versions or repair structural data. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs"
+    }
+  ],
+  "reviewAttempts": [
+    {
+      "id": "62c1d1f4-1daa-4ffa-8385-9a6e0fc3b2c8",
+      "time": "2026-11-09T03:33:13.971Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "b47903f899135089d0d6b1ea7951625dc0713376e6f08f4b4df1d6d126bdba19",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已逐镜核对四场十二镜的当前 authoringIR、timing/beats 与源计划草稿。镜头顺序、动作连续性、对白原句、声音、机位与自然时长均已核验；1-3 已完成一次最小格式修订并读回证据。当前阶段仅完成镜头内容验收，引用关系待第二阶段制作资料创建后建立。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_STALE: No content finding recorded. Read operation=state pendingActions and use the current Worker reviewId. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"14bdffa3-1dc6-4dc8-9274-54a26764b703\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs\",\"toolName\":\"conversation.task.ch"
+    },
+    {
+      "id": "f458f2cc-72e7-4e04-9257-31afada42fa1",
+      "time": "2026-11-09T03:34:30.098Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "14bdffa3-1dc6-4dc8-9274-54a26764b703",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已核对四场十二镜当前正文、对白原句、动作连续性、机位、声音与自然时长。1-3 已完成最小对白格式修订；3-3 已移除源稿未确认的舟钉锈色与发光描述。当前未发现新的具体内容缺陷；references 仍待第二阶段资料创建后绑定。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_STALE: No content finding recorded. Read operation=state pendingActions and use the current Worker reviewId. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs\",\"toolName\":\"conversation.task.ch"
+    },
+    {
+      "id": "0f578de6-8a84-4b3d-b104-73bbc5f7297b",
+      "time": "2026-11-09T03:35:17.451Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "已按最新已读证据逐镜复核十二镜正文、对白、timing与beats。1-3修正了对白格式，3-3移除了无依据的舟钉锈色和发光。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_NOT_READY: No content finding recorded. Follow operation=state pendingActions to read only missing current versions or repair structural data. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs"
+    },
+    {
+      "id": "a1e10a0a-52ee-46b3-b8e4-c3e044d52066",
+      "time": "2026-11-09T03:40:14.015Z",
+      "status": "failed",
+      "operation": "review",
+      "conclusion": "passed",
+      "reviewId": "13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93",
+      "reviewedTargetCount": 12,
+      "issueCount": 0,
+      "summary": "十二镜均已逐镜读回并核对本集对白与提示词正文，版本及 timing/beats 可用；本阶段 references 按 Skill 规定保持空数组，待第二阶段素材资料保存后补齐。",
+      "errorCode": "AGENT_TOOL_ARGUMENTS_INVALID",
+      "errorMessage": "TASK_REVIEW_NOT_READY: No content finding recorded. Follow operation=state pendingActions to read only missing current versions or repair structural data. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93\",\"ready\":false},\"nextAction\":{\"kind\":\"read_outputs"
+    }
+  ],
+  "acceptedReviewEvents": [],
+  "reviewSnapshots": [
+    {
+      "id": "cf635bcb-b4ef-4e69-bdaf-7fefb2e24439",
+      "time": "2026-11-09T03:10:30.372Z",
+      "hash": "0a229147605adec0c9084506ce0f51718185f96c7cc05bf6cf297912a6fd55f3"
+    },
+    {
+      "id": "58216563-dfd0-4048-baf6-437e0744ea61",
+      "time": "2026-11-09T03:14:23.188Z",
+      "hash": "eae365b3867613845110043c257cd014e0af8310b0c752088eebdb96850d9de2"
+    },
+    {
+      "id": "14bdffa3-1dc6-4dc8-9274-54a26764b703",
+      "time": "2026-11-09T03:32:03.258Z",
+      "hash": "749fa34bf116dae574d67f13507c15e0da9d8512d6e63a5b644bc66b5c31e2c3"
+    },
+    {
+      "id": "13005d92-0ddd-4bf0-b5ef-f9d7d9edfe93",
+      "time": "2026-11-09T03:33:29.733Z",
+      "hash": "ff27d84301a6c1588db0a05a689f9647df0fc0b293162ecff3fb2909d325e291"
+    }
+  ],
+  "assistantExcerpts": [
+    {
+      "id": "6bd68225-106a-4f01-81a5-65e75a9dd63a",
+      "time": "2026-11-09T03:19:24.436Z",
+      "text": "已确认十二镜的当前正文与 timing 均读回，且没有发现需要改写的具体剧情或时长缺陷。源剧本文档尾页读取因旧句柄过期失败；我会用同一标题和核实类型重新检索并读取末页，避免把缓存摘要当作正文依据。之后提交第一阶段全量验收；资料创建仍严格后置。"
+    },
+    {
+      "id": "dffe12b6-8e75-4c58-8674-d21ab22b782f",
+      "time": "2026-11-09T03:20:10.734Z",
+      "text": "恢复数据确认：镜头审查需要保留的十七条对白原句已登记；1-3 的台词原文确实被引号和叙述文字包裹，属于真实格式缺陷，我会仅调整该镜头正文呈现，使原句独立、逐字可检。其余已读镜头暂无具体内容问题。现在读取任务状态的 review 快照和当前写入工具，再完成修正及全量评审。"
+    },
+    {
+      "id": "e8bd08c9-acdb-41af-bf6d-9924389ae0a6",
+      "time": "2026-11-09T03:20:26.881Z",
+      "text": "完整状态记录显示源稿实际总长为 5422 字，末页偏移读空是正常结束；十七句原台词及十二镜正文都已可逐项核对。1-3 的记忆台词在当前镜头中作为解释句嵌入，Skill 要求台词原句独立呈现且不带引号/叙述包装；我会只整理这一处对白格式，保留同一声音来源、镜头动作、时长与其他绑定字段。"
+    }
+  ],
+  "limitations": [
+    "Task ended failed at 11:40:59 local. Phase-one empty references remain valid and are not treated as final binding defects.",
+    "Header/seconds checks establish literal missing requirements only; they do not measure overall semantic quality.",
+    "No actual production form fill, provider submission or rendered image/video was performed.",
+    "Runtime has a recovery interruption; wall elapsed is not net generation compute time."
+  ],
+  "finalOutcome": {
+    "code": "AGENT_TASK_CONTINUATION_STALLED",
+    "message": "Pending work has no new committed effect or evidence since the previous repair. Saved outputs and checkpoints are retained."
+  },
+  "directRevisionComparisons": [
+    {
+      "resultId": "8cfec501-6ae4-4c51-bc63-c73adfdf9e78",
+      "shotId": "24460289-5a91-4f64-b451-147c74a5c4db",
+      "candidatePromptHash": "5d5baa32f3b6bf6dc21decf18171706e985c789c200e7bc43309e6d1cea592a6",
+      "currentPromptHash": "bc4f2a91a672ba160febeb522e309bee828651e9dd03e769f6786d71c0c0d18e",
+      "currentMatchesCandidate": false
+    },
+    {
+      "resultId": "27066f85-0b3a-498c-9d40-e38739a80c63",
+      "shotId": "24460289-5a91-4f64-b451-147c74a5c4db",
+      "candidatePromptHash": "bc4f2a91a672ba160febeb522e309bee828651e9dd03e769f6786d71c0c0d18e",
+      "currentPromptHash": "bc4f2a91a672ba160febeb522e309bee828651e9dd03e769f6786d71c0c0d18e",
+      "currentMatchesCandidate": true
+    },
+    {
+      "resultId": "a33b6f4c-ab96-4840-9bf1-598beeb629c6",
+      "shotId": "8d22beee-2cb1-4309-acb7-9e0bb66b80e7",
+      "candidatePromptHash": "04f6fa35908e6ec9b9bf0c2a3854d22c26525a3eaf7252409738257352c28435",
+      "currentPromptHash": "04f6fa35908e6ec9b9bf0c2a3854d22c26525a3eaf7252409738257352c28435",
+      "currentMatchesCandidate": true
+    }
+  ],
+  "offlineConsumption": {
+    "method": "Existing production adapter uses authoringIR.prompt unchanged for whole-scene generation; not an actual form fill or paid submission.",
+    "scenePromptHashes": [
+      {
+        "sceneId": "2cd7c3f9-9068-45cf-ba43-326abcb5a835",
+        "compiledPromptHash": "b415258589070aabd6a2aa29cf56e1acc2a886fcc59f0df0e2bc343babe89820"
+      },
+      {
+        "sceneId": "11618d07-7387-4730-8096-5070cfbf416c",
+        "compiledPromptHash": "256a1677a3dcb9e2ef716a0eb453a2fb97a47966aa999981e241da2c5e71b118"
+      },
+      {
+        "sceneId": "3badf2b9-979c-4c2d-ba86-6e725773435d",
+        "compiledPromptHash": "e61ff92e2df6ca4d33274c6a8ef99256c32fa42b2cd21fbef13c0174140ca1e6"
+      },
+      {
+        "sceneId": "f9d88b74-08d8-4ab6-bfdb-2d80624e627a",
+        "compiledPromptHash": "96c43f37717ba56974b926374a8e14a60cae29ef6fdb3d767c12b7a3b4ef0140"
+      }
+    ],
+    "formFill": "not_run",
+    "providerSubmission": "not_run"
+  },
+  "buildEvidence": [
+    {
+      "path": "apps/worker/dist/agent-task-review.js",
+      "sha256": "50d68f5873175c428f7c52b040ca5e6498f0eb40c0049dd42282e69d778fed9f",
+      "modifiedAt": "2026-11-09T03:31:14.396Z"
+    },
+    {
+      "path": "apps/worker/dist/production-skill-validation.js",
+      "sha256": "0647e4a8078c1657dbe24aa552a2ceb34c1d21ae4271b39d5b17e682d62c7b72",
+      "modifiedAt": "2026-11-09T03:31:14.404Z"
+    },
+    {
+      "path": "apps/worker/src/agent-task-review.ts",
+      "sha256": "7ae13301ca0d85ebc65d66a04f4c9f85bb4c73358af0f5283b68486bd3d23f9a",
+      "modifiedAt": "2026-11-08T17:26:53.567Z"
+    },
+    {
+      "path": "apps/worker/src/production-skill-validation.ts",
+      "sha256": "bc4216772122811d37169528b5f607bee7161089f02670395a6f9cd10d19f087",
+      "modifiedAt": "2026-11-08T17:26:53.605Z"
+    }
+  ]
+}

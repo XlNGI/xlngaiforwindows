@@ -1,4 +1,15 @@
+import {
+  PRODUCTION_BUNDLE_LIMITS,
+  PRODUCTION_BUNDLE_SKILL_REVISION,
+  validateProductionBundleSources,
+  validateProductionRequestedAt,
+  type ProductionBundleSource,
+} from '@ai-video/contracts';
+import { assertBundleRunBudget } from './production-bundle-validation.js';
+import { isBundleTask, readBundleSource } from './production-bundle-state.js';
+import { PRODUCTION_BUNDLE_CONTROL_SCHEMA } from './production-bundle-schema.js';
 import { executeAgentBusiness } from './agent-business-execution.js';
+import { TaskRepairError } from './agent-task-repair.js';
 import { AgentDraftSubmissionService } from './agent-draft-submission-service.js';
 import { AgentContextStore } from '@ai-video/persistence';
 import { preservePreparedArguments, resolvePreparedArguments } from './agent-prepared-arguments.js';
@@ -26,7 +37,7 @@ import type {
   DocumentDetail,
   DocumentBindingRole,
   DocumentKind,
-  ProjectContentIR,
+  PromptBindingIR,
   AgentProviderStepCompleteParams,
   LlmGenerationIdentity,
   LlmToolCall,
@@ -72,6 +83,7 @@ import {
   unifiedAgentToolRegistry,
 } from './agent-tool-registry.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
+import { bundleCheckpointDefinition } from './agent-task-checkpoint-schema.js';
 import type {
   MediaPrepareToolOperation,
   MediaSubmissionToolOperation,
@@ -94,20 +106,15 @@ import {
   MediaPreparationService,
   type MediaSelectionContext,
 } from './media-preparation-service.js';
-import {
-  isScriptToMediaTask,
-  requireScriptToMediaShotReferences,
-} from './production-skill-validation.js';
-
+import {} from './production-skill-validation.js';
 const TOOL_SCHEMA_VERSION = 'agent-tools.v2';
 const POLICY_VERSION = 'agent-policy.v2';
 // Long provider turns can spend several minutes reading project sources before
 // issuing a write tool call. Writes remain single-use and step-scoped;
 // the longer lease prevents a valid in-flight turn from expiring mid-reasoning.
-const AUTHORIZATION_TTL_MS = 30 * 60_000;
+const AUTHORIZATION_TTL_MS = 30 * 60000;
 const RESEARCH_STEP_CALL_LIMIT = 8;
 const LIBRARY_BATCH_CALL_LIMIT = 6;
-
 type ResearchOperation = 'research.search' | 'research.fetch';
 type LibraryOperation = 'library.search' | 'library.read';
 type SchemaOperation =
@@ -120,11 +127,9 @@ type AgentToolOperation =
   | SystemAgentToolOperation
   | MediaPrepareToolOperation
   | MediaSubmissionToolOperation;
-
 export interface AgentSchemaResolver {
   get(adapterKey: string): AdapterDescriptor | null;
 }
-
 export interface AgentSchemaManager {
   propose(input: {
     adapterKey: string;
@@ -134,13 +139,11 @@ export interface AgentSchemaManager {
   }): UnifiedAgentAdapterSchemaProposeResult;
   listAudits?(adapterKey: string, limit?: number): UnifiedAgentAdapterSchemaAuditInfo[];
 }
-
 export interface AgentMediaSubmissionExecutor {
   requestSubmission(params: MediaSubmissionRequestParams): MediaSubmissionResult;
   confirmSubmission(params: MediaSubmissionConfirmParams): Promise<MediaSubmissionResult>;
   cancel(params: MediaTaskCancelParams): Promise<MediaSubmissionResult>;
 }
-
 type AuthorizationSpec = {
   operation: AgentToolOperation;
   targetDocumentId?: string;
@@ -150,12 +153,10 @@ type AuthorizationSpec = {
   expectedDocumentRowVersion?: number;
   maxCallUses?: number;
 };
-
 interface PreparedAgentLoop {
   taskId: string;
   tools: LlmToolDefinition[];
 }
-
 interface GenerationRow {
   id: string;
   project_id: string;
@@ -166,24 +167,20 @@ interface GenerationRow {
   provider_profile_id: string | null;
   model_id: string | null;
 }
-
 export interface AgentModelSelectionProvenance {
   source: 'request' | 'conversation-preference';
   capability: 'text';
   confirmedAt: string;
 }
-
 interface ConversationRow {
   scope_type: 'project' | 'scene' | 'shot';
   scope_id: string | null;
 }
-
 interface StepRow {
   id: string;
   ordinal: number;
   status: string;
 }
-
 interface AuthorizationRow extends AuthorizationSpec {
   id: string;
   row_version: number;
@@ -194,7 +191,6 @@ interface AuthorizationRow extends AuthorizationSpec {
   used_call_count: number;
   expires_at: string;
 }
-
 interface AgentTaskRow {
   id: string;
   project_id: string;
@@ -215,7 +211,6 @@ interface AgentTaskRow {
   status: AgentTaskStatus;
   phase: AgentTaskPhase;
 }
-
 interface MediaSelectionRow {
   id: string;
   taskId: string;
@@ -236,7 +231,6 @@ interface MediaSelectionRow {
   argumentsJson: string;
   protocol: 'openai-responses' | 'openai-chat-completions';
 }
-
 type ResearchToolArguments =
   | {
       operation: 'research.search';
@@ -250,19 +244,16 @@ type ResearchToolArguments =
       sourceHandle: string;
       maxChars?: number;
     };
-
 interface StagedResearchCall {
   call: LlmToolCall;
   toolCallId: string;
   arguments: ResearchToolArguments;
 }
-
 interface LegacyConfirmationContinuationDescriptor {
   kind?: undefined;
   providerResponseId: string;
   callId: string;
 }
-
 interface SystemConfirmationContinuationDescriptor {
   version: 1;
   kind: 'system';
@@ -273,21 +264,29 @@ interface SystemConfirmationContinuationDescriptor {
   executionArguments: Record<string, unknown>;
   executionArgumentsHash: string;
   summary: string;
-  affectedEntities: Array<{ type: string; id: string; label?: string }>;
+  affectedEntities: Array<{
+    type: string;
+    id: string;
+    label?: string;
+  }>;
   protectedUi?: import('@ai-video/contracts').AgentProtectedUiHandoff;
 }
-
 type ResearchExecutionOutcome =
-  | { ok: true; result: ResearchSearchResult | ResearchFetchResult }
+  | {
+      ok: true;
+      result: ResearchSearchResult | ResearchFetchResult;
+    }
   | {
       ok: false;
-      error: { code: string; message: string; retryable: boolean };
+      error: {
+        code: string;
+        message: string;
+        retryable: boolean;
+      };
     };
-
 export class AgentProviderLoopService {
   private readonly researchCancellations = new Map<string, AbortController>();
   private readonly openStepHandles = new Map<string, Map<AgentToolOperation, string>>();
-
   constructor(
     private readonly projects: ProjectService,
     private readonly documents: DocumentWorkflowService,
@@ -300,18 +299,15 @@ export class AgentProviderLoopService {
     private readonly mediaSubmission?: AgentMediaSubmissionExecutor,
     private readonly library: LibrarySearchService = new LibrarySearchService(projects),
   ) {}
-
   cancelGeneration(generationId: string): boolean {
     const controller = this.researchCancellations.get(generationId);
     if (!controller) return false;
     controller.abort();
     return true;
   }
-
   clearGeneration(generationId: string): void {
     this.researchCancellations.delete(generationId);
   }
-
   refreshTools(identity: LlmGenerationIdentity): LlmToolDefinition[] {
     return this.projects.access(false, (database, project) => {
       this.requireActiveGeneration(database, project.id, identity);
@@ -326,7 +322,6 @@ export class AgentProviderLoopService {
       );
     });
   }
-
   advanceTextTurn(params: AgentProviderStepCompleteParams): LlmToolDefinition[] {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -338,7 +333,9 @@ export class AgentProviderLoopService {
           params.finishReason === 'tool_calls'
             ? (database
                 .prepare('SELECT tool_name FROM agent_tool_calls WHERE provider_step_id=?')
-                .all(step.id) as Array<{ tool_name: string }>)
+                .all(step.id) as Array<{
+                tool_name: string;
+              }>)
             : [];
         if (
           reads.some(
@@ -377,7 +374,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   prepare(
     identity: LlmGenerationIdentity,
     prompt: string,
@@ -389,9 +385,21 @@ export class AgentProviderLoopService {
     targetPlatform?: ConversationTargetPlatform,
     modelSelectionProvenance?: AgentModelSelectionProvenance,
     productionSkillId?: ProductionSkillId,
+    productionBundle?: {
+      version: 2;
+      sources: ProductionBundleSource[];
+      requestedAt?: string;
+    },
   ): PreparedAgentLoop {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
+        if (productionBundle) {
+          validateProductionRequestedAt(productionBundle.requestedAt);
+          if (productionSkillId !== 'script-to-media' || productionBundle.version !== 2)
+            throw new Error('BUNDLE_WORKFLOW_INVALID');
+          for (const source of validateProductionBundleSources(productionBundle.sources))
+            readBundleSource(database, project.id, source);
+        }
         const generation = database
           .prepare('SELECT * FROM llm_generations WHERE id = ? AND project_id = ?')
           .get(identity.generationId, project.id) as GenerationRow | undefined;
@@ -404,7 +412,11 @@ export class AgentProviderLoopService {
         if (!conversation) throw new Error('Agent conversation was not found.');
         const existing = database
           .prepare('SELECT task_id FROM agent_task_generations WHERE generation_id = ?')
-          .get(identity.generationId) as { task_id: string } | undefined;
+          .get(identity.generationId) as
+          | {
+              task_id: string;
+            }
+          | undefined;
         if (existing) {
           const now = new Date().toISOString();
           freezeAgentModelSelection(
@@ -430,7 +442,9 @@ export class AgentProviderLoopService {
               .prepare(
                 'SELECT COALESCE(MAX(ordinal), -1) + 1 AS value FROM llm_provider_steps WHERE attempt_id = ?',
               )
-              .get(identity.attemptId) as { value: number }
+              .get(identity.attemptId) as {
+              value: number;
+            }
           ).value;
           const previousAuthorization = database
             .prepare(
@@ -463,14 +477,18 @@ export class AgentProviderLoopService {
             tools: this.toolsForStep(step.authorizationHandles),
           };
         }
-
         if (existingTaskId) {
           const task = database
             .prepare(
               `SELECT id, status FROM agent_tasks
                WHERE id = ? AND project_id = ?`,
             )
-            .get(existingTaskId, project.id) as { id: string; status: string } | undefined;
+            .get(existingTaskId, project.id) as
+            | {
+                id: string;
+                status: string;
+              }
+            | undefined;
           if (!task || task.status !== 'queued') {
             throw new Error('Pre-created novel task is no longer available.');
           }
@@ -534,7 +552,6 @@ export class AgentProviderLoopService {
           );
           return { taskId: task.id, tools: this.toolsForStep(preparedStep.authorizationHandles) };
         }
-
         const now = new Date().toISOString();
         const taskId = randomUUID();
         const requestHash = hash(prompt);
@@ -586,6 +603,15 @@ export class AgentProviderLoopService {
               documentOperation: authorization.operation,
               researchMode,
               ...(productionSkillId ? { productionSkillId } : {}),
+              ...(productionBundle
+                ? {
+                    productionWorkflowVersion: 2,
+                    productionSources: productionBundle.sources,
+                    productionRequestedAt: productionBundle.requestedAt,
+                    productionBundleLimits: PRODUCTION_BUNDLE_LIMITS,
+                    productionSkillRevision: PRODUCTION_BUNDLE_SKILL_REVISION,
+                  }
+                : {}),
               modelSelection: agentModelSelectionSnapshot(
                 generation,
                 modelSelectionProvenance ?? {
@@ -639,7 +665,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   async executeTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -662,7 +687,9 @@ export class AgentProviderLoopService {
             .get(params.generationId),
         );
         if (batchChild) {
-          const args = JSON.parse(params.calls[0].argumentsJson) as { contentMarkdown?: unknown };
+          const args = JSON.parse(params.calls[0].argumentsJson) as {
+            contentMarkdown?: unknown;
+          };
           if (typeof args.contentMarkdown === 'string') {
             const candidate = new PartialArtifactService(
               this.projects,
@@ -692,7 +719,6 @@ export class AgentProviderLoopService {
       throw error;
     }
   }
-
   private markToolCallsStarted(params: AgentGenerationExecuteToolsParams): void {
     if (params.calls.length === 0) return;
     this.projects.access(true, (database, project) =>
@@ -728,7 +754,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private persistWorkingResults(
     params: AgentGenerationExecuteToolsParams,
     result?: AgentGenerationExecuteToolsResult,
@@ -738,7 +763,11 @@ export class AgentProviderLoopService {
         .prepare(
           'SELECT l.task_id FROM agent_task_generations l JOIN llm_generations g ON g.id=l.generation_id WHERE g.id=? AND g.project_id=?',
         )
-        .get(params.generationId, project.id) as { task_id: string } | undefined;
+        .get(params.generationId, project.id) as
+        | {
+            task_id: string;
+          }
+        | undefined;
       if (!link) return;
       const store = new AgentContextStore(db);
       for (const call of params.calls) {
@@ -760,7 +789,6 @@ export class AgentProviderLoopService {
       }
     });
   }
-
   private persistToolContinuation(
     params: Pick<AgentGenerationExecuteToolsParams, 'generationId'>,
     ...args: Parameters<typeof createToolContinuation>
@@ -771,14 +799,17 @@ export class AgentProviderLoopService {
     this.persistWorkingResults(batch, { continuation });
     return continuation;
   }
-
   projectToolResult(identity: LlmGenerationIdentity, callId: string, output: string): string {
     return this.projects.access(false, (db, project) => {
       const link = db
         .prepare(
           'SELECT l.task_id FROM agent_task_generations l JOIN llm_generations g ON g.id=l.generation_id WHERE g.id=? AND g.project_id=?',
         )
-        .get(identity.generationId, project.id) as { task_id: string } | undefined;
+        .get(identity.generationId, project.id) as
+        | {
+            task_id: string;
+          }
+        | undefined;
       if (!link) return output;
       const stored = new AgentContextStore(db).resultForCall(project.id, link.task_id, callId);
       if (!stored || stored.status === 'pending') return output;
@@ -792,7 +823,6 @@ export class AgentProviderLoopService {
       return modelResultReceipt(stored);
     });
   }
-
   async selectMedia(
     params: AgentGenerationSelectMediaParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -803,7 +833,6 @@ export class AgentProviderLoopService {
       throw error;
     }
   }
-
   private async executeAuthorizedTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -830,7 +859,13 @@ export class AgentProviderLoopService {
       const execution = this.executeSystemTools(params);
       for (const call of params.calls) {
         if (call.name !== 'shot.continuity.read') continue;
-        if ((JSON.parse(call.argumentsJson) as { includeImages?: boolean }).includeImages !== true)
+        if (
+          (
+            JSON.parse(call.argumentsJson) as {
+              includeImages?: boolean;
+            }
+          ).includeImages !== true
+        )
           continue;
         const output = execution.continuation?.outputs.find((item) => item.callId === call.id);
         if (!output) continue;
@@ -889,7 +924,6 @@ export class AgentProviderLoopService {
     }
     return this.executeDocumentTool(params);
   }
-
   private executeMediaPrepare(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
@@ -947,7 +981,10 @@ export class AgentProviderLoopService {
              AND json_extract(draft_json,'$.kind')='image' AND json_extract(draft_json,'$.sourceDocumentId')=? LIMIT 1`,
             )
             .get(project.id, task.id, source, project.id, task.id, source) as
-            { id: string } | undefined;
+            | {
+                id: string;
+              }
+            | undefined;
           if (previous)
             return toolErrorContinuation(
               activeGeneration.protocol,
@@ -1003,7 +1040,6 @@ export class AgentProviderLoopService {
           'tool_calls',
           JSON.stringify({ version: 1, callIds: [call.id], mediaSelection: true }),
         );
-
         if (context.candidates.length === 0) {
           const output = unifiedAgentToolRegistry.serializeResult({
             version: 1,
@@ -1046,19 +1082,18 @@ export class AgentProviderLoopService {
             tools: this.toolsForStep(nextStep.authorizationHandles),
           };
         }
-
         const selectionToken = randomBytes(32).toString('base64url');
         const expiresAt = new Date(Date.now() + AUTHORIZATION_TTL_MS).toISOString();
         const request = media.selectionRequest(context, selectionToken, expiresAt);
         const contextJson = JSON.stringify(context);
         const requestJson = JSON.stringify({ ...request, selectionToken: undefined });
-        if (Buffer.byteLength(contextJson, 'utf8') > 65_536) {
+        if (Buffer.byteLength(contextJson, 'utf8') > 65536) {
           throw new AgentToolPolicyError(
             'AGENT_TOOL_RESULT_TOO_LARGE',
             'The frozen media selection context exceeds 64 KiB.',
           );
         }
-        if (Buffer.byteLength(requestJson, 'utf8') > 262_144) {
+        if (Buffer.byteLength(requestJson, 'utf8') > 262144) {
           throw new AgentToolPolicyError(
             'AGENT_TOOL_RESULT_TOO_LARGE',
             'The media selection request exceeds 256 KiB.',
@@ -1100,7 +1135,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private async executeMediaSubmission(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -1137,7 +1171,11 @@ export class AgentProviderLoopService {
              WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
           )
           .get(task.id, params.attemptId, step.id, call.id) as
-          { result_summary_json: string | null; status: string } | undefined;
+          | {
+              result_summary_json: string | null;
+              status: string;
+            }
+          | undefined;
         if (existing?.result_summary_json && existing.status === 'succeeded') {
           return {
             kind: 'replayed' as const,
@@ -1233,7 +1271,6 @@ export class AgentProviderLoopService {
     }
     return { mediaSubmission: submission.confirmation };
   }
-
   async confirmMediaSubmission(
     params: AgentGenerationConfirmMediaSubmissionParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -1266,7 +1303,12 @@ export class AgentProviderLoopService {
           );
         const authorization = database
           .prepare('SELECT id, row_version FROM agent_tool_authorizations WHERE id = ?')
-          .get(String(match.authId)) as { id: string; row_version: number } | undefined;
+          .get(String(match.authId)) as
+          | {
+              id: string;
+              row_version: number;
+            }
+          | undefined;
         if (!authorization) throw new Error('Media submission authorization is missing.');
         const now = new Date().toISOString();
         this.reserveExecution(database, authorization, String(match.taskId), now);
@@ -1297,13 +1339,16 @@ export class AgentProviderLoopService {
     }
     return this.finishMediaConfirmation(params, staged, submission);
   }
-
   private finishMediaSubmission(
     params: AgentGenerationExecuteToolsParams,
     staged: {
-      activeGeneration: { protocol: 'openai-responses' | 'openai-chat-completions' };
+      activeGeneration: {
+        protocol: 'openai-responses' | 'openai-chat-completions';
+      };
       call: LlmToolCall;
-      args: { taskId: string };
+      args: {
+        taskId: string;
+      };
       toolCallId: string;
       task: AgentTaskRow;
       authorization: AuthorizationRow;
@@ -1362,7 +1407,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private finishMediaConfirmation(
     params: AgentGenerationConfirmMediaSubmissionParams,
     staged: Record<string, unknown>,
@@ -1423,7 +1467,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private failMediaConfirmation(staged: Record<string, unknown>, error: unknown): void {
     this.projects.access(true, (database) =>
       database.transaction(() => {
@@ -1447,7 +1490,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private async resolveMediaSelection(
     params: AgentGenerationSelectMediaParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -1529,14 +1571,12 @@ export class AgentProviderLoopService {
         return row;
       })(),
     );
-
     if ('expired' in pending && pending.expired) {
       throw new AgentToolPolicyError(
         'AGENT_TOOL_AUTHORIZATION_EXPIRED',
         'The media selection expired before the user responded.',
       );
     }
-
     const context = JSON.parse(pending.contextJson) as MediaSelectionContext;
     // Claim the UI decision and freeze its job in one transaction before yielding.
     // The one-use selection token cannot create a second job during paid submission.
@@ -1633,7 +1673,6 @@ export class AgentProviderLoopService {
         });
       }
     }
-
     if (this.projects.currentSessionId() !== params.projectSessionId) {
       throw new AgentToolPolicyError(
         'AGENT_TOOL_PROJECT_SCOPE',
@@ -1733,7 +1772,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private executeSystemTools(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
@@ -1791,7 +1829,10 @@ export class AgentProviderLoopService {
                WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
             )
             .get(task.id, params.attemptId, step.id, call.id) as
-            { result_summary_json: string | null } | undefined;
+            | {
+                result_summary_json: string | null;
+              }
+            | undefined;
           if (existing?.result_summary_json) {
             outputs.push({ callId: call.id, output: existing.result_summary_json });
             continue;
@@ -2012,7 +2053,7 @@ export class AgentProviderLoopService {
                     error instanceof Error ? error.message : 'System tool failed.',
                     true,
                   );
-            const failedOutput = policyResult(policyError);
+            const failedOutput = policyResult(policyError, error);
             database
               .prepare(
                 `UPDATE agent_tool_calls SET status = 'failed', error_code = ?, error_message = ?,
@@ -2234,7 +2275,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private executeSchemaTool(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
@@ -2327,7 +2367,11 @@ export class AgentProviderLoopService {
           );
         const requiresUserConfirmation =
           call.name === 'adapter.schema.propose' &&
-          (output as { requiresUserConfirmation?: unknown }).requiresUserConfirmation === true;
+          (
+            output as {
+              requiresUserConfirmation?: unknown;
+            }
+          ).requiresUserConfirmation === true;
         if (call.name === 'adapter.schema.get' || !requiresUserConfirmation) {
           database
             .prepare(
@@ -2370,7 +2414,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private executeDocumentTool(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
@@ -2398,7 +2441,9 @@ export class AgentProviderLoopService {
             if (call.name === 'document.create_draft') {
               const reference = (
                 JSON.parse(task.request_snapshot_json) as {
-                  novelReference?: { kind: DocumentKind };
+                  novelReference?: {
+                    kind: DocumentKind;
+                  };
                 }
               ).novelReference;
               const workspace = documentWorkspace({
@@ -2448,7 +2493,10 @@ export class AgentProviderLoopService {
              WHERE task_id = ? AND attempt_id = ? AND provider_step_id = ? AND provider_call_id = ?`,
           )
           .get(task.id, params.attemptId, step.id, call.id) as
-          { result_summary_json: string | null } | undefined;
+          | {
+              result_summary_json: string | null;
+            }
+          | undefined;
         if (existing?.result_summary_json) {
           return {
             continuation: this.persistToolContinuation(
@@ -2461,7 +2509,6 @@ export class AgentProviderLoopService {
           };
         }
         if (!awaitsConfirmation) this.reserveExecution(database, authorization, task.id, now);
-
         const toolCallId = randomUUID();
         const content = typeof args.contentMarkdown === 'string' ? args.contentMarkdown : undefined;
         const novelTarget =
@@ -2471,7 +2518,12 @@ export class AgentProviderLoopService {
                   `SELECT chapter_id, document_id FROM agent_task_targets
                  WHERE task_id = ? AND target_kind = 'novel-chapter'`,
                 )
-                .get(task.id) as { chapter_id: string; document_id: string } | undefined)
+                .get(task.id) as
+                | {
+                    chapter_id: string;
+                    document_id: string;
+                  }
+                | undefined)
             : undefined;
         if (novelTarget && novelTarget.document_id !== authorization.targetDocumentId) {
           throw new Error('Novel chapter authorization does not match the task target.');
@@ -2579,14 +2631,23 @@ export class AgentProviderLoopService {
             },
           };
         }
-
-        let document: { id: string; currentVersion?: { id: string } } | undefined;
+        let document:
+          | {
+              id: string;
+              currentVersion?: {
+                id: string;
+              };
+            }
+          | undefined;
         let result: string;
         let resultSummary: string;
         if (call.name === 'document.create_draft' || call.name === 'document.update_draft') {
           const reference = (
             JSON.parse(task.request_snapshot_json) as {
-              novelReference?: { role: DocumentBindingRole; kind: DocumentKind };
+              novelReference?: {
+                role: DocumentBindingRole;
+                kind: DocumentKind;
+              };
             }
           ).novelReference;
           const updating = call.name === 'document.update_draft';
@@ -2607,7 +2668,8 @@ export class AgentProviderLoopService {
             title: args.title,
             contentMarkdown: args.contentMarkdown,
             documentKind: kind,
-            ...(args.contentIR !== undefined ? { contentIR: args.contentIR } : {}),
+            ...(args.bindings !== undefined ? { bindings: args.bindings } : {}),
+            ...(args.sampleText !== undefined ? { sampleText: args.sampleText } : {}),
             ...(updating
               ? {
                   documentId: authorization.targetDocumentId,
@@ -2705,13 +2767,6 @@ export class AgentProviderLoopService {
           let structure: EpisodeStructure;
           try {
             structure = parseEpisodeStructureArguments(call.argumentsJson);
-            if (isScriptToMediaTask(database, task.id))
-              for (const [sceneIndex, scene] of structure.scenes.entries())
-                for (const [shotIndex, shot] of scene.shots.entries())
-                  requireScriptToMediaShotReferences(
-                    shot.authoringIR,
-                    `scene ${sceneIndex} shot ${shotIndex}`,
-                  );
             validateEpisodeReferences(database, project.id, structure);
           } catch (error) {
             database
@@ -2745,19 +2800,16 @@ export class AgentProviderLoopService {
                 ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
                 : {}),
               title: scene.title,
-              sceneDocumentId: scene.sceneDocumentId,
-              videoPrompt: scene.videoPrompt,
-              characterDocumentIds: scene.characterDocumentIds,
-              authoringIR: scene.authoringIR,
+              prompt: scene.prompt,
+              bindings: scene.bindings,
+              timing: scene.timing,
             });
             for (const shot of scene.shots) {
               items.push({
                 entityType: 'shot',
                 action: 'create',
                 parentItemOrdinal: sceneOrdinal,
-                title: shot.title,
-                prompt: shot.prompt,
-                authoringIR: shot.authoringIR,
+                ...shot,
               });
             }
           }
@@ -2828,7 +2880,7 @@ export class AgentProviderLoopService {
             baseVersionId: authorization.baseVersionId ?? null,
             title: args.title as string,
             contentMarkdown: args.contentMarkdown as string,
-            contentIR: args.contentIR as ProjectContentIR | undefined,
+            bindings: args.bindings as PromptBindingIR | undefined,
             scopeType: task.scope_type,
             scopeId: task.scope_id ?? undefined,
             sourceMessageId: task.user_message_id ?? undefined,
@@ -2862,7 +2914,12 @@ export class AgentProviderLoopService {
                WHERE chapters.document_id = ? AND chapters.project_id = ?`,
             )
             .get(authorization.targetDocumentId, project.id) as
-            { chapter_id: string; version_id: string; content_markdown: string } | undefined;
+            | {
+                chapter_id: string;
+                version_id: string;
+                content_markdown: string;
+              }
+            | undefined;
           if (!source) {
             throw new Error(
               'Adaptation proposals require an authorized novel chapter with a published version.',
@@ -3059,7 +3116,9 @@ export class AgentProviderLoopService {
           }
         }
         const failed = unifiedAgentToolRegistry.isFailureResult(
-          JSON.parse(result) as { status?: string },
+          JSON.parse(result) as {
+            status?: string;
+          },
         );
         database
           .prepare(
@@ -3130,7 +3189,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private executeLibraryTools(
     params: AgentGenerationExecuteToolsParams,
   ): AgentGenerationExecuteToolsResult {
@@ -3213,7 +3271,7 @@ export class AgentProviderLoopService {
                         attemptId: params.attemptId,
                         ...toolArguments.artifact,
                         maxChars: toolArguments.maxChars,
-                        includeContentIR: toolArguments.includeContentIR,
+                        includeBindings: toolArguments.includeBindings,
                         offset: toolArguments.offset,
                       })
                     : this.library.read({
@@ -3222,7 +3280,7 @@ export class AgentProviderLoopService {
                         sourceHandle: toolArguments.sourceHandle!,
                         maxChars: toolArguments.maxChars,
                         readMode: toolArguments.readMode,
-                        includeContentIR: toolArguments.includeContentIR,
+                        includeBindings: toolArguments.includeBindings,
                         offset: toolArguments.offset,
                       });
               resultSummary = summarizeLibraryResult(result);
@@ -3301,7 +3359,6 @@ export class AgentProviderLoopService {
             );
           outputs.push(output);
         }
-
         this.appendEvent(
           database,
           project.id,
@@ -3329,7 +3386,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   private async executeResearchTools(
     params: AgentGenerationExecuteToolsParams,
   ): Promise<AgentGenerationExecuteToolsResult> {
@@ -3412,7 +3468,6 @@ export class AgentProviderLoopService {
         };
       })(),
     );
-
     const outcomes = await mapConcurrent(
       staged.calls,
       4,
@@ -3452,7 +3507,6 @@ export class AgentProviderLoopService {
         }
       },
     );
-
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
         if (project.id !== staged.projectId) {
@@ -3572,7 +3626,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   confirmTool(params: AgentGenerationConfirmToolParams): AgentGenerationConfirmToolResult {
     try {
       return this.confirmAuthorizedTool(params);
@@ -3583,7 +3636,6 @@ export class AgentProviderLoopService {
       throw error;
     }
   }
-
   private confirmAuthorizedTool(
     params: AgentGenerationConfirmToolParams,
   ): AgentGenerationConfirmToolResult {
@@ -3837,7 +3889,9 @@ export class AgentProviderLoopService {
             .prepare(
               'SELECT COALESCE(MAX(ordinal), -1) + 1 AS value FROM llm_provider_steps WHERE attempt_id = ?',
             )
-            .get(params.attemptId) as { value: number }
+            .get(params.attemptId) as {
+            value: number;
+          }
         ).value;
         const nextStep = this.createStep(
           database,
@@ -3881,7 +3935,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   resolveToolArguments(identity: LlmGenerationIdentity, tool: string, args: unknown): unknown {
     return this.projects.access(false, (database, project) => {
       this.requireActiveGeneration(database, project.id, identity);
@@ -3895,13 +3948,7 @@ export class AgentProviderLoopService {
       );
     });
   }
-
-  preserveToolArguments(
-    identity: LlmGenerationIdentity,
-    tool: string,
-    args: unknown,
-    callId?: string,
-  ) {
+  preserveToolArguments(identity: LlmGenerationIdentity, tool: string, args: unknown) {
     return this.projects.access(true, (database, project) => {
       this.requireActiveGeneration(database, project.id, identity);
       const task = this.requireTask(database, project.id, identity.generationId);
@@ -3911,11 +3958,9 @@ export class AgentProviderLoopService {
         task.id,
         tool,
         args,
-        callId,
       );
     });
   }
-
   recordValidationFailure(
     identity: LlmGenerationIdentity,
     operation: string,
@@ -3941,7 +3986,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   reserveTurn(identity: LlmGenerationIdentity): void {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -3964,7 +4008,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   recordProviderUsage(
     identity: LlmGenerationIdentity,
     requestId: string,
@@ -4049,7 +4092,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   recordProviderRequest(
     identity: LlmGenerationIdentity,
     requestId: string,
@@ -4073,7 +4115,11 @@ export class AgentProviderLoopService {
           identity.projectId,
           identity.projectSessionId,
           identity.conversationId,
-        ) as { status: string } | undefined;
+        ) as
+        | {
+            status: string;
+          }
+        | undefined;
       if (!owner) return;
       const now = new Date().toISOString();
       const row = database
@@ -4081,7 +4127,11 @@ export class AgentProviderLoopService {
           'SELECT stage,metadata_json FROM llm_provider_requests WHERE id=? AND generation_id=? AND attempt_id=?',
         )
         .get(requestId, identity.generationId, identity.attemptId) as
-        { stage: string; metadata_json: string } | undefined;
+        | {
+            stage: string;
+            metadata_json: string;
+          }
+        | undefined;
       if (row && ['complete', 'failed', 'cancelled'].includes(row.stage)) return;
       if (
         !['prepared', 'streaming'].includes(owner.status) &&
@@ -4137,11 +4187,11 @@ export class AgentProviderLoopService {
         );
     });
   }
-
   startProviderStep(identity: LlmGenerationIdentity): void {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const task = this.requireTask(database, project.id, identity.generationId);
+        if (isBundleTask(database, task.id)) assertBundleRunBudget(database, project.id, task.id);
         const step = this.requireOpenStep(database, identity.attemptId);
         if (step.status === 'prepared') {
           database
@@ -4159,7 +4209,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   completeProviderStep(params: AgentProviderStepCompleteParams): void {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -4247,7 +4296,9 @@ export class AgentProviderLoopService {
           );
         const continuation = delivery?.partialReason
           ? undefined
-          : sceneAuthoringContinuation(database, task.id);
+          : isBundleTask(database, task.id)
+            ? undefined
+            : sceneAuthoringContinuation(database, task.id);
         if (continuation) throw new AgentTaskContinuationRequired(continuation);
         const now = new Date().toISOString();
         this.completeStep(
@@ -4263,7 +4314,8 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.chapter.update_metadata', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'scene.update_shot_timings', 'scene.update_shot_prompts')
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.chapter.update_metadata', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'scene.update_shot_timings', 'scene.update_shot_prompts', 'production.bundle')
+                 AND (tool_name!='production.bundle' OR json_extract(result_summary_json,'$.businessSaved')=1)
                  AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
              ) THEN NULL ELSE 'read-only' END, completion_state = ?, error_message = ?,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
@@ -4292,7 +4344,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   terminateGeneration(
     generationId: string,
     reason: 'cancelled' | 'failed' | 'interrupted',
@@ -4309,14 +4360,18 @@ export class AgentProviderLoopService {
             `SELECT id FROM llm_provider_steps
              WHERE generation_id = ? AND status IN ('prepared', 'in_flight')`,
           )
-          .all(generationId) as Array<{ id: string }>;
+          .all(generationId) as Array<{
+          id: string;
+        }>;
         const tasks = database
           .prepare(
             `SELECT tasks.id FROM agent_tasks tasks
              INNER JOIN agent_task_generations links ON links.task_id = tasks.id
              WHERE links.generation_id = ? AND tasks.project_id = ? AND tasks.status = 'running'`,
           )
-          .all(generationId, project.id) as Array<{ id: string }>;
+          .all(generationId, project.id) as Array<{
+          id: string;
+        }>;
         const detail = errorMessage?.trim() || `Provider generation ${reason}.`;
         const safeProviderErrorCode =
           providerErrorCode && /^[A-Za-z0-9_-]{1,120}$/.test(providerErrorCode)
@@ -4379,7 +4434,9 @@ export class AgentProviderLoopService {
               .prepare(
                 'SELECT conversation_id FROM agent_context_tasks WHERE project_id=? AND task_id=?',
               )
-              .get(project.id, task.id) as { conversation_id: string };
+              .get(project.id, task.id) as {
+              conversation_id: string;
+            };
             contextStore.saveTask(
               project.id,
               generationId,
@@ -4439,7 +4496,12 @@ export class AgentProviderLoopService {
                  AND chapters.lifecycle_status = 'reserved'
                  AND NOT EXISTS (SELECT 1 FROM document_versions WHERE document_id = targets.document_id)`,
             )
-            .get(task.id, project.id) as { chapter_id: string; document_id: string } | undefined;
+            .get(task.id, project.id) as
+            | {
+                chapter_id: string;
+                document_id: string;
+              }
+            | undefined;
           if (placeholder) {
             database
               .prepare(
@@ -4460,7 +4522,6 @@ export class AgentProviderLoopService {
       })(),
     );
   }
-
   recoverInterrupted(): number {
     const generationIds = this.projects.access(
       false,
@@ -4474,7 +4535,9 @@ export class AgentProviderLoopService {
            WHERE tasks.project_id = ? AND tasks.status = 'running'
              AND generations.status IN ('failed', 'cancelled')`,
           )
-          .all(project.id) as Array<{ generation_id: string }>,
+          .all(project.id) as Array<{
+          generation_id: string;
+        }>,
     );
     return generationIds.reduce(
       (count, generation) =>
@@ -4487,7 +4550,6 @@ export class AgentProviderLoopService {
       0,
     );
   }
-
   private createStep(
     database: Database.Database,
     projectId: string,
@@ -4496,7 +4558,10 @@ export class AgentProviderLoopService {
     ordinal: number,
     now: string,
     authorizations: AuthorizationSpec | AuthorizationSpec[],
-  ): { stepId: string; authorizationHandles: Map<AgentToolOperation, string> } {
+  ): {
+    stepId: string;
+    authorizationHandles: Map<AgentToolOperation, string>;
+  } {
     const authorizationList = Array.isArray(authorizations) ? authorizations : [authorizations];
     freezeTaskToolManifest(database, taskId, authorizationList);
     const stepId = randomUUID();
@@ -4520,16 +4585,14 @@ export class AgentProviderLoopService {
         identity.generationId,
       );
     const authorizationHandles = new Map<AgentToolOperation, string>();
-    const insert = database.prepare(
-      `INSERT INTO agent_tool_authorizations
+    const insert = database.prepare(`INSERT INTO agent_tool_authorizations
        (id, project_id, task_id, generation_id, attempt_id, provider_step_id, project_session_id,
         allowed_operation, target_document_id, scope_type, scope_id, base_version_id,
         expected_document_row_version, policy_version, tool_schema_version,
         authorization_handle_hash, status, max_call_uses, used_call_count, expires_at,
         row_version, created_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, 0, ?, 0, ?
-       FROM agent_tasks WHERE id = ?`,
-    );
+       FROM agent_tasks WHERE id = ?`);
     for (const authorization of authorizationList) {
       unifiedAgentToolRegistry.require(authorization.operation);
       const handle = randomBytes(32).toString('base64url');
@@ -4568,11 +4631,21 @@ export class AgentProviderLoopService {
     this.openStepHandles.set(stepId, authorizationHandles);
     return { stepId, authorizationHandles };
   }
-
   private toolsForStep(handles: ReadonlyMap<AgentToolOperation, string>): LlmToolDefinition[] {
-    return unifiedAgentToolRegistry.authorizedDefinitions(handles);
+    const definitions = unifiedAgentToolRegistry.authorizedDefinitions(handles);
+    return handles.has('production.bundle.submit')
+      ? definitions.map((definition) =>
+          definition.name === 'production.bundle'
+            ? {
+                ...definition,
+                parameters: PRODUCTION_BUNDLE_CONTROL_SCHEMA,
+                description:
+                  'Bundle lifecycle: begin/rebase frozen inputs; source reads selected versioned text on demand; state shows candidate keys; read/read_many page candidate prompt text only when needed; check validates structure and frozen source reads. Submitting complete=true triggers structural validation, atomic draft save and independent readback. saved pages actual IDs. Submit/repair with production.bundle.submit, not this tool. Candidate storage does not mean business records are saved.',
+              }
+            : bundleCheckpointDefinition(definition),
+        )
+      : definitions;
   }
-
   private remainingToolsForOpenStep(
     database: Database.Database,
     task: AgentTaskRow,
@@ -4603,7 +4676,9 @@ export class AgentProviderLoopService {
              WHERE provider_step_id=? AND status='issued' AND used_call_count<max_call_uses
                AND expires_at>?`,
           )
-          .all(stepId, new Date().toISOString()) as Array<{ allowed_operation: AgentToolOperation }>
+          .all(stepId, new Date().toISOString()) as Array<{
+          allowed_operation: AgentToolOperation;
+        }>
       ).map((row) => row.allowed_operation),
     );
     for (const [operation, handle] of handles) {
@@ -4611,7 +4686,6 @@ export class AgentProviderLoopService {
     }
     return this.toolsForStep(usable);
   }
-
   private requireAuthorization(
     database: Database.Database,
     task: AgentTaskRow,
@@ -4632,7 +4706,11 @@ export class AgentProviderLoopService {
          WHERE provider_step_id = ? AND task_id = ? AND allowed_operation = ?`,
       )
       .get(step.id, task.id, call.name) as
-      (AuthorizationRow & { project_id: string; task_id: string }) | undefined;
+      | (AuthorizationRow & {
+          project_id: string;
+          task_id: string;
+        })
+      | undefined;
     if (!authorization) {
       const presented = call.authorizationHandle
         ? (database
@@ -4691,7 +4769,12 @@ export class AgentProviderLoopService {
                FROM agent_tool_authorizations WHERE authorization_handle_hash = ? LIMIT 1`,
             )
             .get(hash(call.authorizationHandle)) as
-            { task_id: string; project_session_id: string; provider_step_id: string } | undefined)
+            | {
+                task_id: string;
+                project_session_id: string;
+                provider_step_id: string;
+              }
+            | undefined)
         : undefined;
       if (presented && presented.project_session_id !== identity.projectSessionId) {
         throw new AgentToolPolicyError(
@@ -4727,7 +4810,6 @@ export class AgentProviderLoopService {
     }
     return authorization;
   }
-
   private reserveExecution(
     database: Database.Database,
     authorization: Pick<AuthorizationRow, 'id' | 'row_version'>,
@@ -4768,13 +4850,14 @@ export class AgentProviderLoopService {
       )
       .run(taskId, now);
   }
-
   private resolveAuthorization(
     database: Database.Database,
     projectId: string,
     conversation: ConversationRow,
     intent: AgentDocumentIntent,
-  ): AuthorizationSpec & { operation: AgentDocumentOperation } {
+  ): AuthorizationSpec & {
+    operation: AgentDocumentOperation;
+  } {
     const operation = intent.operation;
     const targetRequired = new Set<AgentDocumentOperation>([
       'document.read',
@@ -4842,7 +4925,6 @@ export class AgentProviderLoopService {
       expectedDocumentRowVersion: document.row_version,
     };
   }
-
   private requireTask(database: Database.Database, projectId: string, generationId: string) {
     const task = database
       .prepare(
@@ -4854,12 +4936,13 @@ export class AgentProviderLoopService {
     if (!task) throw new Error('Agent task was not found for the generation.');
     return task;
   }
-
   private requireActiveGeneration(
     database: Database.Database,
     projectId: string,
     identity: LlmGenerationIdentity,
-  ): { protocol: 'openai-responses' | 'openai-chat-completions' } {
+  ): {
+    protocol: 'openai-responses' | 'openai-chat-completions';
+  } {
     const row = database
       .prepare(
         `SELECT generations.status AS generation_status, attempts.status AS attempt_status,
@@ -4889,7 +4972,6 @@ export class AgentProviderLoopService {
     }
     return { protocol: row.protocol };
   }
-
   private requireOpenStep(database: Database.Database, attemptId: string): StepRow {
     const step = database
       .prepare(
@@ -4901,7 +4983,6 @@ export class AgentProviderLoopService {
     if (!step) throw new Error('No open Provider step exists for this attempt.');
     return step;
   }
-
   private completeStep(
     database: Database.Database,
     step: StepRow,
@@ -4937,7 +5018,6 @@ export class AgentProviderLoopService {
       );
     this.openStepHandles.delete(step.id);
   }
-
   private auditPolicyRejection(identity: LlmGenerationIdentity, error: AgentToolPolicyError): void {
     try {
       this.projects.access(true, (database, project) =>
@@ -4949,7 +5029,11 @@ export class AgentProviderLoopService {
                INNER JOIN agent_task_generations links ON links.task_id = tasks.id
                WHERE links.generation_id = ? AND tasks.project_id = ?`,
             )
-            .get(identity.generationId, project.id) as { id: string } | undefined;
+            .get(identity.generationId, project.id) as
+            | {
+                id: string;
+              }
+            | undefined;
           if (!task) return;
           const now = new Date().toISOString();
           if (error.code === 'AGENT_TOOL_AUTHORIZATION_EXPIRED') {
@@ -4972,7 +5056,9 @@ export class AgentProviderLoopService {
             .prepare(
               'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM agent_task_events WHERE task_id = ?',
             )
-            .get(task.id) as { value: number };
+            .get(task.id) as {
+            value: number;
+          };
           database
             .prepare(
               `INSERT INTO agent_task_events
@@ -4995,7 +5081,6 @@ export class AgentProviderLoopService {
       // Audit is best-effort here and must never replace the original policy error.
     }
   }
-
   private appendEvent(
     database: Database.Database,
     projectId: string,
@@ -5008,7 +5093,9 @@ export class AgentProviderLoopService {
       .prepare(
         'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM agent_task_events WHERE task_id = ?',
       )
-      .get(taskId) as { value: number };
+      .get(taskId) as {
+      value: number;
+    };
     database
       .prepare(
         `INSERT INTO agent_task_events
@@ -5018,7 +5105,6 @@ export class AgentProviderLoopService {
       .run(randomUUID(), taskId, projectId, next.value, type, summary, now);
   }
 }
-
 /** Returns an in-task continuation prompt when authoring writes remain unresolved. */
 function sceneAuthoringContinuation(
   database: Database.Database,
@@ -5090,9 +5176,15 @@ function sceneAuthoringContinuation(
       `SELECT summary,created_at FROM agent_task_events
        WHERE task_id=? AND event_type='tool_validation_failed' ORDER BY sequence`,
     )
-    .all(taskId) as Array<{ summary: string; created_at: string }>;
+    .all(taskId) as Array<{
+    summary: string;
+    created_at: string;
+  }>;
   for (const event of failures) {
-    const failure = JSON.parse(event.summary) as { operation?: string; reason?: string };
+    const failure = JSON.parse(event.summary) as {
+      operation?: string;
+      reason?: string;
+    };
     if (
       ![
         'scene.submit_structure',
@@ -5125,12 +5217,10 @@ function sceneAuthoringContinuation(
     '只有在所有要求的提交都成功且每个分段均 complete=true 后，才向用户报告完成。若缺少用户必须提供的信息，明确提出该问题并暂停。',
   ].join('\n');
 }
-
 function excerptArguments(value: string, maximum = 120): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum)}…（已截断）`;
 }
-
 /**
  * Converts a model-correctable tool argument failure into a tool output that is
  * fed back to the provider, so the model can fix its JSON and retry within the
@@ -5161,11 +5251,16 @@ function toolErrorContinuation(
     ]),
   };
 }
-
-function policyResult(error: AgentToolPolicyError): string {
-  return unifiedAgentToolRegistry.serializeResult(error.result());
+function policyResult(error: AgentToolPolicyError, cause?: unknown): string {
+  const result = error.result();
+  return unifiedAgentToolRegistry.serializeResult({
+    ...result,
+    error: {
+      ...result.error,
+      ...(cause instanceof TaskRepairError ? { repair: cause.repair } : {}),
+    },
+  });
 }
-
 /**
  * Chat Completions continuations must carry valid JSON arguments because the
  * provider rebuilds the assistant tool message from them. When a model emitted
@@ -5180,7 +5275,6 @@ function safeArgumentsJson(value: string): string {
     return '{}';
   }
 }
-
 function createToolContinuation(
   protocol: 'openai-responses' | 'openai-chat-completions',
   providerResponseId: string,
@@ -5205,12 +5299,15 @@ function createToolContinuation(
     outputs: outputs.map((output) => ({ ...output })),
   };
 }
-
 function resolveDocumentToolKind(
   database: Database.Database,
   operation: string,
   targetDocumentId: string | undefined,
-  args: { title?: string; contentMarkdown?: string; documentKind?: string },
+  args: {
+    title?: string;
+    contentMarkdown?: string;
+    documentKind?: string;
+  },
 ): DocumentDetail['kind'] {
   if (operation === 'document.create_draft') {
     return (
@@ -5220,15 +5317,21 @@ function resolveDocumentToolKind(
   }
   const existing = targetDocumentId
     ? (database.prepare('SELECT kind FROM documents WHERE id = ?').get(targetDocumentId) as
-        { kind: DocumentDetail['kind'] } | undefined)
+        | {
+            kind: DocumentDetail['kind'];
+          }
+        | undefined)
     : undefined;
   return existing?.kind ?? inferDocumentKindFromDraft(args.title ?? '', args.contentMarkdown ?? '');
 }
-
 function parseToolArguments(
   operation: string,
   value: string,
-): Record<string, unknown> & { title?: string; contentMarkdown?: string; documentKind?: string } {
+): Record<string, unknown> & {
+  title?: string;
+  contentMarkdown?: string;
+  documentKind?: string;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -5253,9 +5356,9 @@ function parseToolArguments(
   const allowedKeys = !needsContent
     ? []
     : operation === 'document.create_draft'
-      ? ['title', 'contentMarkdown', 'documentKind', 'contentIR']
+      ? ['title', 'contentMarkdown', 'documentKind', 'bindings', 'sampleText']
       : ['title', 'contentMarkdown'];
-  if (operation === 'document.update_draft') allowedKeys.push('contentIR');
+  if (operation === 'document.update_draft') allowedKeys.push('bindings', 'sampleText');
   if (needsContent || operation === 'document.archive' || operation === 'document.restore')
     allowedKeys.push('documentId', ...RESOURCE_ARGUMENT_KEYS);
   if (needsContent && Object.keys(record).some((key) => !allowedKeys.includes(key))) {
@@ -5274,7 +5377,7 @@ function parseToolArguments(
   const rawTitle = record.title as string;
   const rawContent = record.contentMarkdown as string;
   const title = normalizeTitle(rawTitle);
-  if (!rawContent.trim() || rawContent.length > 1_000_000) {
+  if (!rawContent.trim() || rawContent.length > 1000000) {
     throw new Error('Tool document content is invalid.');
   }
   const documentKind =
@@ -5286,7 +5389,6 @@ function parseToolArguments(
   }
   return { ...record, title, contentMarkdown: rawContent, documentKind };
 }
-
 function parseResearchToolArguments(
   operation: ResearchOperation,
   value: string,
@@ -5335,10 +5437,9 @@ function parseResearchToolArguments(
   return {
     operation,
     sourceHandle,
-    maxChars: optionalBoundedInteger(record.maxChars, 1, 100_000),
+    maxChars: optionalBoundedInteger(record.maxChars, 1, 100000),
   };
 }
-
 function researchArgumentsSummary(argumentsValue: ResearchToolArguments): Record<string, unknown> {
   if (argumentsValue.operation === 'research.search') {
     return {
@@ -5356,7 +5457,6 @@ function researchArgumentsSummary(argumentsValue: ResearchToolArguments): Record
     maxChars: argumentsValue.maxChars,
   };
 }
-
 function summarizeResearchResult(
   result: ResearchSearchResult | ResearchFetchResult,
 ): Record<string, unknown> {
@@ -5377,7 +5477,6 @@ function summarizeResearchResult(
     cacheRelativePath: result.cacheRelativePath,
   };
 }
-
 function toProviderResearchResult(
   result: ResearchSearchResult | ResearchFetchResult,
 ): Record<string, unknown> {
@@ -5403,7 +5502,6 @@ function toProviderResearchResult(
       'Prefer creating the requested document now with this fetched evidence unless an essential fact still needs another source.',
   };
 }
-
 function persistResearchSources(
   database: Database.Database,
   context: {
@@ -5421,15 +5519,15 @@ function persistResearchSources(
   const sources = result.status === 'searched' ? result.sources : [result];
   const existing = database
     .prepare('SELECT COUNT(*) AS count FROM agent_research_sources WHERE task_id = ?')
-    .get(context.taskId) as { count: number };
+    .get(context.taskId) as {
+    count: number;
+  };
   const citationLabels = new Map<string, string>();
-  const insert = database.prepare(
-    `INSERT INTO agent_research_sources
+  const insert = database.prepare(`INSERT INTO agent_research_sources
      (id, project_id, task_id, generation_id, attempt_id, provider_step_id, tool_call_id,
       adapter_id, source_handle_hash, canonical_url, url_hash, site, title, retrieved_at, content_hash,
       character_count, truncated, cache_relative_path, status, citation_label, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   for (const [index, source] of sources.entries()) {
     const fetched = result.status === 'fetched';
     const citationLabel = `R${existing.count + index + 1}`;
@@ -5471,7 +5569,6 @@ function persistResearchSources(
   }
   return citationLabels;
 }
-
 function addCitationLabels(
   result: ResearchSearchResult | ResearchFetchResult,
   labels: Map<string, string>,
@@ -5487,7 +5584,6 @@ function addCitationLabels(
   }
   return { ...result, citationLabel: labels.get(result.canonicalUrl) };
 }
-
 function authorizationSpecsForTask(
   database: Database.Database,
   taskId: string,
@@ -5498,10 +5594,15 @@ function authorizationSpecsForTask(
 ): AuthorizationSpec[] {
   const snapshotRow = database
     .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
-    .get(taskId) as { request_snapshot_json: string } | undefined;
+    .get(taskId) as
+    | {
+        request_snapshot_json: string;
+      }
+    | undefined;
   const requestSnapshot = snapshotRow
     ? (JSON.parse(snapshotRow.request_snapshot_json) as Record<string, unknown>)
     : {};
+  const bundleOnly = requestSnapshot.productionSkillId === 'script-to-media';
   const productionDraftOnly = requestSnapshot.productionSkillId === 'script-to-media';
   const availableSystemTools = includeSystemTools
     ? includeSystemTools.filter(
@@ -5513,8 +5614,15 @@ function authorizationSpecsForTask(
       )
     : [];
   const authorizations = [
-    primary,
+    ...(bundleOnly ? [] : [primary]),
     ...availableSystemTools
+      .filter((operation) =>
+        operation === 'production.bundle.submit'
+          ? bundleOnly
+          : !bundleOnly ||
+            unifiedAgentToolRegistry.require(operation).executionLane === 'parallel-readonly' ||
+            ['production.bundle', 'conversation.task.checkpoint'].includes(operation),
+      )
       .filter(
         (operation) =>
           primary.operation !== 'novel.chapter.submit_draft' ||
@@ -5549,7 +5657,6 @@ function authorizationSpecsForTask(
   );
   return uniqueAuthorizationSpecs(authorizations);
 }
-
 function targetKindForOperation(operation: AgentToolOperation): string {
   if (operation === 'novel.chapter.submit_draft') return 'novel-chapter';
   if (operation === 'novel.reference.submit_draft') return 'novel-reference';
@@ -5560,7 +5667,6 @@ function targetKindForOperation(operation: AgentToolOperation): string {
   if (operation.startsWith('conversation.')) return 'conversation';
   return 'project';
 }
-
 function freezeTaskToolManifest(
   database: Database.Database,
   taskId: string,
@@ -5568,7 +5674,11 @@ function freezeTaskToolManifest(
 ): void {
   const row = database
     .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
-    .get(taskId) as { request_snapshot_json: string } | undefined;
+    .get(taskId) as
+    | {
+        request_snapshot_json: string;
+      }
+    | undefined;
   if (!row) throw new Error('Agent task was not found while freezing its tool manifest.');
   const snapshot = JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
   const current = authorizations
@@ -5605,7 +5715,8 @@ function freezeTaskToolManifest(
         !isMediaPrepareOperation(operation) &&
         !isMediaSubmissionOperation(operation),
     );
-  const primary = primaryOperations[0];
+  const primary =
+    snapshot.productionSkillId === 'script-to-media' ? 'production.bundle' : primaryOperations[0];
   const previousPrimary =
     typeof snapshot.primaryOperation === 'string' ? snapshot.primaryOperation : undefined;
   if (previousPrimary && primary && previousPrimary !== primary) {
@@ -5631,7 +5742,6 @@ function freezeTaskToolManifest(
     );
   }
 }
-
 function uniqueAuthorizationSpecs(authorizations: AuthorizationSpec[]): AuthorizationSpec[] {
   const seen = new Set<AgentToolOperation>();
   return authorizations.filter((authorization) => {
@@ -5640,8 +5750,8 @@ function uniqueAuthorizationSpecs(authorizations: AuthorizationSpec[]): Authoriz
     return true;
   });
 }
-
 function firstPrimaryAuthorization(database: Database.Database, taskId: string): AuthorizationSpec {
+  if (isBundleTask(database, taskId)) return { operation: 'production.bundle' };
   const rows = database
     .prepare(
       `SELECT allowed_operation AS operation, target_document_id AS targetDocumentId,
@@ -5662,14 +5772,16 @@ function firstPrimaryAuthorization(database: Database.Database, taskId: string):
   if (!row) throw new Error('Agent task primary authorization was not found.');
   return row;
 }
-
 function researchModeFromTask(database: Database.Database, taskId: string): AgentResearchMode {
   const row = database
     .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
-    .get(taskId) as { request_snapshot_json: string } | undefined;
+    .get(taskId) as
+    | {
+        request_snapshot_json: string;
+      }
+    | undefined;
   return researchModeFromSnapshot(row?.request_snapshot_json);
 }
-
 function agentModelSelectionSnapshot(
   generation: GenerationRow,
   provenance: AgentModelSelectionProvenance,
@@ -5686,7 +5798,6 @@ function agentModelSelectionSnapshot(
     confirmedAt: provenance.confirmedAt,
   };
 }
-
 function freezeAgentModelSelection(
   database: Database.Database,
   taskId: string,
@@ -5695,7 +5806,11 @@ function freezeAgentModelSelection(
 ): void {
   const row = database
     .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id = ?')
-    .get(taskId) as { request_snapshot_json: string } | undefined;
+    .get(taskId) as
+    | {
+        request_snapshot_json: string;
+      }
+    | undefined;
   if (!row) throw new Error('Agent task was not found while freezing model selection.');
   const parsed = JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
   const existing = parsed.modelSelection;
@@ -5733,11 +5848,12 @@ function freezeAgentModelSelection(
     )
     .run(JSON.stringify({ ...parsed, modelSelection }), taskId);
 }
-
 function researchModeFromSnapshot(value: string | undefined): AgentResearchMode {
   if (!value) return 'project_only';
   try {
-    const parsed = JSON.parse(value) as { researchMode?: unknown };
+    const parsed = JSON.parse(value) as {
+      researchMode?: unknown;
+    };
     return parsed.researchMode === 'auto' ||
       parsed.researchMode === 'project_only' ||
       parsed.researchMode === 'network_disabled'
@@ -5747,15 +5863,12 @@ function researchModeFromSnapshot(value: string | undefined): AgentResearchMode 
     return 'project_only';
   }
 }
-
 function isResearchOperation(value: string): value is ResearchOperation {
   return value === 'research.search' || value === 'research.fetch';
 }
-
 function isLibraryOperation(value: string): value is LibraryOperation {
   return value === 'library.search' || value === 'library.read';
 }
-
 function isSchemaOperation(value: string): value is SchemaOperation {
   return (
     value === 'adapter.schema.get' ||
@@ -5763,16 +5876,15 @@ function isSchemaOperation(value: string): value is SchemaOperation {
     value === 'adapter.schema.audit.list'
   );
 }
-
 function isMediaPrepareOperation(value: string): value is MediaPrepareToolOperation {
   return value === 'media.image.prepare' || value === 'media.video.prepare';
 }
-
 function isMediaSubmissionOperation(value: string): value is MediaSubmissionToolOperation {
   return value === 'media.generation.submit' || value === 'media.task.cancel';
 }
-
-function parseMediaSubmissionToolArguments(value: string): { taskId: string } {
+function parseMediaSubmissionToolArguments(value: string): {
+  taskId: string;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -5791,7 +5903,6 @@ function parseMediaSubmissionToolArguments(value: string): { taskId: string } {
   }
   return { taskId: record.taskId.trim() };
 }
-
 function mediaSubmissionOutput(submission: MediaSubmissionResult): string {
   const job = submission.job;
   const resultAssetIds = job.results.flatMap((result) => (result.asset ? [result.asset.id] : []));
@@ -5813,7 +5924,6 @@ function mediaSubmissionOutput(submission: MediaSubmissionResult): string {
       : {}),
   });
 }
-
 function rowForMediaTask(
   rows: Array<Record<string, unknown>>,
   jobId: string,
@@ -5828,25 +5938,23 @@ function rowForMediaTask(
     }
   });
 }
-
 function nextStepOrdinal(database: Database.Database, attemptId: string): number {
   return (
     database
       .prepare(
         'SELECT COALESCE(MAX(ordinal), -1) + 1 AS value FROM llm_provider_steps WHERE attempt_id = ?',
       )
-      .get(attemptId) as { value: number }
+      .get(attemptId) as {
+      value: number;
+    }
   ).value;
 }
-
 function isSystemOperation(value: string): value is SystemAgentToolOperation {
   return SYSTEM_AGENT_OPERATIONS.has(value as SystemAgentToolOperation);
 }
-
 const SYSTEM_AGENT_OPERATIONS = new Set<SystemAgentToolOperation>(
   SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation),
 );
-
 function parseConfirmationContinuationDescriptor(
   value: string,
 ): LegacyConfirmationContinuationDescriptor | SystemConfirmationContinuationDescriptor {
@@ -5904,10 +6012,12 @@ function parseConfirmationContinuationDescriptor(
   }
   return descriptor as unknown as SystemConfirmationContinuationDescriptor;
 }
-
-export function inferNovelReference(
-  prompt: string,
-): { role: DocumentBindingRole; kind: DocumentKind } | undefined {
+export function inferNovelReference(prompt: string):
+  | {
+      role: DocumentBindingRole;
+      kind: DocumentKind;
+    }
+  | undefined {
   const value = prompt.normalize('NFKC');
   if (!/(小说|故事|novel)/iu.test(value) || /(短剧|剧本|分镜|改编|screenplay)/iu.test(value))
     return undefined;
@@ -5919,11 +6029,16 @@ export function inferNovelReference(
   if (/(风格指南|style.*guide)/iu.test(value)) return { role: 'style-guide', kind: 'note' };
   return undefined;
 }
-
 type SchemaToolArguments =
-  | { adapterKey: string; limit?: number }
-  | { adapterKey: string; descriptor: AdapterDescriptor; reason?: string };
-
+  | {
+      adapterKey: string;
+      limit?: number;
+    }
+  | {
+      adapterKey: string;
+      descriptor: AdapterDescriptor;
+      reason?: string;
+    };
 function parseSchemaToolArguments(value: string): SchemaToolArguments {
   let parsed: unknown;
   try {
@@ -5974,7 +6089,6 @@ function parseSchemaToolArguments(value: string): SchemaToolArguments {
     reason: typeof record.reason === 'string' ? record.reason.trim() : undefined,
   };
 }
-
 /** Remove connection details before a schema descriptor is returned to the model. */
 function toAgentSchemaDescriptor(
   descriptor: AdapterDescriptor,
@@ -5994,7 +6108,6 @@ function toAgentSchemaDescriptor(
     uiSchema: descriptor.uiSchema,
   };
 }
-
 function optionalBoundedInteger(
   value: unknown,
   minimum: number,
@@ -6006,7 +6119,6 @@ function optionalBoundedInteger(
   }
   return value as number;
 }
-
 function optionalPatternString(
   value: unknown,
   pattern: RegExp,
@@ -6020,7 +6132,6 @@ function optionalPatternString(
   }
   return normalized;
 }
-
 function taskTypeFor(operation: AgentToolOperation): string {
   switch (operation) {
     case 'document.create_draft':
@@ -6046,7 +6157,6 @@ function taskTypeFor(operation: AgentToolOperation): string {
   }
   throw new Error('Unsupported Agent tool operation.');
 }
-
 const DOCUMENT_KIND_SET = new Set([
   'outline',
   'plan',
@@ -6054,20 +6164,18 @@ const DOCUMENT_KIND_SET = new Set([
   'character',
   'scene',
   'prop',
+  'voice',
   'storyboard',
   'note',
 ]);
-
 function normalizeTitle(value: string): string {
   const title = value.normalize('NFC').trim();
   if (!title || title.length > 200) throw new Error('Agent document title is invalid.');
   return title;
 }
-
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
-
 type LibraryToolArguments =
   | {
       operation: 'library.search';
@@ -6086,13 +6194,15 @@ type LibraryToolArguments =
   | {
       operation: 'library.read';
       sourceHandle?: string;
-      artifact?: { documentId: string; expectedVersionId: string };
+      artifact?: {
+        documentId: string;
+        expectedVersionId: string;
+      };
       maxChars?: number;
       readMode?: 'chunk' | 'source';
-      includeContentIR?: boolean;
+      includeBindings?: boolean;
       offset?: number;
     };
-
 function parseLibraryToolArguments(
   operation: LibraryOperation,
   value: string,
@@ -6157,19 +6267,19 @@ function parseLibraryToolArguments(
   if (
     Object.keys(record).some(
       (key) =>
-        ![
-          'sourceHandle',
-          'artifact',
-          'maxChars',
-          'readMode',
-          'includeContentIR',
-          'offset',
-        ].includes(key),
+        !['sourceHandle', 'artifact', 'maxChars', 'readMode', 'includeBindings', 'offset'].includes(
+          key,
+        ),
     )
   ) {
     throw new Error('Library read arguments contain unsupported fields.');
   }
-  let artifact: { documentId: string; expectedVersionId: string } | undefined;
+  let artifact:
+    | {
+        documentId: string;
+        expectedVersionId: string;
+      }
+    | undefined;
   if (record.artifact !== undefined) {
     if (
       record.sourceHandle !== undefined ||
@@ -6200,21 +6310,20 @@ function parseLibraryToolArguments(
     throw new Error('Library sourceHandle or versioned task artifact is required.');
   const sourceHandle =
     typeof record.sourceHandle === 'string' ? record.sourceHandle.trim() : undefined;
-  if (record.includeContentIR !== undefined && typeof record.includeContentIR !== 'boolean')
-    throw new Error('Library includeContentIR must be a boolean.');
+  if (record.includeBindings !== undefined && typeof record.includeBindings !== 'boolean')
+    throw new Error('Library includeBindings must be a boolean.');
   return {
     operation,
     sourceHandle,
     artifact,
-    maxChars: optionalBoundedInteger(record.maxChars, 1, 20_000),
+    maxChars: optionalBoundedInteger(record.maxChars, 1, 20000),
     readMode:
       record.readMode === 'chunk' || record.readMode === 'source' ? record.readMode : undefined,
-    includeContentIR:
-      typeof record.includeContentIR === 'boolean' ? record.includeContentIR : undefined,
+    includeBindings:
+      typeof record.includeBindings === 'boolean' ? record.includeBindings : undefined,
     offset: optionalBoundedInteger(record.offset, 0, Number.MAX_SAFE_INTEGER),
   };
 }
-
 function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<string, unknown> {
   if (argumentsValue.operation === 'library.search') {
     return {
@@ -6233,10 +6342,9 @@ function libraryArgumentsSummary(argumentsValue: LibraryToolArguments): Record<s
     artifact: argumentsValue.artifact,
     maxChars: argumentsValue.maxChars,
     readMode: argumentsValue.readMode,
-    includeContentIR: argumentsValue.includeContentIR,
+    includeBindings: argumentsValue.includeBindings,
   };
 }
-
 function summarizeLibraryResult(result: {
   status: string;
   queryHash?: string;
@@ -6297,14 +6405,12 @@ function summarizeLibraryResult(result: {
     characterCount: result.characterCount,
   };
 }
-
 type QuotaFailure = {
   state:
     'paused_budget' | 'provider_rate_limited' | 'provider_quota_exhausted' | 'context_exhausted';
   code: string;
   retryable: 0 | 1;
 };
-
 function classifyQuotaFailure(message: string): QuotaFailure | undefined {
   if (/CONTEXT_BUDGET_EXCEEDED/.test(message))
     return { state: 'context_exhausted', code: 'CONTEXT_BUDGET_EXCEEDED', retryable: 1 };
@@ -6316,7 +6422,6 @@ function classifyQuotaFailure(message: string): QuotaFailure | undefined {
     return { state: 'provider_quota_exhausted', code: 'PROVIDER_QUOTA_EXHAUSTED', retryable: 0 };
   return undefined;
 }
-
 function safeWorkingArguments(raw: string): unknown {
   try {
     return JSON.parse(raw) as unknown;
@@ -6324,10 +6429,12 @@ function safeWorkingArguments(raw: string): unknown {
     return { invalidArgumentsJson: raw };
   }
 }
-
 function workingResultStatus(output: string): string {
   try {
-    const value = JSON.parse(output) as { status?: string; error?: unknown };
+    const value = JSON.parse(output) as {
+      status?: string;
+      error?: unknown;
+    };
     return value.error || ['failed', 'rejected', 'error'].includes(value.status ?? '')
       ? 'failed'
       : 'completed';

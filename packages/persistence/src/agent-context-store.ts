@@ -4,7 +4,16 @@ import type Database from 'better-sqlite3';
 export type AgentTaskState = {
   taskId: string;
   taskGoal: string;
-  userRequirements: Array<{ id: string; text: string; source: string }>;
+  userRequirements: Array<{
+    id: string;
+    text: string;
+    source: string;
+    /** Exact provenance, optional for legacy snapshots whose framing is unknown. */
+    sourceKey?: string;
+    sourceVersion?: string;
+    originTaskId?: string;
+    originRequirementId?: string;
+  }>;
   projectConstraints: string[];
   confirmedDecisions: Array<{ text: string; source: string }>;
   currentStage: string;

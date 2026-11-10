@@ -1,23 +1,12 @@
 import type { ProductionCompileResult, ProductionTiming } from '@ai-video/contracts';
-
 function TimingEvidence({ timing }: { timing?: ProductionTiming }) {
   if (!timing) return null;
   return (
-    <>
-      <p>估时依据：{timing.rationale}</p>
-      {timing.beats?.length ? (
-        <ul aria-label="镜内节拍（相对本镜）">
-          {timing.beats.map((beat, index) => (
-            <li key={index}>
-              {beat.startSeconds}—{beat.endSeconds} 秒：{beat.description}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </>
+    <p>
+      {timing.estimatedDurationSeconds} 秒{timing.locked ? ' · 时长已锁定' : ''}
+    </p>
   );
 }
-
 /** Use the current form value: the compiler snapshot may precede a manual duration edit. */
 export function ProductionTimingDetails({
   result,
@@ -61,9 +50,7 @@ export function ProductionTimingDetails({
               秒，可能无法容纳完整动作或对白；请核对时长或重新编排。
             </p>
           )}
-          <TimingEvidence
-            timing={result?.source?.shotIds?.length ? undefined : result?.authoringIR?.timing}
-          />
+          <TimingEvidence timing={result?.source?.shotIds?.length ? undefined : result?.timing} />
         </>
       )}
       {Boolean(result?.timeline?.length) && (

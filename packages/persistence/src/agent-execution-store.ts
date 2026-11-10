@@ -233,7 +233,13 @@ export class AgentExecutionStore {
             effect,
             replayed: false,
             changeSequence: sequence,
-            resources: changes.map((c) => ({
+            ...(toolName === 'production.bundle' && changes.length > 100
+              ? { resourceCount: changes.length, resourceResultId: result.mappingResultId }
+              : {}),
+            resources: (toolName === 'production.bundle' && changes.length > 100
+              ? changes.slice(0, 20)
+              : changes
+            ).map((c) => ({
               type: c.resource_type,
               id: c.resource_id,
               operation: c.operation,

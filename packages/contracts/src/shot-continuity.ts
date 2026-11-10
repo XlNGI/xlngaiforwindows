@@ -1,5 +1,4 @@
 import type { AssetInfo, LlmGenerationPrepareResult, ShotInfo } from './index.js';
-
 /** continue/reframe are retained for existing project bindings. */
 export type ShotContinuityMode = 'reference' | 'continue' | 'reframe';
 export type ShotContinuityPromptKind = 'image' | 'video';
@@ -31,9 +30,8 @@ export interface ShotContinuityBinding {
   referenceRole?: 'reference' | 'first-frame';
   imagePrompt?: string;
   /** Read projection of the current shot authoring IR, never a second stored video prompt. */
-  videoPrompt?: string;
+  prompt?: string;
 }
-
 /** Stable, ordered projections shared by the UI, Agent and production compiler. */
 export function continuitySourceImageIds(binding: ShotContinuityBinding): string[] {
   return [
@@ -90,9 +88,20 @@ export interface ShotContinuityConfirmParams {
 export interface ShotContinuitySelectionParams {
   shotId: string;
   expectedRowVersion: number;
-  frames: Array<{ videoAssetId: string; sourceToken: string; timeMs: number }>;
+  frames: Array<{
+    videoAssetId: string;
+    sourceToken: string;
+    timeMs: number;
+  }>;
   imageAssetIds: string[];
-  anchor: { videoAssetId: string; timeMs: number } | { assetId: string };
+  anchor:
+    | {
+        videoAssetId: string;
+        timeMs: number;
+      }
+    | {
+        assetId: string;
+      };
   notes: string;
 }
 export interface ShotContinuityReferencesParams {
@@ -110,16 +119,29 @@ export interface ShotContinuityPromptPrepareParams {
 }
 export interface ShotContinuityWorkerMethodMap {
   'shot.continuity.assets': {
-    params: { shotId: string; assetIds: string[] };
+    params: {
+      shotId: string;
+      assetIds: string[];
+    };
     result: AssetInfo[];
   };
   'shot.continuity.import': {
-    params: { shotId: string; sourcePaths: string[] };
+    params: {
+      shotId: string;
+      sourcePaths: string[];
+    };
     result: AssetInfo[];
   };
   'shot.continuity.probe': {
-    params: { shotId: string; videoAssetId: string };
-    result: { durationMs: number; fps: number; sourceToken: string };
+    params: {
+      shotId: string;
+      videoAssetId: string;
+    };
+    result: {
+      durationMs: number;
+      fps: number;
+      sourceToken: string;
+    };
   };
   'shot.continuity.selection.confirm': {
     params: ShotContinuitySelectionParams;
@@ -129,7 +151,12 @@ export interface ShotContinuityWorkerMethodMap {
     params: ShotContinuityReferencesParams;
     result: ShotContinuityContext;
   };
-  'shot.continuity.get': { params: { shotId: string }; result: ShotContinuityContext };
+  'shot.continuity.get': {
+    params: {
+      shotId: string;
+    };
+    result: ShotContinuityContext;
+  };
   'shot.continuity.preview': {
     params: ShotContinuityPreviewParams;
     result: ShotContinuityPreview;
@@ -139,15 +166,26 @@ export interface ShotContinuityWorkerMethodMap {
     result: ShotContinuityContext;
   };
   'shot.continuity.reconfirm': {
-    params: { shotId: string; expectedRowVersion: number; expectedTargetRowVersion: number };
+    params: {
+      shotId: string;
+      expectedRowVersion: number;
+      expectedTargetRowVersion: number;
+    };
     result: ShotContinuityContext;
   };
   'shot.continuity.clear': {
-    params: { shotId: string; expectedRowVersion: number };
+    params: {
+      shotId: string;
+      expectedRowVersion: number;
+    };
     result: ShotContinuityContext;
   };
   'shot.continuity.firstFrame': {
-    params: { shotId: string; expectedRowVersion: number; assetId: string };
+    params: {
+      shotId: string;
+      expectedRowVersion: number;
+      assetId: string;
+    };
     result: ShotContinuityContext;
   };
   'shot.continuity.reference': {
@@ -160,7 +198,11 @@ export interface ShotContinuityWorkerMethodMap {
     result: ShotContinuityContext;
   };
   'shot.continuity.intent.save': {
-    params: { shotId: string; expectedRowVersion: number; notes: string };
+    params: {
+      shotId: string;
+      expectedRowVersion: number;
+      notes: string;
+    };
     result: ShotContinuityContext;
   };
   'shot.continuity.prompt.prepare': {

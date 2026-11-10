@@ -306,6 +306,32 @@ describe('TaskLogView', () => {
     expect(callWorker).not.toHaveBeenCalledWith('agent.task.get', expect.anything());
   });
 
+  it.each([
+    'Provider request failed with HTTP 400: invalid_parameter: size must be WIDTHxHEIGHT, multiples of 16',
+    'Provider request failed with HTTP 429: 请求过于频繁，请等待 30 秒后重试。',
+  ])(
+    'shows the original upstream image error without expanding technical information: %s',
+    async (error) => {
+      vi.mocked(callWorker).mockImplementation((method) => {
+        if (method === 'file.task.list' || method === 'novel.export.list')
+          return Promise.resolve([]);
+        if (method === 'task.log.list')
+          return Promise.resolve({ items: [{ ...imageItem, status: 'failed' }] });
+        if (method === 'image.generate.get')
+          return Promise.resolve({ ...imageJob, status: 'failed', results: [], error });
+        if (method === 'generation.job.events.list')
+          return Promise.resolve({ events: [], nextSequence: -1, hasMore: false });
+        return Promise.reject(new Error(`Unexpected method ${method}`));
+      });
+      render(<TaskLogView projectId="project-1" />);
+      fireEvent.click(await screen.findByRole('button', { name: /文本生成图片/ }));
+      const original = await screen.findByText(error);
+      expect(original).toBeVisible();
+      expect(original.closest('details')).toBeNull();
+      expect(screen.getByRole('alert')).toHaveTextContent(error);
+    },
+  );
+
   it('shows an uncertain image submission instead of running and advises checking the Provider', async () => {
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);

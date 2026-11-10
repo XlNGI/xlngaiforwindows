@@ -1,4 +1,53 @@
 import { contextContentHash, type StoredToolResult } from '@ai-video/persistence';
+import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-registry.js';
+import { BUNDLE_PROMPT_READ_VIEW, BUNDLE_SOURCE_READ_VIEW } from './production-bundle-schema.js';
+
+/** History and the current read working set must not carry the same candidate page twice. */
+export function projectBundleReadResult(
+  result: StoredToolResult,
+  currentHashes: Map<string, string>,
+  retainedPages: unknown[],
+): string | undefined {
+  if (result.status !== 'completed' || result.toolName !== 'production.bundle') return;
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(result.content) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (value?.status === 'bundle_source_read' && value.view !== BUNDLE_SOURCE_READ_VIEW)
+    return JSON.stringify({
+      status: 'source_page_superseded',
+      documentId: value.documentId,
+      instruction:
+        'Read the current ordinary source view. Historical encoded pages remain archived.',
+    });
+  if (!['bundle_candidate_read', 'bundle_candidates_read'].includes(String(value?.status))) return;
+  if (!fitsResult(value)) return;
+  if (value.status === 'bundle_candidates_read' && !Array.isArray(value.reads)) return;
+  const identity = (page: Record<string, unknown>) =>
+    JSON.stringify([page.localKey, page.hash, page.contentPage]);
+  const retained = new Set(retainedPages.map((page) => identity(page as Record<string, unknown>)));
+  const project = (page: Record<string, unknown>) => {
+    const currentHash = currentHashes.get(String(page.localKey));
+    if (!currentHash) return page;
+    const stale = currentHash !== page.hash || page.view !== BUNDLE_PROMPT_READ_VIEW;
+    if (!stale && !retained.has(identity(page))) return page;
+    return {
+      status: stale ? 'candidate_page_superseded' : 'candidate_page_included',
+      localKey: page.localKey,
+      hash: page.hash,
+      instruction: stale
+        ? 'Historical page superseded. Read the current candidate if needed; this page remains in Result Store.'
+        : 'This exact page is already in taskState.workingData. Use it there without rereading.',
+    };
+  };
+  return JSON.stringify(
+    value.status === 'bundle_candidates_read'
+      ? { ...value, reads: (value.reads as Record<string, unknown>[]).map(project) }
+      : project(value),
+  );
+}
 
 /** Deduplicate only exact text already supplied in this request. The stored result is immutable. */
 export function projectTaskStateResult(
@@ -109,11 +158,42 @@ export function savedArtifactReceipt(result: StoredToolResult): Record<string, u
 
 /** Small receipts remain wire-compatible; large bodies have an explicit range-read contract. */
 export function modelResultReceipt(result: StoredToolResult, maxInlineCharacters = 6000): string {
+  // Range reads are already bounded. A receipt for a range creates recursive
+  // paging instead of delivering the requested text and its next cursor.
+  if (
+    ['production.bundle', 'conversation.task.checkpoint'].includes(result.toolName) &&
+    Buffer.byteLength(result.content) <= 48 * 1024
+  ) {
+    let page: Record<string, unknown> = {};
+    try {
+      page = JSON.parse(result.content) as Record<string, unknown>;
+    } catch {
+      /* Historical opaque results use the ordinary receipt path. */
+    }
+    if (
+      page &&
+      (result.toolName === 'production.bundle'
+        ? ['bundle_source_read', 'bundle_candidate_read', 'bundle_candidates_read'].includes(
+            String(page.status),
+          )
+        : page.status === 'task_result_read') &&
+      fitsResult(page)
+    )
+      return result.content;
+  }
   if (
     result.content.length <= maxInlineCharacters &&
     (result.toolName !== 'tools.load' || result.status === 'failed')
-  )
-    return result.content;
+  ) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.content);
+    } catch {
+      // Historical opaque errors remain readable through the existing path.
+      return result.content;
+    }
+    if (fitsResult(parsed)) return result.content;
+  }
   let value: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(result.content);
@@ -155,6 +235,10 @@ export function modelResultReceipt(result: StoredToolResult, maxInlineCharacters
     'legacyOutputs',
     'pendingActions',
     'reviewedTargetIds',
+    'rejectedTargetIds',
+    'assessmentErrors',
+    'inspectionSummary',
+    'historyPage',
   ])
     if (value[key] !== undefined) fields[key] = value[key];
   if (value.status === 'task_review_recorded') {
@@ -245,8 +329,16 @@ export function modelResultReceipt(result: StoredToolResult, maxInlineCharacters
       instruction:
         'Listed tools are ready. Active policies are already included in system instructions; continue the business task without rereading this policy receipt.',
     });
-  return JSON.stringify({
-    ...fields,
+  // Decision facts can themselves exceed a collection or byte limit. Defer
+  // entire fields with an explicit pointer to the complete immutable result;
+  // never return a silently truncated assessment or drop its durable evidence.
+  const externalizedFields: string[] = [];
+  for (const [key, value] of Object.entries(fields))
+    if (!fitsResult({ [key]: value })) {
+      delete fields[key];
+      externalizedFields.push(key);
+    }
+  const receipt = {
     status: value.status ?? result.status,
     resultId: result.id,
     resultVersion: result.version,
@@ -263,5 +355,29 @@ export function modelResultReceipt(result: StoredToolResult, maxInlineCharacters
     },
     instruction:
       'Complete immutable result is persisted. Read only needed ranges with operation=result; concatenate pages before parsing JSON. Do not repeat the original business call to recover this data.',
+  };
+  const output = () => ({
+    ...fields,
+    ...receipt,
+    ...(externalizedFields.length ? { externalizedFields } : {}),
   });
+  for (const [key] of Object.entries(fields).sort(
+    ([, a], [, b]) => JSON.stringify(b).length - JSON.stringify(a).length,
+  )) {
+    if (fitsResult(output())) break;
+    delete fields[key];
+    externalizedFields.push(key);
+  }
+  return unifiedAgentToolRegistry.serializeResult(output());
+}
+
+function fitsResult(value: unknown): boolean {
+  try {
+    unifiedAgentToolRegistry.assertResultValue(value);
+    return true;
+  } catch (error) {
+    if (!(error instanceof AgentToolPolicyError) || error.code !== 'AGENT_TOOL_RESULT_TOO_LARGE')
+      throw error;
+    return false;
+  }
 }

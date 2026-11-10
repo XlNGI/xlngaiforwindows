@@ -3,13 +3,14 @@ import { useProjectViewState } from './use-project-view-state';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type {
   DocumentDetail,
+  PromptBindingIR,
   DocumentKind,
   DocumentSummary,
   DocumentVersionInfo,
 } from '@ai-video/contracts';
 import { projectWorker, workerScope, isCurrentWorkerScope } from './worker-scope';
 import { readMarkdownDocument } from './markdown-import-client';
-
+import { useCharacterVoicePrompt } from './use-character-voice-prompt';
 export interface UseDocumentWorkspaceOptions {
   writable: boolean;
   syncDetachedPanel: (entityId?: string) => void;
@@ -17,7 +18,6 @@ export interface UseDocumentWorkspaceOptions {
   openDocumentWorkspace: (kind?: DocumentKind) => void;
   closeDocumentPanel: () => void;
 }
-
 export function useDocumentWorkspace({
   writable,
   syncDetachedPanel: syncDetachedPanelCallback,
@@ -47,6 +47,8 @@ export function useDocumentWorkspace({
   const [documentTitle, setDocumentTitle] = useProjectViewState('');
   const [documentKind, setDocumentKind] = useProjectViewState<DocumentKind>('outline');
   const [documentContent, setDocumentContent] = useProjectViewState('');
+  const [documentBindings, setDocumentBindings] = useProjectViewState<PromptBindingIR>();
+  const [documentSampleText, setDocumentSampleText] = useProjectViewState('');
   const [versions, setVersions] = useProjectViewState<DocumentVersionInfo[]>([]);
   const [contentBusy, setContentBusy] = useProjectViewState(false);
   const [contentMessage, setContentMessage] = useProjectViewState('');
@@ -54,7 +56,6 @@ export function useDocumentWorkspace({
   const [documentArchiveConfirmation, setDocumentArchiveConfirmation] = useProjectViewState(false);
   const [documentArchiveTarget, setDocumentArchiveTarget] = useProjectViewState<DocumentSummary>();
   const documentRequest = useRef(0);
-
   useEffect(() => {
     let active = true;
     if (!scope) {
@@ -74,18 +75,27 @@ export function useDocumentWorkspace({
       active = false;
     };
   }, [scope?.projectId, scope?.projectSessionId]);
-
   const documentEditorWritable =
     writable &&
     (!document || !document.publishedVersionId) &&
     (!document ||
       ['draft', 'changes_requested'].includes(document.currentVersion?.state ?? 'draft'));
-  const documentDirty = document
+  const characterVoicePrompt = useCharacterVoicePrompt({
+    characterId: documentKind === 'character' ? document?.id : undefined,
+    voiceDocumentId: documentBindings?.voiceDocumentId,
+    versionId: documents.find((item) => item.id === documentBindings?.voiceDocumentId)
+      ?.currentVersionId,
+    writable: documentEditorWritable && !contentBusy,
+  });
+  const mainDocumentDirty = document
     ? document.title !== documentTitle ||
       document.kind !== documentKind ||
-      (document.currentVersion?.contentMarkdown ?? '') !== documentContent
+      (document.currentVersion?.contentMarkdown ?? '') !== documentContent ||
+      JSON.stringify(document.currentVersion?.bindings ?? undefined) !==
+        JSON.stringify(documentBindings) ||
+      (document.currentVersion?.sampleText ?? '') !== documentSampleText
     : Boolean(documentTitle.trim() || documentContent.trim());
-
+  const documentDirty = mainDocumentDirty || characterVoicePrompt.dirty;
   const editorState = useRef({ document, documentDirty });
   editorState.current = { document, documentDirty };
   const refreshCommittedDocuments = async () => {
@@ -110,21 +120,27 @@ export function useDocumentWorkspace({
     setDocumentTitle(detail.title);
     setDocumentKind(detail.kind);
     setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
+    setDocumentBindings(detail.currentVersion?.bindings ?? undefined);
+    setDocumentSampleText(detail.currentVersion?.sampleText ?? '');
     setVersions(history);
   };
-
   const applyDocument = async (nextDocument: DocumentDetail, openPanel = false): Promise<void> => {
     setDocument(nextDocument);
     setDocumentTitle(nextDocument.title);
     setDocumentKind(nextDocument.kind);
     setDocumentContent(nextDocument.currentVersion?.contentMarkdown ?? '');
+    setDocumentBindings(nextDocument.currentVersion?.bindings ?? undefined);
+    setDocumentSampleText(nextDocument.currentVersion?.sampleText ?? '');
     setVersions(await callWorker('document.versions', { documentId: nextDocument.id }));
     setDocuments(await callWorker('document.list', {}));
     syncDetachedPanel(nextDocument.id);
     if (openPanel) openDocumentWorkspace(nextDocument.kind);
   };
-
   const selectDocument = async (summary: DocumentSummary) => {
+    if (characterVoicePrompt.dirty) {
+      setContentMessage('请先保存音色提示词，或关闭页面并放弃修改，再切换文档。');
+      return;
+    }
     const requestId = ++documentRequest.current;
     setContentBusy(true);
     setContentMessage('');
@@ -138,6 +154,8 @@ export function useDocumentWorkspace({
       setDocumentTitle(detail.title);
       setDocumentKind(detail.kind);
       setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(detail.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(detail.currentVersion?.sampleText ?? '');
       setVersions(history);
       syncDetachedPanel(detail.id);
       openDocumentWorkspace(detail.kind);
@@ -149,8 +167,11 @@ export function useDocumentWorkspace({
       if (requestId === documentRequest.current) setContentBusy(false);
     }
   };
-
   const openDocumentById = async (documentId: string) => {
+    if (characterVoicePrompt.dirty) {
+      setContentMessage('请先保存音色提示词，或关闭页面并放弃修改，再切换文档。');
+      return;
+    }
     const requestId = ++documentRequest.current;
     setContentBusy(true);
     setContentMessage('');
@@ -164,6 +185,8 @@ export function useDocumentWorkspace({
       setDocumentTitle(detail.title);
       setDocumentKind(detail.kind);
       setDocumentContent(detail.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(detail.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(detail.currentVersion?.sampleText ?? '');
       setVersions(history);
       syncDetachedPanel(detail.id);
       openDocumentWorkspace(detail.kind);
@@ -175,18 +198,23 @@ export function useDocumentWorkspace({
       if (requestId === documentRequest.current) setContentBusy(false);
     }
   };
-
   const newDocument = () => {
+    if (characterVoicePrompt.dirty) {
+      setContentMessage('请先保存音色提示词，或关闭页面并放弃修改，再新建文档。');
+      return false;
+    }
     documentRequest.current += 1;
     setDocument(undefined);
     setDocumentTitle('');
     setDocumentKind('note');
     setDocumentContent('');
+    setDocumentBindings(undefined);
+    setDocumentSampleText('');
     setVersions([]);
     syncDetachedPanel();
     openDocumentWorkspace();
+    return true;
   };
-
   const importMarkdownDocument = async () => {
     const selected = await openDialog({
       directory: false,
@@ -195,7 +223,6 @@ export function useDocumentWorkspace({
       filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
     });
     if (typeof selected !== 'string') return;
-
     setContentBusy(true);
     setContentMessage('');
     try {
@@ -213,7 +240,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const saveDocument = async (): Promise<DocumentDetail | undefined> => {
     if (!documentEditorWritable) {
       setContentMessage(
@@ -226,17 +252,27 @@ export function useDocumentWorkspace({
     setContentBusy(true);
     setContentMessage('');
     try {
-      const saved = await callWorker('document.draft.save', {
-        documentId: document?.id,
-        kind: documentKind,
-        title: documentTitle,
-        contentMarkdown: documentContent,
-        expectedDocumentRowVersion: document?.rowVersion,
-      });
+      const savedVoice = await characterVoicePrompt.save();
+      const saved =
+        document && !mainDocumentDirty && savedVoice
+          ? document
+          : await callWorker('document.draft.save', {
+              documentId: document?.id,
+              kind: documentKind,
+              title: documentTitle,
+              contentMarkdown: documentContent,
+              bindings: documentBindings,
+              ...(documentKind === 'voice' ? { sampleText: documentSampleText } : {}),
+              expectedDocumentRowVersion: document?.rowVersion,
+            });
       setDocument(saved);
       setDocuments(await callWorker('document.list', {}));
       setVersions(await callWorker('document.versions', { documentId: saved.id }));
-      setContentMessage(`已保存草稿 v${saved.currentVersion?.version}`);
+      setContentMessage(
+        savedVoice && !mainDocumentDirty
+          ? '已保存音色提示词'
+          : `已保存草稿 v${saved.currentVersion?.version}`,
+      );
       return saved;
     } catch (reason) {
       setContentMessage(reason instanceof Error ? reason.message : '保存失败');
@@ -245,7 +281,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const requestArchiveDocument = (target?: DocumentSummary) => {
     const archiveTarget = target ?? document;
     if (!archiveTarget || !writable || contentBusy) return;
@@ -253,7 +288,6 @@ export function useDocumentWorkspace({
     setContentMessage('');
     setDocumentArchiveConfirmation(true);
   };
-
   const confirmArchiveDocument = async (
     saveUnsavedChanges: boolean,
   ): Promise<DocumentDetail | undefined> => {
@@ -303,17 +337,19 @@ export function useDocumentWorkspace({
       setContentMessage('保存并归档前请填写文档标题。');
       return undefined;
     }
-
     let target = document;
     setContentBusy(true);
     setContentMessage('');
     try {
       if (saveUnsavedChanges && documentDirty) {
+        await characterVoicePrompt.save();
         target = await callWorker('document.draft.save', {
           documentId: document.id,
           kind: documentKind,
           title: documentTitle,
           contentMarkdown: documentContent,
+          bindings: documentBindings,
+          ...(documentKind === 'voice' ? { sampleText: documentSampleText } : {}),
           expectedDocumentRowVersion: document.rowVersion,
         });
         setDocument(target);
@@ -336,6 +372,8 @@ export function useDocumentWorkspace({
       setDocumentTitle('');
       setDocumentKind('note');
       setDocumentContent('');
+      setDocumentBindings(undefined);
+      setDocumentSampleText('');
       setVersions([]);
       setDocumentArchiveConfirmation(false);
       setDocumentArchiveTarget(undefined);
@@ -368,7 +406,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const applyArchivedDocuments = async (archived: DocumentSummary[]) => {
     const ids = new Set(archived.map((item) => item.id));
     documentRequest.current += 1;
@@ -381,6 +418,8 @@ export function useDocumentWorkspace({
       setDocumentTitle('');
       setDocumentKind('note');
       setDocumentContent('');
+      setDocumentBindings(undefined);
+      setDocumentSampleText('');
       setVersions([]);
       closeDocumentPanel();
     }
@@ -391,7 +430,6 @@ export function useDocumentWorkspace({
     setDocuments(activeRows);
     setArchivedDocuments(archivedRows);
   };
-
   const restoreArchivedDocument = async (
     archivedDocument: DocumentSummary,
   ): Promise<DocumentDetail | undefined> => {
@@ -409,6 +447,8 @@ export function useDocumentWorkspace({
       setDocumentTitle(restored.title);
       setDocumentKind(restored.kind);
       setDocumentContent(restored.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(restored.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(restored.currentVersion?.sampleText ?? '');
       setVersions(await callWorker('document.versions', { documentId: restored.id }));
       syncDetachedPanel(restored.id);
       openDocumentWorkspace(restored.kind);
@@ -431,7 +471,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const requestDocumentChanges = async () => {
     if (!document?.currentVersionId) return;
     const comment = window.prompt('请输入退回原因（可选）') ?? undefined;
@@ -454,7 +493,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const publishDocument = async () => {
     if (!document?.currentVersionId) return;
     setContentBusy(true);
@@ -476,7 +514,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const unpublishDocument = async () => {
     if (!document?.publishedVersionId) return;
     setContentBusy(true);
@@ -490,6 +527,8 @@ export function useDocumentWorkspace({
       setDocumentTitle(next.title);
       setDocumentKind(next.kind);
       setDocumentContent(next.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(next.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(next.currentVersion?.sampleText ?? '');
       setDocuments(await callWorker('document.list', {}));
       setVersions(await callWorker('document.versions', { documentId: next.id }));
       setContentMessage('已取消发布，文档已恢复为草稿，可继续编辑。');
@@ -499,7 +538,6 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   /**
    * Saves the editor content and publishes it in one user action. The Worker
    * still creates and approves a review record inside a single transaction, so
@@ -522,11 +560,14 @@ export function useDocumentWorkspace({
     setContentBusy(true);
     setContentMessage('');
     try {
+      await characterVoicePrompt.save();
       const saved = await callWorker('document.draft.save', {
         documentId: document?.id,
         kind: documentKind,
         title: documentTitle,
         contentMarkdown: documentContent,
+        bindings: documentBindings,
+        ...(documentKind === 'voice' ? { sampleText: documentSampleText } : {}),
         expectedDocumentRowVersion: document?.rowVersion,
       });
       const result = await callWorker('document.selfPublish', {
@@ -558,9 +599,12 @@ export function useDocumentWorkspace({
       setContentBusy(false);
     }
   };
-
   const restoreVersion = async (versionId: string) => {
     if (!document || !documentEditorWritable) return;
+    if (characterVoicePrompt.dirty) {
+      setContentMessage('请先保存音色提示词，或关闭页面并放弃修改，再恢复版本。');
+      return;
+    }
     setContentBusy(true);
     try {
       const restored = await callWorker('document.restore', {
@@ -569,17 +613,17 @@ export function useDocumentWorkspace({
       });
       setDocument(restored);
       setDocumentContent(restored.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(restored.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(restored.currentVersion?.sampleText ?? '');
       setVersions(await callWorker('document.versions', { documentId: document.id }));
       setContentMessage(`已从历史版本恢复为 v${restored.currentVersion?.version}`);
     } finally {
       setContentBusy(false);
     }
   };
-
   const openCreatedDocument = async (created: DocumentDetail) => {
     await applyDocument(created, true);
   };
-
   const requestCloseDocument = () => {
     if (documentDirty) {
       setDocumentCloseConfirmation(true);
@@ -587,28 +631,30 @@ export function useDocumentWorkspace({
     }
     closeDocumentPanel();
   };
-
   const discardDocumentChanges = () => {
+    characterVoicePrompt.reset();
     if (document) {
       setDocumentTitle(document.title);
       setDocumentKind(document.kind);
       setDocumentContent(document.currentVersion?.contentMarkdown ?? '');
+      setDocumentBindings(document.currentVersion?.bindings ?? undefined);
+      setDocumentSampleText(document.currentVersion?.sampleText ?? '');
     } else {
       setDocumentTitle('');
       setDocumentKind('note');
       setDocumentContent('');
+      setDocumentBindings(undefined);
+      setDocumentSampleText('');
     }
     setDocumentCloseConfirmation(false);
     closeDocumentPanel();
   };
-
   const saveAndCloseDocument = async () => {
     if (await saveDocument()) {
       setDocumentCloseConfirmation(false);
       closeDocumentPanel();
     }
   };
-
   const syncMainDocumentIfSelected = (
     nextDocument: DocumentDetail,
     history: DocumentVersionInfo[],
@@ -618,10 +664,12 @@ export function useDocumentWorkspace({
     setDocumentTitle(nextDocument.title);
     setDocumentKind(nextDocument.kind);
     setDocumentContent(nextDocument.currentVersion?.contentMarkdown ?? '');
+    setDocumentBindings(nextDocument.currentVersion?.bindings ?? undefined);
+    setDocumentSampleText(nextDocument.currentVersion?.sampleText ?? '');
     setVersions(history);
   };
-
   const reset = () => {
+    characterVoicePrompt.reset();
     documentRequest.current += 1;
     setDocuments([]);
     setArchivedDocuments([]);
@@ -629,6 +677,8 @@ export function useDocumentWorkspace({
     setDocumentTitle('');
     setDocumentKind('note');
     setDocumentContent('');
+    setDocumentBindings(undefined);
+    setDocumentSampleText('');
     setVersions([]);
     setContentBusy(false);
     setContentMessage('');
@@ -636,7 +686,6 @@ export function useDocumentWorkspace({
     setDocumentArchiveConfirmation(false);
     setDocumentArchiveTarget(undefined);
   };
-
   return {
     documents,
     setDocuments,
@@ -651,6 +700,10 @@ export function useDocumentWorkspace({
     setDocumentKind,
     documentContent,
     setDocumentContent,
+    documentBindings,
+    documentSampleText,
+    setDocumentSampleText,
+    setDocumentBindings,
     versions,
     setVersions,
     contentBusy,
@@ -664,6 +717,7 @@ export function useDocumentWorkspace({
     documentArchiveTarget,
     setDocumentArchiveTarget,
     documentDirty,
+    characterVoicePrompt,
     documentEditorWritable,
     selectDocument,
     openDocumentById,

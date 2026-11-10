@@ -1,4 +1,8 @@
 import type Database from 'better-sqlite3';
+import { isBundleTask } from './production-bundle-state.js';
+import { bundleCompletion } from './production-bundle-service.js';
+import { TaskRepairError } from './agent-task-repair.js';
+import { DELIVERY_TOOLS, isDocumentDeliveryTool } from './agent-delivery-capabilities.js';
 import {
   AgentContextStore,
   AgentExecutionStore,
@@ -12,7 +16,6 @@ import {
   taskArtifactReads,
 } from './agent-task-artifacts.js';
 import { DOCUMENT_KINDS, validateProductionTiming, type DocumentKind } from '@ai-video/contracts';
-import { scriptToMediaCompletionPending } from './production-skill-validation.js';
 import {
   checkTaskCriteria,
   validateTaskCriteria,
@@ -23,7 +26,6 @@ import {
   CREATION_BINDING_TOOLS,
   isSavedStructureStatus,
 } from './agent-saved-production-receipts.js';
-
 export const STRUCTURE_DELIVERABLE_TOOLS: readonly string[] = [
   'scene.structure.stage',
   'scene.submit_structure',
@@ -33,14 +35,7 @@ export const REFERENCE_DELIVERABLE_TOOLS = [
   'scene.update_shot_prompts',
   ...STRUCTURE_DELIVERABLE_TOOLS,
 ];
-export const DELIVERABLE_TOOLS = [
-  'document.submit_draft',
-  'scene.update_shot_prompts',
-  'scene.update_shot_timings',
-  'scene.structure.stage',
-  'scene.submit_structure',
-  'novel.episode.submit_structure',
-] as const;
+export const DELIVERABLE_TOOLS = DELIVERY_TOOLS;
 export type Deliverable = {
   key: string;
   toolName: (typeof DELIVERABLE_TOOLS)[number];
@@ -59,9 +54,11 @@ export type Deliverable = {
   /** Worker-owned registration version; never accepted from tool arguments. */
   baselineVersions?: Record<string, string>;
 };
-type Audit = { tool_name: string; result: Record<string, unknown> };
+type Audit = {
+  tool_name: string;
+  result: Record<string, unknown>;
+};
 const isStructureTool = (tool: string) => STRUCTURE_DELIVERABLE_TOOLS.includes(tool);
-
 function audit(db: Database.Database, projectId: string, generationId: string): Audit[] {
   const rows = db
     .prepare(
@@ -76,14 +73,28 @@ function audit(db: Database.Database, projectId: string, generationId: string): 
     try {
       const result: unknown = JSON.parse(row.result_summary_json ?? 'null');
       return result && typeof result === 'object' && !Array.isArray(result)
-        ? [{ tool_name: row.tool_name, result: result as Record<string, unknown> }]
+        ? [
+            { tool_name: row.tool_name, result: result as Record<string, unknown> },
+            ...((result as Record<string, unknown>).inlinePlan &&
+            isDocumentDeliveryTool(row.tool_name)
+              ? [
+                  {
+                    tool_name: 'conversation.task.checkpoint',
+                    result: (
+                      result as {
+                        inlinePlan: Record<string, unknown>;
+                      }
+                    ).inlinePlan,
+                  },
+                ]
+              : []),
+          ]
         : [];
     } catch {
       return [];
     }
   });
 }
-
 function currentPlan(rows: Audit[]): Deliverable[] {
   const result = rows
     .filter(
@@ -96,7 +107,7 @@ function currentPlan(rows: Audit[]): Deliverable[] {
   return Array.isArray(result)
     ? (result as Deliverable[]).map((item) => {
         const repaired =
-          item.toolName === 'document.submit_draft' && item.documentKind === 'script'
+          isDocumentDeliveryTool(item.toolName) && item.documentKind === 'script'
             ? { ...item, documentKind: 'plan' }
             : { ...item };
         // A legacy destination page is not an output identity. Preserve the
@@ -109,7 +120,6 @@ function currentPlan(rows: Audit[]): Deliverable[] {
       })
     : [];
 }
-
 /** One durable target graph for completion, review and the context working set. */
 export function taskPlanScope(
   db: Database.Database,
@@ -120,14 +130,28 @@ export function taskPlanScope(
   const rows = audit(db, projectId, generationId);
   const items = currentPlan(rows);
   const allocation = evaluateDeliverables(db, projectId, rows, items, taskId);
-  return items.map((item) => ({
-    ...item,
-    targetIds: [
-      ...new Set([...(item.targetIds ?? []), ...(allocation?.assignedOutputs.get(item.key) ?? [])]),
-    ],
-  }));
+  const pendingByKey = new Map<string, Record<string, unknown>>(
+    allocation?.pending.map((item) => [item.key, item]),
+  );
+  return items.map((item) => {
+    const pending = pendingByKey.get(item.key);
+    const contentFailures: Record<string, unknown> = Object.fromEntries(
+      ['missingTexts', 'criteriaFailures'].flatMap((key) =>
+        Array.isArray(pending?.[key]) && pending[key].length ? [[key, pending[key]]] : [],
+      ),
+    );
+    return {
+      ...item,
+      targetIds: [
+        ...new Set([
+          ...(item.targetIds ?? []),
+          ...(allocation?.assignedOutputs.get(item.key) ?? []),
+        ]),
+      ],
+      ...(Object.keys(contentFailures).length ? { contentFailures } : {}),
+    };
+  });
 }
-
 /** Plans are model declarations, never authorization or proof of persistence. */
 export function saveTaskPlan(
   db: Database.Database,
@@ -231,7 +255,7 @@ export function saveTaskPlan(
       invalid('revisionReason', 'must explain the model plan correction in 1–2000 characters.');
     if (
       item.documentKind !== undefined &&
-      (item.toolName !== 'document.submit_draft' ||
+      (!isDocumentDeliveryTool(item.toolName) ||
         !DOCUMENT_KINDS.includes(item.documentKind as DocumentKind))
     )
       invalid(
@@ -273,28 +297,37 @@ export function saveTaskPlan(
         'requiredTexts',
         'must contain 1–200 distinct verbatim requirements, each 1–2000 characters.',
       );
-    validateTaskCriteria(item.criteria, item.toolName === 'document.submit_draft', item.dependsOn);
+    validateTaskCriteria(item.criteria, isDocumentDeliveryTool(item.toolName), item.dependsOn);
     keys.add(item.key);
     for (const id of item.targetIds ?? []) {
-      const target =
-        item.toolName === 'document.submit_draft'
-          ? (db
+      const target = isDocumentDeliveryTool(item.toolName)
+        ? (db
+            .prepare(
+              "SELECT kind FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
+            )
+            .get(id, projectId) as
+            | {
+                kind: string;
+              }
+            | undefined)
+        : isStructureTool(item.toolName)
+          ? db
+              .prepare('SELECT id FROM scenes WHERE id=? AND project_id=? AND archived_at IS NULL')
+              .get(id, projectId)
+          : db
               .prepare(
-                "SELECT kind FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
+                'SELECT s.id FROM shots s JOIN scenes c ON c.id=s.scene_id WHERE s.id=? AND c.project_id=? AND s.archived_at IS NULL AND c.archived_at IS NULL',
               )
-              .get(id, projectId) as { kind: string } | undefined)
-          : isStructureTool(item.toolName)
-            ? db
-                .prepare(
-                  'SELECT id FROM scenes WHERE id=? AND project_id=? AND archived_at IS NULL',
-                )
-                .get(id, projectId)
-            : db
-                .prepare(
-                  'SELECT s.id FROM shots s JOIN scenes c ON c.id=s.scene_id WHERE s.id=? AND c.project_id=? AND s.archived_at IS NULL AND c.archived_at IS NULL',
-                )
-                .get(id, projectId);
-      if (!target || (item.documentKind && (target as { kind: string }).kind !== item.documentKind))
+              .get(id, projectId);
+      if (
+        !target ||
+        (item.documentKind &&
+          (
+            target as {
+              kind: string;
+            }
+          ).kind !== item.documentKind)
+      )
         invalid(
           'targetIds',
           `${id} is not an existing active output of the requested type in this project. Omit targetIds for new outputs; workspace destinations are not output IDs.`,
@@ -309,22 +342,52 @@ export function saveTaskPlan(
       correctsEstimate &&
       previous?.origin === 'model_inference' &&
       !previous.sourceRequirementIds?.length;
-    if (
-      previous?.origin === 'user_requirement' &&
-      (item.origin !== previous.origin ||
-        item.intent !== previous.intent ||
-        previous.sourceRequirementIds?.some((id) => !item.sourceRequirementIds?.includes(id)))
-    )
-      invalid(
-        'origin',
-        'confirmed user obligations and their requirement sources cannot be removed.',
-      );
+    if (previous?.origin === 'user_requirement') {
+      const field =
+        item.origin !== previous.origin
+          ? 'origin'
+          : (item.intent ?? 'create') !== (previous.intent ?? 'create')
+            ? 'intent'
+            : previous.sourceRequirementIds?.some((id) => !item.sourceRequirementIds?.includes(id))
+              ? 'sourceRequirementIds'
+              : undefined;
+      if (field)
+        throw new TaskRepairError(
+          `deliverables[${index}].${field}: confirmed user obligations and their requirement sources cannot be removed. Preserve the registered ${field}; saved work does not change its original intent.`,
+          {
+            kind: 'plan',
+            code: 'TASK_PLAN_USER_OBLIGATION',
+            field,
+            index,
+            planKey: item.key,
+            expected: field === 'intent' ? (previous.intent ?? 'create') : previous[field],
+            received: item[field] ?? null,
+            instruction:
+              'Keep this stable key, original intent, requirement sources and final obligations. Bind the saved targetIds without changing create to reuse/revise/verify. Continue current readback, review or binding work; do not recreate saved outputs.',
+          },
+        );
+    }
     if (previous && previous.origin !== 'model_inference' && item.origin === 'model_inference')
       invalid('origin', 'cannot relabel a legacy or user obligation as a model inference.');
     const protectedTexts =
       previous?.requiredTexts?.filter(
         (text) => !correctsInference || requirements.some((r) => r.text.includes(text)),
       ) ?? [];
+    if (previous?.requireReferences && !item.requireReferences && !correctsInference)
+      throw new TaskRepairError(
+        `Cannot weaken deliverables[${index}].requireReferences: this is the final binding obligation, not a prerequisite for initial shot creation or review. Keep requireReferences=true and follow the current phase actions.`,
+        {
+          kind: 'plan',
+          code: 'TASK_PLAN_FINAL_REFERENCES_REQUIRED',
+          field: 'requireReferences',
+          index,
+          planKey: item.key,
+          expected: true,
+          received: item.requireReferences ?? null,
+          instruction:
+            'Preserve the registered final binding obligation. Empty initial reference arrays do not conflict with this final requirement. Continue missing shot outputs, current readback and shot review; then create/read/review materials and bind them. Do not revise the plan or create materials early to clear this future obligation.',
+        },
+      );
     if (!previous && !item.targetIds) {
       const equivalent = [...registered.values()].find(
         (existing) =>
@@ -347,7 +410,6 @@ export function saveTaskPlan(
         ((!correctsEstimate || previous.origin === 'user_requirement') &&
           (previous.minimumCount > item.minimumCount ||
             (previous.documentKind && previous.documentKind !== item.documentKind))) ||
-        (previous.requireReferences && !item.requireReferences && !correctsInference) ||
         protectedTexts.some((text) => !item.requiredTexts?.includes(text)) ||
         (previous.targetIds?.some((id) => !item.targetIds?.includes(id)) && !correctsInference) ||
         (previous.dependsOn?.some((id) => !item.dependsOn?.includes(id)) && !correctsInference) ||
@@ -379,7 +441,7 @@ export function saveTaskPlan(
                     db,
                     projectId,
                     id,
-                    item.toolName === 'document.submit_draft'
+                    isDocumentDeliveryTool(item.toolName)
                       ? 'document'
                       : isStructureTool(item.toolName)
                         ? 'scene'
@@ -413,7 +475,7 @@ export function saveTaskPlan(
       if (seen.has(key)) return false;
       seen.add(key);
       const source = merged.get(key)!;
-      return source.toolName !== 'document.submit_draft' || (source.dependsOn ?? []).some(hasShots);
+      return !isDocumentDeliveryTool(source.toolName) || (source.dependsOn ?? []).some(hasShots);
     };
     if (!(item.dependsOn ?? []).some(hasShots))
       throw new Error('shot_prompt_projection must depend on a shot/scene deliverable.');
@@ -448,7 +510,7 @@ export function saveTaskPlan(
     .filter(
       (item) =>
         (!item.intent || item.intent === 'create') &&
-        ['document.submit_draft', ...STRUCTURE_DELIVERABLE_TOOLS].includes(item.toolName),
+        [...CREATION_BINDING_TOOLS, ...STRUCTURE_DELIVERABLE_TOOLS].includes(item.toolName),
     )
     .flatMap((item) => {
       const outputId = executionStore.registerOutput(
@@ -505,7 +567,6 @@ export function saveTaskPlan(
     );
   return result;
 }
-
 function savedIds(result: Record<string, unknown>): string[] {
   const shots: unknown[] = Array.isArray(result.shots) ? result.shots : [];
   return shots.flatMap((value) =>
@@ -514,20 +575,11 @@ function savedIds(result: Record<string, unknown>): string[] {
       : [],
   );
 }
-
 function validReferences(db: Database.Database, projectId: string, raw: string | null): boolean {
   try {
     const ir: unknown = JSON.parse(raw ?? 'null');
-    if (
-      !ir ||
-      typeof ir !== 'object' ||
-      !('references' in ir) ||
-      !ir.references ||
-      typeof ir.references !== 'object' ||
-      Array.isArray(ir.references)
-    )
-      return false;
-    const references = ir.references as Record<string, unknown>;
+    if (!ir || typeof ir !== 'object' || Array.isArray(ir)) return false;
+    const references = ir as Record<string, unknown>;
     let count = 0;
     for (const [field, kind] of [
       ['characterDocumentIds', 'character'],
@@ -555,7 +607,6 @@ function validReferences(db: Database.Database, projectId: string, raw: string |
     return false;
   }
 }
-
 /** Check the actual current deliverables, not audit summaries or supplemental IR fields. */
 function currentOutputTexts(
   db: Database.Database,
@@ -564,40 +615,38 @@ function currentOutputTexts(
   ids: string[],
 ): string[] {
   return ids.flatMap((id) => {
-    if (item.toolName === 'document.submit_draft') {
+    if (isDocumentDeliveryTool(item.toolName)) {
       const row = db
         .prepare(
           `SELECT v.content_markdown FROM documents d JOIN document_versions v
         ON v.id=d.current_version_id AND v.document_id=d.id
         WHERE d.id=? AND d.project_id=? AND d.lifecycle_status='active'`,
         )
-        .get(id, projectId) as { content_markdown: string } | undefined;
+        .get(id, projectId) as
+        | {
+            content_markdown: string;
+          }
+        | undefined;
       return row ? [row.content_markdown] : [];
     }
     const rows = isStructureTool(item.toolName)
       ? db
           .prepare(
-            `SELECT s.authoring_ir_json FROM shots s JOIN scenes c ON c.id=s.scene_id
+            `SELECT s.prompt FROM shots s JOIN scenes c ON c.id=s.scene_id
           WHERE c.id=? AND c.project_id=? AND c.archived_at IS NULL AND s.archived_at IS NULL`,
           )
           .all(id, projectId)
       : db
           .prepare(
-            `SELECT s.authoring_ir_json FROM shots s JOIN scenes c ON c.id=s.scene_id
+            `SELECT s.prompt FROM shots s JOIN scenes c ON c.id=s.scene_id
           WHERE s.id=? AND c.project_id=? AND c.archived_at IS NULL AND s.archived_at IS NULL`,
           )
           .all(id, projectId);
-    return (rows as Array<{ authoring_ir_json: string | null }>).flatMap((row) => {
-      try {
-        const ir = JSON.parse(row.authoring_ir_json ?? 'null') as { prompt?: unknown } | null;
-        return typeof ir?.prompt === 'string' ? [ir.prompt] : [];
-      } catch {
-        return [];
-      }
-    });
+    return (rows as Array<{ prompt: string | null }>).flatMap((row) =>
+      typeof row.prompt === 'string' ? [row.prompt] : [],
+    );
   });
 }
-
 export function assessTaskDeliverables(
   db: Database.Database,
   projectId: string,
@@ -631,7 +680,6 @@ export function assessTaskDeliverables(
     ...(result.partialReason ? { partialReason: result.partialReason } : {}),
   };
 }
-
 /** Reconcile legacy implicit writes using the same persisted allocation as completion. */
 export function reconcileTaskOutputAllocations(
   db: Database.Database,
@@ -653,14 +701,21 @@ export function reconcileTaskOutputAllocations(
     .prepare(
       'SELECT generation_id FROM agent_task_generations WHERE task_id=? ORDER BY ordinal DESC LIMIT 1',
     )
-    .get(taskId) as { generation_id: string } | undefined;
+    .get(taskId) as
+    | {
+        generation_id: string;
+      }
+    | undefined;
   if (!generation) return;
   const rows = audit(db, projectId, generation.generation_id);
   const allocation = evaluateDeliverables(db, projectId, rows, currentPlan(rows));
   if (!allocation) return;
   const outputs = db
     .prepare('SELECT id,plan_key FROM agent_execution_outputs WHERE project_id=? AND task_id=?')
-    .all(projectId, taskId) as Array<{ id: string; plan_key: string }>;
+    .all(projectId, taskId) as Array<{
+    id: string;
+    plan_key: string;
+  }>;
   const store = new AgentExecutionStore(db);
   for (const output of outputs)
     store.adoptAllocatedOutput(
@@ -670,7 +725,6 @@ export function reconcileTaskOutputAllocations(
       allocation.assignedOutputs.get(output.plan_key) ?? [],
     );
 }
-
 /** Shared allocation calculation keeps plan validation and completion consistent. */
 function evaluateDeliverables(
   db: Database.Database,
@@ -690,7 +744,7 @@ function evaluateDeliverables(
   const savedDocuments = new Map<string, string>();
   for (const row of rows) {
     if (
-      row.tool_name !== 'document.submit_draft' ||
+      !isDocumentDeliveryTool(row.tool_name) ||
       row.result.status !== 'draft_saved' ||
       typeof row.result.documentId !== 'string' ||
       typeof row.result.documentVersionId !== 'string'
@@ -702,7 +756,10 @@ function evaluateDeliverables(
           "WHERE d.id=? AND d.project_id=? AND v.id=? AND d.lifecycle_status='active'",
       )
       .get(row.result.documentId, projectId, row.result.documentVersionId) as
-      { kind: string } | undefined;
+      | {
+          kind: string;
+        }
+      | undefined;
     if (document) savedDocuments.set(row.result.documentId, document.kind);
   }
   // Independent unbound deliverables need distinct persisted outputs. One plan
@@ -718,12 +775,21 @@ function evaluateDeliverables(
   for (const row of rows) {
     if (row.result.status !== 'task_plan_saved' || !Array.isArray(row.result.outputBindings))
       continue;
-    for (const binding of row.result.outputBindings as Array<{ outputId?: string; key?: string }>)
+    for (const binding of row.result.outputBindings as Array<{
+      outputId?: string;
+      key?: string;
+    }>)
       if (typeof binding.outputId === 'string' && typeof binding.key === 'string')
         outputOwners.set(binding.outputId, binding.key);
   }
   const explicitOwner = (row: (typeof rows)[number]) => {
-    const operation = (row.result.execution as { operationKey?: string } | undefined)?.operationKey;
+    const operation = (
+      row.result.execution as
+        | {
+            operationKey?: string;
+          }
+        | undefined
+    )?.operationKey;
     const outputId = operation?.match(/^output:([^:]+):\d+$/)?.[1];
     return outputId ? outputOwners.get(outputId) : undefined;
   };
@@ -750,12 +816,11 @@ function evaluateDeliverables(
   for (const row of rows) {
     const owner = rowOwner(row);
     if (!owner) continue;
-    const ids =
-      row.tool_name === 'document.submit_draft'
-        ? [row.result.documentId]
-        : isStructureTool(row.tool_name)
-          ? row.result.sceneIds
-          : savedIds(row.result);
+    const ids = isDocumentDeliveryTool(row.tool_name)
+      ? [row.result.documentId]
+      : isStructureTool(row.tool_name)
+        ? row.result.sceneIds
+        : savedIds(row.result);
     if (Array.isArray(ids))
       for (const id of ids)
         if (typeof id === 'string')
@@ -772,7 +837,13 @@ function evaluateDeliverables(
     // Persistence and validation are independent. An invalid binding needs an
     // in-place repair, not another copy of an already committed scene/shot.
     const persisted = new Set<string>();
-    const invalidReferences = new Map<string, { outputId: string; shotId: string }>();
+    const invalidReferences = new Map<
+      string,
+      {
+        outputId: string;
+        shotId: string;
+      }
+    >();
     for (const row of rows) {
       if (item.intent === 'reuse' || item.intent === 'verify') continue;
       const createdShots =
@@ -797,7 +868,7 @@ function evaluateDeliverables(
           item.targetIds?.includes(id)
         );
       };
-      if (item.toolName === 'document.submit_draft') {
+      if (isDocumentDeliveryTool(item.toolName)) {
         const result = row.result;
         if (
           result.status !== 'draft_saved' ||
@@ -811,7 +882,10 @@ function evaluateDeliverables(
           WHERE d.id=? AND d.project_id=? AND v.id=? AND d.current_version_id=v.id AND d.lifecycle_status='active'`,
           )
           .get(result.documentId, projectId, result.documentVersionId) as
-          { kind: string } | undefined;
+          | {
+              kind: string;
+            }
+          | undefined;
         if (
           doc &&
           belongsToItem(result.documentId) &&
@@ -836,14 +910,15 @@ function evaluateDeliverables(
           )
             continue;
           const shots = db
-            .prepare(
-              'SELECT id,authoring_ir_json FROM shots WHERE scene_id=? AND archived_at IS NULL',
-            )
-            .all(id) as Array<{ id: string; authoring_ir_json: string | null }>;
+            .prepare('SELECT id,bindings_json FROM shots WHERE scene_id=? AND archived_at IS NULL')
+            .all(id) as Array<{
+            id: string;
+            bindings_json: string | null;
+          }>;
           if (shots.length && shots.every((shot) => shotIds.has(shot.id))) {
             persisted.add(id);
             const invalid = item.requireReferences
-              ? shots.filter((shot) => !validReferences(db, projectId, shot.authoring_ir_json))
+              ? shots.filter((shot) => !validReferences(db, projectId, shot.bindings_json))
               : [];
             for (const shot of invalid)
               invalidReferences.set(shot.id, { outputId: id, shotId: shot.id });
@@ -865,11 +940,17 @@ function evaluateDeliverables(
           if (!belongsToItem(id)) continue;
           const shot = db
             .prepare(
-              `SELECT s.scene_id,s.authoring_ir_json FROM shots s JOIN scenes c ON c.id=s.scene_id
+              `SELECT s.scene_id,s.prompt,s.timing_json,s.bindings_json FROM shots s JOIN scenes c ON c.id=s.scene_id
                WHERE s.id=? AND c.project_id=? AND s.archived_at IS NULL AND c.archived_at IS NULL`,
             )
             .get(id, projectId) as
-            { scene_id: string; authoring_ir_json: string | null } | undefined;
+            | {
+                scene_id: string;
+                prompt: string | null;
+                timing_json: string | null;
+                bindings_json: string | null;
+              }
+            | undefined;
           if (createdShots) {
             if (
               !shot ||
@@ -878,21 +959,18 @@ function evaluateDeliverables(
             )
               continue;
             try {
-              const ir = JSON.parse(shot.authoring_ir_json ?? 'null') as {
-                prompt?: unknown;
-                timing?: unknown;
-              } | null;
+              const timing: unknown = JSON.parse(shot.timing_json ?? 'null');
               if (item.toolName === 'scene.update_shot_timings') {
-                if (!ir?.timing) continue;
-                validateProductionTiming(ir.timing);
-              } else if (typeof ir?.prompt !== 'string' || !ir.prompt.trim()) continue;
+                if (!timing) continue;
+                validateProductionTiming(timing);
+              } else if (typeof shot.prompt !== 'string' || !shot.prompt.trim()) continue;
             } catch {
               continue;
             }
           }
           if (shot) {
             persisted.add(id);
-            if (!item.requireReferences || validReferences(db, projectId, shot.authoring_ir_json))
+            if (!item.requireReferences || validReferences(db, projectId, shot.bindings_json))
               saved.add(id);
             else invalidReferences.set(id, { outputId: id, shotId: id });
           }
@@ -907,7 +985,9 @@ function evaluateDeliverables(
           ? (
               db
                 .prepare('SELECT id FROM shots WHERE scene_id=? AND archived_at IS NULL')
-                .all(id) as Array<{ id: string }>
+                .all(id) as Array<{
+                id: string;
+              }>
             ).map((s) => s.id)
           : [id];
         const artifacts = ids.map((target) =>
@@ -915,7 +995,7 @@ function evaluateDeliverables(
             db,
             projectId,
             target,
-            item.toolName === 'document.submit_draft' ? 'document' : 'shot',
+            isDocumentDeliveryTool(item.toolName) ? 'document' : 'shot',
           ),
         );
         const exists = artifacts.length > 0 && artifacts.every((a) => Boolean(a));
@@ -929,10 +1009,10 @@ function evaluateDeliverables(
                 db,
                 projectId,
                 (
-                  db.prepare('SELECT authoring_ir_json FROM shots WHERE id=?').get(shotId) as {
-                    authoring_ir_json: string;
+                  db.prepare('SELECT bindings_json FROM shots WHERE id=?').get(shotId) as {
+                    bindings_json: string;
                   }
-                ).authoring_ir_json,
+                ).bindings_json,
               ),
             );
           if (completeRead && refsValid) saved.add(id);
@@ -947,7 +1027,7 @@ function evaluateDeliverables(
               db,
               projectId,
               id,
-              item.toolName === 'document.submit_draft'
+              isDocumentDeliveryTool(item.toolName)
                 ? 'document'
                 : isStructureTool(item.toolName)
                   ? 'scene'
@@ -1001,7 +1081,7 @@ function evaluateDeliverables(
       persistedCount < item.minimumCount &&
       allocatedElsewhere.some((id) => reserved.get(key)?.has(id));
     const otherDocumentKinds =
-      item.toolName === 'document.submit_draft' && item.documentKind
+      isDocumentDeliveryTool(item.toolName) && item.documentKind
         ? [...savedDocuments].filter(([, kind]) => kind !== item.documentKind)
         : [];
     return savedCount >= item.minimumCount && !missingTargetIds.length && !missingTexts.length
@@ -1017,11 +1097,11 @@ function evaluateDeliverables(
             ...(repairOutputs.length ? { repairRequired: true, repairOutputs } : {}),
             countUnit: isStructureTool(item.toolName)
               ? 'scenes'
-              : item.toolName === 'document.submit_draft'
+              : isDocumentDeliveryTool(item.toolName)
                 ? 'documents'
                 : 'shots',
             planRevision:
-              'Correct model estimates on the same key with revisionReason; counts use countUnit. Explicit model_inference assumptions may be revised with evidence; actual user and legacy exact requirements remain protected. Existing valid work may use intent=reuse/verify with real targetIds; a requested revision still requires a changed version and current readback. Do not create surplus copies or rewrite correct content to obtain receipts.',
+              'Correct model estimates on the same key with revisionReason; counts use countUnit. Preserve registered user intent and requirement sources. A create obligation stays create after saving: bind real targetIds and follow the current phase, without recreating outputs. reuse/verify describe work that was already existing when that obligation was first registered, not a transition after creation. persistedCount is saved identity count; savedCount also checks final obligations such as bindings. remainingCount=0 does not mean review or binding passed. Explicit model_inference assumptions may be revised with evidence; a requested revision still needs a changed version and current readback.',
             nextAction: needsPlanRepair
               ? {
                   kind: 'repair_plan',
@@ -1048,17 +1128,16 @@ function evaluateDeliverables(
                         kind: 'repair_outputs',
                         toolName: 'scene.update_shot_prompts',
                         instruction:
-                          'The outputs already exist. Follow repairOutputs to read each real shot and its current rowVersion, then repair authoringIR.references in place with scene.update_shot_prompts and expectedRowVersion. Preserve prompt text, timing, saved scene/shot IDs and source order. Active draft material documents are valid references; copy exact documentId values from saved receipts or project.structure.read (workspace=characters, kind=document, documentKind identifies character/scene/prop). A rejected ID does not mean drafts are unsupported. Do not remove required bindings or recreate scenes/shots to obtain new receipts.',
+                          'The outputs already exist. Follow repairOutputs to read each real shot and its current rowVersion, then repair bindings in place with scene.update_shot_prompts and expectedRowVersion. Preserve prompt text, timing, saved scene/shot IDs and source order. Active draft material documents are valid references; copy exact documentId values from saved receipts or project.structure.read (workspace=characters, kind=document, documentKind identifies character/scene/prop). A rejected ID does not mean drafts are unsupported. Do not remove required bindings or recreate scenes/shots to obtain new receipts.',
                       }
                     : missingTexts.length
                       ? {
                           kind: 'repair_outputs',
                           obligationKey: item.key,
                           planChangeRequired: false,
-                          toolName:
-                            item.toolName === 'document.submit_draft'
-                              ? 'document.submit_draft'
-                              : 'scene.update_shot_prompts',
+                          toolName: isDocumentDeliveryTool(item.toolName)
+                            ? item.toolName
+                            : 'scene.update_shot_prompts',
                           targetIds: textTargets.flatMap((id) =>
                             isStructureTool(item.toolName)
                               ? (
@@ -1066,7 +1145,9 @@ function evaluateDeliverables(
                                     .prepare(
                                       'SELECT id FROM shots WHERE scene_id=? AND archived_at IS NULL',
                                     )
-                                    .all(id) as Array<{ id: string }>
+                                    .all(id) as Array<{
+                                    id: string;
+                                  }>
                                 ).map((shot) => shot.id)
                               : [id],
                           ),
@@ -1140,7 +1221,7 @@ function evaluateDeliverables(
         criteriaFailures: criteriaFailures.get(item.key),
         countUnit: isStructureTool(item.toolName)
           ? 'scenes'
-          : item.toolName === 'document.submit_draft'
+          : isDocumentDeliveryTool(item.toolName)
             ? 'documents'
             : 'shots',
         planRevision:
@@ -1163,18 +1244,22 @@ function evaluateDeliverables(
       : {}),
   };
 }
-
 /** Combine optional model planning with the independently frozen task contract. */
 export function assessTaskCompletion(
   db: Database.Database,
   projectId: string,
   generationId: string,
   taskId: string,
-): { pending: Array<Record<string, unknown>>; partialReason?: string } | undefined {
+):
+  | {
+      pending: Array<Record<string, unknown>>;
+      partialReason?: string;
+    }
+  | undefined {
+  if (isBundleTask(db, taskId)) return { pending: bundleCompletion(db, projectId, taskId) };
   const planned = assessTaskDeliverables(db, projectId, generationId, taskId);
-  const required = scriptToMediaCompletionPending(db, projectId, generationId, taskId);
-  if (!planned && !required) return undefined;
-  const pending = planned?.pending.length ? planned.pending : (required ?? []);
+  if (!planned) return undefined;
+  const pending = planned.pending;
   const partial = planned?.partialReason
     ? audit(db, projectId, generationId)
         .filter((row) => row.result.status === 'task_partial_reported')
@@ -1191,20 +1276,26 @@ export function assessTaskCompletion(
       : {}),
   };
 }
-
 function isNonRetryableBlocker(result?: StoredToolResult): boolean {
   if (result?.status !== 'failed') return false;
   try {
-    const value = JSON.parse(result.content) as { error?: { retryable?: unknown } };
+    const value = JSON.parse(result.content) as {
+      error?: {
+        retryable?: unknown;
+      };
+    };
     return value.error?.retryable === false;
   } catch {
     return false;
   }
 }
-
 /** Any outstanding output or check is work, not proof of an execution blocker. */
 export function assertTaskPartialAllowed(
-  progress: { pending: Array<Record<string, unknown>> } | undefined,
+  progress:
+    | {
+        pending: Array<Record<string, unknown>>;
+      }
+    | undefined,
   blockingResult?: StoredToolResult,
 ): void {
   if (!progress?.pending.length) return;

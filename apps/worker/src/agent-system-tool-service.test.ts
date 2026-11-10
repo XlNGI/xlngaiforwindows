@@ -14,10 +14,8 @@ import { ContentService } from './content-service.js';
 import { NovelService } from './novel-service.js';
 import { ProjectService } from './project-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
-
 const directories: string[] = [];
 const projects: ProjectService[] = [];
-
 it('declares questions as a core system tool and returns a persisted form receipt', async () => {
   const { service, content, project, current, identity } = await setup();
   const user = content.saveMessage({
@@ -55,12 +53,10 @@ it('declares questions as a core system tool and returns a persisted form receip
     workflow.getTask({ taskId: task.id }).events.find((event) => event.userInput)?.userInput?.id,
   ).toBe(receipt.formId);
 });
-
 afterEach(async () => {
   for (const project of projects.splice(0)) project.close();
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
-
 async function setup() {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-system-tools-'));
   directories.push(directory);
@@ -188,7 +184,6 @@ async function setup() {
     novels,
   };
 }
-
 describe('AgentSystemToolService', () => {
   it('lets the model route a new generation to an independent or completed follow-up task', async () => {
     const { service, identity, project, current } = await setup();
@@ -285,8 +280,8 @@ describe('AgentSystemToolService', () => {
       'conversation.task.route',
       {
         decision: 'follow_up',
-        targetGenerationId: ids.target,
         rationale: '用户明确要求继续上一轮',
+        targetGenerationId: ids.target,
       },
       { ...identity, taskId: ids.task, toolCallId: 'route-call' },
     );
@@ -329,7 +324,7 @@ describe('AgentSystemToolService', () => {
     });
     const scene = content.saveScene({
       title: '同名场次',
-      videoPrompt: '司机转身，他没有说话。',
+      prompt: '司机转身，他没有说话。',
       characterBindings: [{ characterDocumentId: actor.id }],
     });
     expect(service.execute('production.defaults.get', {}, identity)).toEqual({
@@ -345,10 +340,10 @@ describe('AgentSystemToolService', () => {
       rowVersion: scene.rowVersion,
       issues: [],
     });
-    expect(JSON.stringify(result)).not.toContain(scene.videoPrompt);
+    expect(JSON.stringify(result)).not.toContain(scene.prompt);
     expect(
       service.execute('scene.read', { sceneId: scene.id, view: 'text' }, identity),
-    ).toMatchObject({ text: scene.videoPrompt });
+    ).toMatchObject({ text: scene.prompt });
     const mediaRead = service.execute('scene.read', { sceneId: scene.id, view: 'media' }, identity);
     expect(mediaRead.status).toBe('read');
     expect(JSON.stringify(mediaRead)).toContain('saved-production-bindings');
@@ -366,7 +361,6 @@ describe('AgentSystemToolService', () => {
     const { service, identity, novels } = await setup();
     novels.getProfile({ createIfMissing: true });
     const chapter = novels.saveChapter({ title: '第一章 雾港' });
-
     expect(service.execute('novel.chapter.list', {}, identity)).toMatchObject({
       status: 'succeeded',
       chapters: [
@@ -378,7 +372,6 @@ describe('AgentSystemToolService', () => {
         }),
       ],
     });
-
     const pending = service.prepareConfirmation(
       'novel.chapter.archive',
       { chapterId: chapter.id, expectedRowVersion: chapter.rowVersion },
@@ -393,7 +386,6 @@ describe('AgentSystemToolService', () => {
       },
     });
     expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
-
     const archived = service.executeConfirmed(
       'novel.chapter.archive',
       pending.executionArguments,
@@ -402,7 +394,6 @@ describe('AgentSystemToolService', () => {
     expect(archived).toMatchObject({ status: 'archived', chapter: { id: chapter.id } });
     const archivedChapter = novels.listChapters({ includeArchived: true })[0]!;
     expect(archivedChapter.lifecycleStatus).toBe('archived');
-
     const restored = service.executeConfirmed(
       'novel.chapter.restore',
       { chapterId: chapter.id, expectedRowVersion: archivedChapter.rowVersion },
@@ -411,7 +402,6 @@ describe('AgentSystemToolService', () => {
     expect(restored).toMatchObject({ status: 'restored', chapter: { id: chapter.id } });
     expect(novels.listChapters({ includeArchived: true })[0]?.lifecycleStatus).toBe('active');
   });
-
   it('exposes chapter metadata editing without body submission and rejects unsupported mutations', async () => {
     const { service, identity, novels } = await setup();
     const chapter = novels.saveChapter({
@@ -464,7 +454,6 @@ describe('AgentSystemToolService', () => {
       'updated elsewhere',
     );
   });
-
   it('rejects stale or foreign novel chapter lifecycle requests', async () => {
     const first = await setup();
     first.novels.getProfile({ createIfMissing: true });
@@ -476,7 +465,6 @@ describe('AgentSystemToolService', () => {
         first.identity,
       ),
     ).toThrow('AGENT_TOOL_ARGUMENTS_INVALID');
-
     const second = await setup();
     expect(() =>
       second.service.prepareConfirmation(
@@ -486,7 +474,6 @@ describe('AgentSystemToolService', () => {
       ),
     ).toThrow('AGENT_TOOL_PROJECT_SCOPE');
   });
-
   it('returns bounded project, conversation, asset, and redacted settings summaries', async () => {
     const { service, identity } = await setup();
     const project = service.execute('project.get_context', {}, identity);
@@ -497,7 +484,6 @@ describe('AgentSystemToolService', () => {
     );
     const assets = service.execute('asset.search', { limit: 10 }, identity);
     const settings = service.execute('settings.get', { capability: 'text' }, identity);
-
     for (const result of [project, conversations, assets, settings]) {
       expect(() => unifiedAgentToolRegistry.serializeResult(result)).not.toThrow();
     }
@@ -508,12 +494,10 @@ describe('AgentSystemToolService', () => {
     expect(JSON.stringify(assets)).not.toMatch(/relativePath|contentHash|sourceUrl|token=secret/u);
     expect(JSON.stringify(settings)).not.toMatch(/baseUrl|remoteModelId|private\.example/u);
   });
-
   it('returns only the normalized media task summary', async () => {
     const { service, identity } = await setup();
     expect(service.availableOperations()).toContain('media.task.get');
     const result = service.execute('media.task.get', { taskId: 'media-task' }, identity);
-
     expect(result).toMatchObject({
       status: 'succeeded',
       task: { taskId: 'media-task', kind: 'video', state: 'polling', resultAssetIds: [] },
@@ -522,17 +506,14 @@ describe('AgentSystemToolService', () => {
       /rootPath|relativePath|providerBody|providerResponse/iu,
     );
   });
-
   it('omits media task inspection when its service is not configured', async () => {
     const { project, content, assets, settings, identity } = await setup();
     const service = new AgentSystemToolService(project, content, assets, settings);
-
     expect(service.availableOperations()).not.toContain('media.task.get');
     expect(() => service.execute('media.task.get', { taskId: 'media-task' }, identity)).toThrow(
       'Media task inspection is not configured for this runtime.',
     );
   });
-
   it('renames only the current conversation and rejects a model-provided conversation ID', async () => {
     const { service, identity, content, current } = await setup();
     expect(service.execute('conversation.rename', { title: 'Renamed' }, identity)).toMatchObject({
@@ -551,7 +532,6 @@ describe('AgentSystemToolService', () => {
       ),
     ).toThrow('unsupported field conversationId');
   });
-
   it('rejects stale sessions and cross-project asset identifiers', async () => {
     const { service, identity } = await setup();
     expect(() =>

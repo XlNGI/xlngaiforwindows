@@ -1,0 +1,481 @@
+{
+  "recordedAt": "2026-11-09T16:43:35.084Z",
+  "scope": "Revision 10 source fixes passed offline validation; the subsequent same-input real-provider run also failed. Prior revision 9 evidence remains historical and unchanged.",
+  "checks": {
+    "test": {
+      "command": "pnpm test",
+      "status": "passed",
+      "exitCode": 0,
+      "files": 232,
+      "tests": 2714,
+      "byPackage": {
+        "context": 8,
+        "contracts": 55,
+        "llm": 32,
+        "desktop": 813,
+        "generationAdapters": 80,
+        "persistence": 101,
+        "worker": 1625
+      }
+    },
+    "focused": {
+      "status": "passed",
+      "files": 4,
+      "tests": 41,
+      "note": "Contracts rebuilt before final successful focused execution; initial stale dist revision import failure was resolved."
+    },
+    "typecheck": {
+      "command": "pnpm typecheck",
+      "status": "passed",
+      "exitCode": 0
+    },
+    "lint": {
+      "command": "pnpm lint",
+      "status": "passed",
+      "exitCode": 0
+    },
+    "format": {
+      "command": "pnpm format:check",
+      "status": "passed"
+    },
+    "build": {
+      "command": "pnpm build",
+      "status": "passed",
+      "exitCode": 0
+    },
+    "sidecarBuild": {
+      "command": "pnpm --filter @ai-video/worker build:sidecar",
+      "status": "passed",
+      "exitCode": 0
+    },
+    "sidecar": {
+      "command": "pnpm --filter @ai-video/worker validate:production-bundle-sidecar",
+      "status": "passed",
+      "exitCode": 0,
+      "protocols": [
+        "openai-responses",
+        "openai-chat-completions"
+      ],
+      "offline": true,
+      "actualProvider": false,
+      "installedInstanceUpdated": false,
+      "workerSha256": "bee38373b0b858635d611aed1d48f3b0125fd695302e4515c64b7eb4831c8be3",
+      "reports": [
+        {
+          "protocol": "openai-responses",
+          "taskId": "03184f77-6353-4c82-8ff5-e37017b130ea",
+          "status": "completed",
+          "counts": {
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "voice": 2,
+            "plan": 0,
+            "shot": 1,
+            "storyScene": 1
+          },
+          "timing": {
+            "businessSaved": true,
+            "readbackVerified": true,
+            "counts": {
+              "voice": 2,
+              "character": 2,
+              "scene": 1,
+              "prop": 1,
+              "storyScene": 1,
+              "shot": 1
+            },
+            "requestedAt": "2026-11-09T16:38:20.554Z",
+            "preparationMs": 6,
+            "taskCreatedAt": "2026-11-09T16:38:20.560Z",
+            "elapsedMs": 2181
+          },
+          "independentReopenReadback": true,
+          "lostAcknowledgementReplay": true,
+          "multipart": true,
+          "mediaJobs": 0,
+          "paidRequests": 0,
+          "elapsedMs": 3007.5474
+        },
+        {
+          "protocol": "openai-chat-completions",
+          "taskId": "34a3744d-49a3-4a88-aa8a-f71eeebf3a9e",
+          "status": "completed",
+          "counts": {
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "voice": 2,
+            "plan": 0,
+            "shot": 1,
+            "storyScene": 1
+          },
+          "timing": {
+            "businessSaved": true,
+            "readbackVerified": true,
+            "counts": {
+              "voice": 2,
+              "character": 2,
+              "scene": 1,
+              "prop": 1,
+              "storyScene": 1,
+              "shot": 1
+            },
+            "requestedAt": "2026-11-09T16:38:23.547Z",
+            "preparationMs": 7,
+            "taskCreatedAt": "2026-11-09T16:38:23.554Z",
+            "elapsedMs": 2189
+          },
+          "independentReopenReadback": true,
+          "lostAcknowledgementReplay": true,
+          "multipart": true,
+          "mediaJobs": 0,
+          "paidRequests": 0,
+          "elapsedMs": 2962.4090999999994
+        }
+      ]
+    },
+    "m7": {
+      "command": "pnpm --filter @ai-video/worker validate:m7-sidecar",
+      "status": "passed",
+      "exitCode": 0,
+      "offline": true,
+      "report": {
+        "projectId": "f31b0a01-d626-4a9c-aac8-c0295fddf010",
+        "malformedJsonRecovery": true,
+        "offlineSampleProject": true,
+        "sampleDocumentCount": 5,
+        "cacheBoundaryVerified": true,
+        "diagnosticPackageFiles": 2,
+        "diagnosticRedactionVerified": true,
+        "integrityVerified": true
+      }
+    },
+    "diff": {
+      "command": "git diff --check",
+      "status": "passed"
+    },
+    "documentationLinks": {
+      "status": "passed",
+      "markdownFiles": [
+        "docs/ONE-CLICK-PRODUCTION-BUNDLE-IMPLEMENTATION-PLAN.md",
+        "docs/code-traces/2026-11-10-one-click-bundle-recovery.md",
+        "docs/code-traces/2026-11-10-one-click-bundle-real-acceptance.md"
+      ],
+      "checkedRelativeLinks": 30
+    }
+  },
+  "changedFiles": [
+    {
+      "path": "apps/worker/src/agent-prepared-arguments.ts",
+      "sha256": "23edf85edfc778464f6f05368ab2793862ea7ac412c082e2ac9c4fee4d66d3e1"
+    },
+    {
+      "path": "apps/worker/src/agent-delivery-capabilities.ts",
+      "sha256": "c7befe47892510dd893af31e82651233a19455aa48326ac45f9fdac87a370199"
+    },
+    {
+      "path": "apps/worker/src/agent-provider-tool-gateway.ts",
+      "sha256": "f695b006aeb63a3b6e9d76e927b2b80c618423983cda68765f68c25e192aacb7"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-schema.ts",
+      "sha256": "cf3a62f534fab8f6dfcfced27fbb70d3d54bcd56eb3d9c5934cbce9308cbd52d"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-state.ts",
+      "sha256": "9d328034ea31f651208731b4f16a95a56961dfd7ef7c971e5197db3a975f218d"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-validation.ts",
+      "sha256": "2b4fa6b2555e32cb500fb52928194f1db20a7ee614713b7277ea0acc67a89e3a"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-recovery.test.ts",
+      "sha256": "8eb318fecf0ff8f55c18529fb73480bc59f9369b7ad8438e7f32574002e44274"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-validation.test.ts",
+      "sha256": "41206989b6c98e499669e459d5369e3d3648d5ce7791d588aed892a74e10fc81"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-loop.test.ts",
+      "sha256": "7084e8e0630519ecbfdea981d6f904ee7d4798120fc6796c99b14f875ce28848"
+    },
+    {
+      "path": "apps/worker/src/production-skill-service.ts",
+      "sha256": "a655a687ee6323d2a3ff3744fe0549c445244668270842e0cfbca874e62f06d7"
+    },
+    {
+      "path": "apps/worker/src/agent-tool-definitions.ts",
+      "sha256": "094af51e6a9982b1d20da89b8829adb9ef09e0cc3db1a5faa315112e5d6b4426"
+    },
+    {
+      "path": "apps/worker/scripts/validate-production-bundle-sidecar.mjs",
+      "sha256": "edd58f52151a0f624c50783f0a466546d23db4815bcbb8dddf7cf34af2adf5bc"
+    },
+    {
+      "path": "packages/contracts/src/production-bundle.ts",
+      "sha256": "521abc980ebdc1dca9b40c0db74fef9d9061c81572eeae2d9cbae0bdd9b1f7d6"
+    },
+    {
+      "path": "packages/contracts/src/production-skills.ts",
+      "sha256": "47d794f8c3531d25db7a945f10f65f304453ca0c4ea646b5e3faabfaed5cffcf"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-service.ts",
+      "sha256": "fd42282d6f1fcc834de9176cd47df08cd340e2cc9af4b77e045c537b1f1233b1"
+    },
+    {
+      "path": "apps/worker/src/production-bundle-service.test.ts",
+      "sha256": "d193b140cbe7583a18ebaf39e537c3c202291cdf295c02b35434e23fda9ea854"
+    },
+    {
+      "path": "apps/worker/src/agent-provider-loop-service.ts",
+      "sha256": "78493a35e76749b34fc211d1ecdaeb41795d5a20842a25931b463be6ab3687a3"
+    },
+    {
+      "path": "apps/worker/src/agent-task-checkpoint-schema.ts",
+      "sha256": "bd9306826246ffb45fc0794144541525c24f76bc8c0b25a18750f057206ca092"
+    }
+  ],
+  "latestBuild": {
+    "workerSha256": "bee38373b0b858635d611aed1d48f3b0125fd695302e4515c64b7eb4831c8be3",
+    "skillRevision": 10,
+    "installedInstanceUpdated": false,
+    "realProviderValidation": {
+      "performed": true,
+      "outcome": "failed",
+      "acceptancePassed": false,
+      "taskId": "8619d689-56f0-4dc9-a82b-9640cb7af9b5",
+      "report": "./2026-11-10-one-click-bundle-revision10-real-acceptance.md",
+      "evidence": "./2026-11-10-one-click-bundle-revision10-real-acceptance.json"
+    }
+  },
+  "realAcceptance": {
+    "status": "failed",
+    "taskId": "ab460f2f-5f45-43af-a60f-02e472dc194e",
+    "generationId": "33460f2d-c3c7-4386-82c3-488f4388f382",
+    "projectId": "6612140b-be6a-4485-a48b-4772a49916a8",
+    "root": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012",
+    "completedAt": "2026-11-09T16:26:54.222Z",
+    "errorCode": "BUNDLE_NO_PROGRESS_LIMIT",
+    "elapsedMs": 867807,
+    "realModelRequests": 25,
+    "candidateCount": 17,
+    "businessArtifactCount": 0,
+    "acceptedReviewCount": 0,
+    "committed": false,
+    "verified": false,
+    "workerSha256": "d2fa34d0ba857e2e73be27d4aa8d35187030211d446a74632aab9d7521d24d1f",
+    "actuallyReadSkillRevision": 9,
+    "snapshotSkillRevision": 8,
+    "semanticContentAcceptance": "failed",
+    "installedInstanceUpdated": false,
+    "report": "./2026-11-10-one-click-bundle-real-acceptance.md",
+    "evidence": "./2026-11-10-one-click-bundle-real-acceptance.json",
+    "postTerminalSourceFixesActuallyRetestedWithProvider": false
+  },
+  "firstStageFrozenValidation": {
+    "recordedAt": "2026-11-09T16:18:57.803Z",
+    "skillRevision": 9,
+    "workerSha256": "d2fa34d0ba857e2e73be27d4aa8d35187030211d446a74632aab9d7521d24d1f",
+    "checks": {
+      "test": {
+        "command": "pnpm test",
+        "status": "passed",
+        "files": 232,
+        "tests": 2712,
+        "byPackage": {
+          "context": 8,
+          "contracts": 55,
+          "llm": 32,
+          "desktop": 813,
+          "generationAdapters": 80,
+          "persistence": 101,
+          "worker": 1623
+        }
+      },
+      "typecheck": {
+        "command": "pnpm typecheck; pnpm --filter @ai-video/worker typecheck",
+        "status": "passed"
+      },
+      "lint": {
+        "command": "pnpm lint",
+        "status": "passed"
+      },
+      "format": {
+        "command": "pnpm format:check",
+        "status": "passed"
+      },
+      "build": {
+        "command": "pnpm build",
+        "status": "passed"
+      },
+      "sidecar": {
+        "command": "pnpm --filter @ai-video/worker validate:production-bundle-sidecar",
+        "status": "passed",
+        "protocols": [
+          "openai-responses",
+          "openai-chat-completions"
+        ],
+        "offline": true,
+        "actualProvider": false,
+        "workerSha256": "d2fa34d0ba857e2e73be27d4aa8d35187030211d446a74632aab9d7521d24d1f"
+      },
+      "m7": {
+        "command": "pnpm --filter @ai-video/worker validate:m7-sidecar",
+        "status": "passed"
+      },
+      "diff": {
+        "command": "git diff --check",
+        "status": "passed"
+      }
+    },
+    "changedFiles": [
+      {
+        "path": "apps/worker/src/agent-prepared-arguments.ts",
+        "sha256": "23edf85edfc778464f6f05368ab2793862ea7ac412c082e2ac9c4fee4d66d3e1"
+      },
+      {
+        "path": "apps/worker/src/agent-delivery-capabilities.ts",
+        "sha256": "c7befe47892510dd893af31e82651233a19455aa48326ac45f9fdac87a370199"
+      },
+      {
+        "path": "apps/worker/src/agent-provider-tool-gateway.ts",
+        "sha256": "d9afa6face980cd96ece6dd692b9ab700b36ec591f30bc7e18ebb7785a1a9bdf"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-schema.ts",
+        "sha256": "cf3a62f534fab8f6dfcfced27fbb70d3d54bcd56eb3d9c5934cbce9308cbd52d"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-state.ts",
+        "sha256": "9d328034ea31f651208731b4f16a95a56961dfd7ef7c971e5197db3a975f218d"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-validation.ts",
+        "sha256": "2b4fa6b2555e32cb500fb52928194f1db20a7ee614713b7277ea0acc67a89e3a"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-recovery.test.ts",
+        "sha256": "639f43dd8abedce233cce527c182b135b4feabfa6a5acf7909c99e5222a0ad84"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-validation.test.ts",
+        "sha256": "41206989b6c98e499669e459d5369e3d3648d5ce7791d588aed892a74e10fc81"
+      },
+      {
+        "path": "apps/worker/src/production-bundle-loop.test.ts",
+        "sha256": "5ad607f0c0d68e69a5f3577561ff232b1e46afa47cc8ff2f18bf1074bfa94bb8"
+      },
+      {
+        "path": "apps/worker/src/production-skill-service.ts",
+        "sha256": "9d32f416970735d842a6c3e5325b230e2bcb6588e36f2273802b44be5512ebcc"
+      },
+      {
+        "path": "apps/worker/src/agent-tool-definitions.ts",
+        "sha256": "094af51e6a9982b1d20da89b8829adb9ef09e0cc3db1a5faa315112e5d6b4426"
+      },
+      {
+        "path": "apps/worker/scripts/validate-production-bundle-sidecar.mjs",
+        "sha256": "d9ba011d32108b72f770e675b09c9611c97ee30bc4ff1f45d55e1ed36f294df1"
+      },
+      {
+        "path": "packages/contracts/src/production-bundle.ts",
+        "sha256": "521abc980ebdc1dca9b40c0db74fef9d9061c81572eeae2d9cbae0bdd9b1f7d6"
+      },
+      {
+        "path": "packages/contracts/src/production-skills.ts",
+        "sha256": "2eb189a63d2c3dfc7dc57279a6bd7998a6ee7a9edd44390e488579af68d6c61d"
+      }
+    ]
+  },
+  "logs": [
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-tests.log",
+      "sha256": "533e96aab32672ae6f1c92912326918c9c4f4996c6dd399f3a6c385df220cd74"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-build.log",
+      "sha256": "09d70317c1e622a04efa661a84e6a69877534bfd1d2b66e30b0a4d04af456fb0"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-lint.log",
+      "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-sidecar-build.log",
+      "sha256": "86d10b5760df311f07012abb32f838a82a2358d0ab29d88071924dc38a4c6a31"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-bundle-sidecar.log",
+      "sha256": "15218a717ccbea5761f80325b3c2282b0b01f81d79fb10a1047248edaefabaa4"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-m7-sidecar.log",
+      "sha256": "d21fc2968117a2d30d2dde768e73e49721c4672ead3d6fee3f30b781abe97c65"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0012/final-format.log",
+      "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15"
+    }
+  ],
+  "updatedAt": "2026-11-09T17:18:18.917Z",
+  "revision10RealAcceptance": {
+    "status": "failed",
+    "taskId": "8619d689-56f0-4dc9-a82b-9640cb7af9b5",
+    "generationId": "17c1afb8-d779-40de-8c69-cde04235fa8a",
+    "projectId": "c6a868e3-aaa7-49a2-adde-db3b468ca41a",
+    "root": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0048",
+    "completedAt": "2026-11-09T17:13:24.864Z",
+    "reasonCode": "BUNDLE_TASK_BUDGET_EXHAUSTED",
+    "requestElapsedMs": 1556596,
+    "taskElapsedMs": 1541300,
+    "realModelRequests": 35,
+    "inputTokens": 2056983,
+    "candidateCount": 19,
+    "businessArtifactCount": 0,
+    "acceptedTargetCount": 11,
+    "approved": false,
+    "committed": false,
+    "verified": false,
+    "workerSha256": "bee38373b0b858635d611aed1d48f3b0125fd695302e4515c64b7eb4831c8be3",
+    "actualSkillRevision": 10,
+    "snapshotSkillRevision": 10,
+    "semanticContentAcceptance": "failed",
+    "installedInstanceUpdated": false,
+    "report": "./2026-11-10-one-click-bundle-revision10-real-acceptance.md",
+    "evidence": "./2026-11-10-one-click-bundle-revision10-real-acceptance.json",
+    "postTerminalSourceChanges": false
+  },
+  "revision10DocumentationVerification": {
+    "at": "2026-11-09T17:18:55.184Z",
+    "markdownFiles": [
+      "docs/code-traces/2026-11-10-one-click-bundle-revision10-real-acceptance.md",
+      "docs/code-traces/2026-11-10-one-click-bundle-recovery.md",
+      "docs/code-traces/2026-11-10-one-click-bundle-real-acceptance.md",
+      "docs/ONE-CLICK-PRODUCTION-BUNDLE-IMPLEMENTATION-PLAN.md"
+    ],
+    "checkedRelativeLinks": 44,
+    "checkedEvidenceHashes": 13,
+    "errors": [],
+    "status": "passed",
+    "sourceChanged": false,
+    "sourceFilesChecked": 251,
+    "frozenFilesChecked": 467,
+    "format": {
+      "status": "passed",
+      "command": "pnpm.cmd exec prettier --check",
+      "files": 6
+    },
+    "diff": {
+      "status": "passed",
+      "command": "git diff --check"
+    },
+    "fullRepositoryGatesRerun": false,
+    "reason": "Only acceptance documentation changed; 251 frozen source files and 467 build files remain unchanged.",
+    "evidencePath": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-0048/final-documentation-checks.json",
+    "sha256": "d4e90c08e0e9ad0eab60d50f2d3ec8c6daf333fef99ba588854e22c7d5deb6be"
+  }
+}

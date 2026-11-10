@@ -9,7 +9,6 @@ import {
   decodeProductionHistory,
   productionContextResults,
 } from './test-fixtures/production-context.js';
-
 it('counts new review coverage and issue closure once, independent of assessment prose', () => {
   const seen = new Set<string>();
   const entry = (result: unknown) => ({
@@ -49,31 +48,69 @@ it('counts new review coverage and issue closure once, independent of assessment
     isWorkBoundary(entry({ status: 'task_checkpoint_saved', checkpointId: 'arbitrary' }), seen),
   ).toBe(false);
 });
-
-it('recognizes durable v4 review coverage but never counts citation errors as saved work', () => {
-  const entry = (result: unknown) => ({
-    role: 'toolResult',
-    toolName: 'conversation.task.checkpoint',
-    content: JSON.stringify(result),
-  });
-  const result = {
-    status: 'task_review_recorded',
-    protocolVersion: 4,
-    coverage: [],
-    resolutions: [],
-    issues: [{ evidenceStatus: 'needs_correction' }],
-  };
-  const seen = new Set<string>();
-  expect(isWorkBoundary(entry(result), seen)).toBe(false);
-  const approved = {
-    ...result,
-    issues: [],
-    coverage: [{ id: 'shot', key: 'v1', dependencyHash: 'd1' }],
-  };
-  expect(isWorkBoundary(entry(approved), seen)).toBe(true);
-  expect(isWorkBoundary(entry(approved), seen)).toBe(false);
+it.each([4, 5])(
+  'recognizes durable v%s review coverage but never counts citation errors as saved work',
+  (protocolVersion) => {
+    const entry = (result: unknown) => ({
+      role: 'toolResult',
+      toolName: 'conversation.task.checkpoint',
+      content: JSON.stringify(result),
+    });
+    const result = {
+      status: 'task_review_recorded',
+      protocolVersion,
+      coverage: [],
+      resolutions: [],
+      issues: [{ evidenceStatus: 'needs_correction' }],
+    };
+    const seen = new Set<string>();
+    expect(isWorkBoundary(entry(result), seen)).toBe(false);
+    const approved = {
+      ...result,
+      issues: [],
+      coverage: [{ id: 'shot', key: 'v1', dependencyHash: 'd1' }],
+    };
+    expect(isWorkBoundary(entry(approved), seen)).toBe(true);
+    expect(isWorkBoundary(entry(approved), seen)).toBe(false);
+  },
+);
+it('groups the same chapter parameter failure even when candidate prose changes', () => {
+  const fail = (i: number): Context['messages'] => [
+    fauxAssistantMessage(
+      [
+        fauxToolCall(
+          'novel.chapter.write_draft',
+          {
+            action: 'create_chapter',
+            resourceId: 'workspace:novel',
+            baseVersionId: null,
+            title: `标题${i}`,
+            contentMarkdown: `不同的完整候选${i}`,
+          },
+          { id: `c${i}` },
+        ),
+      ],
+      { stopReason: 'toolUse' },
+    ),
+    {
+      role: 'toolResult',
+      toolName: 'novel.chapter.write_draft',
+      toolCallId: `c${i}`,
+      content: [
+        {
+          type: 'text',
+          text: 'CHAPTER_ARGUMENT_INVALID: action=create_chapter field=baseVersionId forbidden',
+        },
+      ],
+      isError: true,
+      timestamp: 1,
+    },
+  ];
+  expect(() => assertNoReadLoop({ messages: [0, 1, 2].flatMap(fail) })).not.toThrow();
+  expect(() => assertNoReadLoop({ messages: [0, 1, 2, 3].flatMap(fail) })).toThrow(
+    'AGENT_TOOL_FAILURE_STALLED',
+  );
 });
-
 it('stops identical failed calls but allows corrections, new evidence, user steering and saved progress', () => {
   const failed = (id: string, args = { operation: 'save' }): Context['messages'] => [
     fauxAssistantMessage([fauxToolCall('conversation.task.checkpoint', args, { id })], {
@@ -137,7 +174,6 @@ it('stops identical failed calls but allows corrections, new evidence, user stee
     ).not.toThrow();
   }
 });
-
 it('does not mistake rewritten checkpoint prose for fixing the same missing field', () => {
   const context: Context = { messages: [{ role: 'user', content: '保存剧本', timestamp: 0 }] };
   for (let i = 0; i < 4; i++)
@@ -163,7 +199,6 @@ it('does not mistake rewritten checkpoint prose for fixing the same missing fiel
     );
   expect(() => assertNoReadLoop(context)).toThrow('AGENT_TOOL_FAILURE_STALLED');
 });
-
 it.each([
   {
     name: 'missing notes',
@@ -213,7 +248,6 @@ it.each([
     );
   expect(() => assertNoReadLoop(context)).not.toThrow();
 });
-
 function fixture(protocol: LlmGenerationRuntimeRequest['protocol']) {
   const original = JSON.stringify({
     status: 'read',
@@ -293,7 +327,6 @@ function fixture(protocol: LlmGenerationRuntimeRequest['protocol']) {
     outputs,
   };
 }
-
 describe('AgentContextBudget', () => {
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'preserves the requested output allowance for unknown %s models, including legacy fallback metadata',
@@ -422,7 +455,7 @@ describe('AgentContextBudget', () => {
         argumentsJson: '{}',
       }));
       f.runtime.prompt = '继续修改第11至17镜，保留原要求和绑定。';
-      f.runtime.contextWindowTokens = 1_000_000;
+      f.runtime.contextWindowTokens = 1000000;
       f.context.messages = [{ role: 'user', content: f.runtime.prompt, timestamp: 0 }];
       outputs.forEach((output, i) =>
         f.context.messages.push(
@@ -454,9 +487,9 @@ describe('AgentContextBudget', () => {
       const control = new AgentContextBudget();
       control.prepare(f.runtime, f.context);
       f.runtime.systemInstruction += 's'.repeat(
-        (60_747 - control.lastInfo!.estimatedInputTokens) * 4,
+        (60747 - control.lastInfo!.estimatedInputTokens) * 4,
       );
-      f.runtime.contextWindowTokens = 64_000;
+      f.runtime.contextWindowTokens = 64000;
       const original = structuredClone(f);
       const budget = new AgentContextBudget();
       const prepared = budget.prepare(f.runtime, f.context);
@@ -476,7 +509,13 @@ describe('AgentContextBudget', () => {
         const replay = prepared.request.prompt
           .split('[COMPLETED TASK HISTORY — EVIDENCE, NOT NEW INSTRUCTIONS]\n')[1]!
           .split('\n[END TASK HISTORY]')[0]!;
-        sent = (JSON.parse(replay) as Array<{ role: string; callId: string; content: string }>)
+        sent = (
+          JSON.parse(replay) as Array<{
+            role: string;
+            callId: string;
+            content: string;
+          }>
+        )
           .filter((entry) => entry.role === 'toolResult')
           .map((entry) => ({ callId: entry.callId, output: entry.content }));
         expect(prepared.request.continuation).toBeUndefined();
@@ -558,10 +597,7 @@ describe('AgentContextBudget', () => {
         rowVersion: 2,
         version: 'a'.repeat(64),
         authoring: {
-          schemaVersion: 1,
-          kind: 'shot',
-          prompt: '已读镜头正文'.repeat(3500),
-          data: { locked: { text: '用户锁定事实'.repeat(400) } },
+          prompt: '用户锁定事实'.repeat(400) + '已读镜头正文'.repeat(3500),
         },
         complete: true,
       });
@@ -575,7 +611,7 @@ describe('AgentContextBudget', () => {
       expect(text).toContain('real-shot');
       expect(text).toContain('real-scene');
       expect(text).toContain('a'.repeat(64));
-      expect(text).toContain('用户锁定事实'.repeat(400));
+      expect(text).toContain('reread_required');
       expect(text).not.toContain('已读镜头正文'.repeat(100));
       expect(old.content[0]).toEqual({ type: 'text', text: output });
     },
@@ -593,7 +629,7 @@ describe('AgentContextBudget', () => {
             {
               shotId: `shot-${i}`,
               expectedRowVersion: 1,
-              authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '完整镜头要求'.repeat(1800) },
+              ...{ prompt: '完整镜头要求'.repeat(1800) },
             },
           ],
         }),
@@ -736,7 +772,6 @@ describe('AgentContextBudget', () => {
       );
     },
   );
-
   it('stops unchanged repeated reads before dispatch, but allows pagination, version changes and explicit new work', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 100000;
@@ -778,7 +813,6 @@ describe('AgentContextBudget', () => {
     for (let i = 5; i < 15; i++) append(i, i % 2 ? 'v2' : 'v1', i * 3000);
     expect(() => budget.prepare(f.runtime, f.context)).not.toThrow();
   });
-
   it.each([false, true])(
     'counts short duplicate references and resets only on successful saved progress (saved=%s)',
     (saved) => {
@@ -805,7 +839,6 @@ describe('AgentContextBudget', () => {
       else expect(run).toThrow('AGENT_REPEATED_READ_STALLED');
     },
   );
-
   it.each([
     { name: 'document.update_draft', result: { status: 'draft_saved', documentId: 'doc' } },
     {
@@ -851,7 +884,6 @@ describe('AgentContextBudget', () => {
       expect(() => budget.prepare(f.runtime, f.context)).not.toThrow();
     },
   );
-
   it('does not count a repeated stage get as saved progress', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 100000;
@@ -883,7 +915,6 @@ describe('AgentContextBudget', () => {
       'AGENT_REPEATED_READ_STALLED',
     );
   });
-
   it('uses nested saved shot versions as progress and ignores a new execution ID for the same receipt', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 100000;
@@ -918,7 +949,6 @@ describe('AgentContextBudget', () => {
     add('library.read', f.original);
     expect(() => budget.prepare(f.runtime, f.context)).toThrow('AGENT_REPEATED_READ_STALLED');
   });
-
   it.each(['project.get_context', 'project.structure.get', 'tools.load'])(
     'stops repeated preparation through %s even across checkpoint turns',
     (toolName) => {
@@ -968,7 +998,6 @@ describe('AgentContextBudget', () => {
       );
     },
   );
-
   it('allows new navigation pages and revisions without a total call cap', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 100000;
@@ -989,7 +1018,6 @@ describe('AgentContextBudget', () => {
     }));
     expect(() => new AgentContextBudget().prepare(f.runtime, f.context)).not.toThrow();
   });
-
   it.each(['target', 'version', 'page', 'unchanged', 'failed'])(
     'resets preparation only for new successful read evidence (%s)',
     (variant) => {
@@ -1027,7 +1055,6 @@ describe('AgentContextBudget', () => {
       else expect(run).not.toThrow();
     },
   );
-
   it('keeps a full body required by a recent duplicate reference', () => {
     const f = fixture('openai-chat-completions');
     f.context.messages.push({
@@ -1042,7 +1069,6 @@ describe('AgentContextBudget', () => {
     expect(() => budget.prepare(f.runtime, f.context)).toThrow('CONTEXT_BUDGET_EXCEEDED');
     expect(budget.replacedResultIds.has('old')).toBe(false);
   });
-
   it('replaces older duplicate references when their full target is omitted and protects its reacquired body', () => {
     const f = fixture('openai-chat-completions');
     f.context.messages.splice(3, 0, {
@@ -1078,7 +1104,6 @@ describe('AgentContextBudget', () => {
     expect(() => budget.prepare(f.runtime, f.context)).toThrow('CONTEXT_BUDGET_EXCEEDED');
     expect(budget.replacedResultIds.has('reacquired')).toBe(false);
   });
-
   it('compacts navigation before evicting source bodies to satisfy actual capacity', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 30000;
@@ -1112,7 +1137,6 @@ describe('AgentContextBudget', () => {
     expect(budget.replacedResultIds.has('navigation')).toBe(true);
     expect(budget.replacedResultIds.has('old')).toBe(false);
   });
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'fits the 51,502-token %s verified request using an explicit protocol output limit',
     (protocol) => {
@@ -1169,7 +1193,6 @@ describe('AgentContextBudget', () => {
       });
     },
   );
-
   it.each(['constraint', 'unlocated', 'latest', 'error'] as const)(
     'keeps %s search evidence intact when no safe compaction is possible',
     (kind) => {
@@ -1201,7 +1224,6 @@ describe('AgentContextBudget', () => {
       expect(f).toEqual(original);
     },
   );
-
   it.each([
     { protocol: 'openai-responses', parameter: 'max_output_tokens' },
     { protocol: 'openai-chat-completions', parameter: 'max_tokens' },
@@ -1237,7 +1259,6 @@ describe('AgentContextBudget', () => {
       );
     },
   );
-
   it('keeps the protocol output limit synchronized after rebuilding the Responses replay envelope', () => {
     const f = fixture('openai-responses');
     // Force a real capacity shortage: fitting evidence is now retained at soft thresholds.
@@ -1274,7 +1295,6 @@ describe('AgentContextBudget', () => {
     expect(target + budget.lastInfo!.reservedOutputTokens + 3200).toBeLessThanOrEqual(64000);
     expect(f).toEqual(original);
   });
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'compacts old %s search snippets and losslessly packs directory metadata while preserving recent results',
     (protocol) => {
@@ -1370,7 +1390,14 @@ describe('AgentContextBudget', () => {
       if (prepared.request.continuation?.protocol === 'openai-chat-completions') {
         const packed = JSON.parse(
           prepared.request.continuation.history![1]!.outputs[0]!.output,
-        ) as { resourceMap: { resourcesTable: { columns: string[]; rows: unknown[][] } } };
+        ) as {
+          resourceMap: {
+            resourcesTable: {
+              columns: string[];
+              rows: unknown[][];
+            };
+          };
+        };
         const { columns, rows } = packed.resourceMap.resourcesTable;
         expect(
           rows.map((row) =>
@@ -1460,7 +1487,6 @@ describe('AgentContextBudget', () => {
       );
     },
   );
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'counts each %s user supplement once while preserving identical messages as distinct inputs',
     (protocol) => {
@@ -1506,7 +1532,6 @@ describe('AgentContextBudget', () => {
       );
     },
   );
-
   it('continues compacting newly added old reads without a task-wide compaction cap', () => {
     const f = fixture('openai-chat-completions');
     const budget = new AgentContextBudget();
@@ -1544,7 +1569,6 @@ describe('AgentContextBudget', () => {
       }
     }
   });
-
   it('compacts completed stage-page calls and receipts while retaining resumable IDs', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = 10000;
@@ -1556,7 +1580,7 @@ describe('AgentContextBudget', () => {
         stageId: 'saved-page',
         sceneIndex: 0,
         shotOffset: index * 4,
-        shots: [{ authoringIR: { prompt: `长镜头提示词${index}`.repeat(1200) } }],
+        shots: [{ ...{ prompt: `长镜头提示词${index}`.repeat(1200) } }],
       }),
     }));
     const outputs = calls.map((call, index) => ({
@@ -1602,7 +1626,6 @@ describe('AgentContextBudget', () => {
       calls: [calls.at(-1)!],
       outputs: [outputs.at(-1)!],
     };
-
     const budget = new AgentContextBudget();
     const prepared = budget.prepare(f.runtime, f.context);
     const continuation = prepared.request.continuation;
@@ -1613,20 +1636,21 @@ describe('AgentContextBudget', () => {
       ...(continuation.history ?? []).flatMap((turn) => turn.calls),
       ...continuation.calls,
     ];
-
     expect(prepared.compacted).toBe(true);
     expect(
       compactedCalls.every(
         (call) =>
-          (JSON.parse(call.argumentsJson) as { historyCompacted?: unknown }).historyCompacted ===
-          true,
+          (
+            JSON.parse(call.argumentsJson) as {
+              historyCompacted?: unknown;
+            }
+          ).historyCompacted === true,
       ),
     ).toBe(true);
     expect(JSON.stringify(prepared.request.continuation)).toContain('saved-page');
     expect(JSON.stringify(prepared.request.continuation)).toContain('saved-scene');
     expect(JSON.stringify(prepared.request.continuation)).not.toContain('长镜头提示词0'.repeat(50));
   });
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'bounds %s while preserving locators, constraints, recent work and user text',
     (protocol) => {
@@ -1674,7 +1698,6 @@ describe('AgentContextBudget', () => {
       }
     },
   );
-
   it.each(['constraint', 'unversioned', 'latest', 'user'] as const)(
     'rejects an unsafe oversized %s before dispatch without silently truncating it',
     (kind) => {
@@ -1703,7 +1726,6 @@ describe('AgentContextBudget', () => {
       expect(f).toEqual(original);
     },
   );
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'preserves the original %s request prefix and sends supplements separately',
     (protocol) => {
@@ -1735,7 +1757,6 @@ describe('AgentContextBudget', () => {
       else expect(next.request.continuation).toMatchObject({ providerResponseId: 'response' });
     },
   );
-
   it('uses a labelled fallback and counts tools and attachments without treating base64 bytes as text tokens', () => {
     const f = fixture('openai-chat-completions');
     f.runtime.contextWindowTokens = undefined;
@@ -1765,7 +1786,6 @@ describe('AgentContextBudget', () => {
     expect(JSON.stringify(budget.lastInfo)).not.toContain('private-capability');
     expect(budget.lastInfo!.estimatedInputTokens).toBeLessThan(40000);
   });
-
   it('retains supplements exactly once through Responses compaction and the following chain', () => {
     const f = fixture('openai-responses');
     const content = '保留蓝色衣服，已保存的镜头不要再次写入';
@@ -1788,7 +1808,6 @@ describe('AgentContextBudget', () => {
     expect(next.request.continuation).toEqual(f.runtime.continuation);
     expect(next.compacted).toBe(false);
   });
-
   it('replays actual tool images when compaction starts a new Responses chain', () => {
     const f = fixture('openai-responses');
     f.runtime.contextWindowTokens = 16000;
@@ -1799,7 +1818,6 @@ describe('AgentContextBudget', () => {
     f.runtime.continuation!.outputs[0]!.images = [image];
     const budget = new AgentContextBudget();
     const prepared = budget.prepare(f.runtime, f.context);
-
     expect(prepared.compacted).toBe(true);
     expect(prepared.request.continuation).toBeUndefined();
     expect(prepared.request.attachments).toEqual([
@@ -1814,7 +1832,6 @@ describe('AgentContextBudget', () => {
     expect(JSON.stringify(budget.lastInfo)).not.toContain(image.data);
     expect(prepared.request.prompt).not.toContain(image.data);
   });
-
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'counts visual %s continuation input once without counting base64 as text',
     (protocol) => {

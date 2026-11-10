@@ -6,7 +6,6 @@ import type {
   ProjectStructureResult,
 } from '@ai-video/contracts';
 import type { OpenProject } from '@ai-video/domain';
-
 type Workspace = ProjectStructureResource['locator']['workspace'];
 export interface ResourceMapPageOptions {
   workspace?: string;
@@ -33,7 +32,6 @@ const WORKSPACES: Array<[Workspace, string]> = [
   ['tasks', '任务日志'],
   ['settings', '设置'],
 ];
-
 export function workspaceResource(workspace: Workspace): ProjectStructureResource {
   const id = `workspace:${workspace}`;
   return {
@@ -44,13 +42,12 @@ export function workspaceResource(workspace: Workspace): ProjectStructureResourc
       ? {
           writeTool: 'scene.submit_structure',
           contentModel:
-            'Agent 按任务需要选择资料与工具，并自行组织场次、镜头提示词和开放 authoringIR.data；references 只使用真实角色、场景资料、道具文档 ID。系统校验 IR、项目范围和引用类型，不选择语义字段或重写提示词。成功提交后自动保存为可编辑草稿，无需用户确认。已有场次和镜头可按需读取，场次修改需 sceneId 与 expectedRowVersion；已有镜头正文使用 scene.update_shot_prompts（shotId 与 expectedRowVersion），仅时长修改使用 scene.update_shot_timings。用户要求必须写入最终 prompt，data 只作补充。',
+            'Agent 按任务需要选择资料与工具，并自行组织场次、镜头提示词和绑定关系；references 只使用真实角色、场景资料、道具文档 ID。系统校验 IR、项目范围和引用类型，不选择语义字段或重写提示词。成功提交后自动保存为可编辑草稿，无需用户确认。已有场次和镜头可按需读取，场次修改需 sceneId 与 expectedRowVersion；已有镜头正文使用 scene.update_shot_prompts（shotId 与 expectedRowVersion），仅时长修改使用 scene.update_shot_timings。用户要求必须写入最终 prompt，',
         }
       : {}),
     locator: { workspace, resourceId: id },
   };
 }
-
 type DocumentRow = {
   id: string;
   title: string;
@@ -64,21 +61,24 @@ type DocumentRow = {
   binding_status: string | null;
   binding_role: string | null;
 };
-
 const DOCUMENT_QUERY = `SELECT d.id, d.title, d.kind, d.lifecycle_status, d.row_version, d.current_version_id,
   c.id AS chapter_id, c.lifecycle_status AS chapter_status, b.domain_scope, b.status AS binding_status, b.role AS binding_role
   FROM documents d LEFT JOIN novel_chapters c ON c.document_id = d.id
   LEFT JOIN document_bindings b ON b.document_id = d.id WHERE d.project_id = ?`;
-
 export function documentWorkspace(
   row: Pick<DocumentRow, 'chapter_id' | 'domain_scope' | 'kind'>,
 ): Workspace {
   if (row.chapter_id || row.domain_scope === 'novel') return 'novel';
-  if (row.kind === 'character' || row.kind === 'scene' || row.kind === 'prop') return 'characters';
+  if (
+    row.kind === 'character' ||
+    row.kind === 'scene' ||
+    row.kind === 'prop' ||
+    row.kind === 'voice'
+  )
+    return 'characters';
   if (row.kind === 'storyboard') return 'shots';
   return 'documents';
 }
-
 function documentResource(row: DocumentRow): ProjectStructureResource {
   const workspace = documentWorkspace(row);
   const id = `document:${row.id}`;
@@ -105,7 +105,6 @@ function documentResource(row: DocumentRow): ProjectStructureResource {
     },
   };
 }
-
 type NodeRow = {
   id: string;
   document_id: string;
@@ -114,7 +113,6 @@ type NodeRow = {
   title: string;
   path_json: string;
 };
-
 function nodeResource(node: NodeRow, document: ProjectStructureResource): ProjectStructureResource {
   const id = `structure-node:${node.id}`;
   return {
@@ -134,7 +132,6 @@ function nodeResource(node: NodeRow, document: ProjectStructureResource): Projec
     },
   };
 }
-
 /** Metadata only. Empty pages remain valid creation destinations. */
 export function compileProjectResourceMap(
   database: Database.Database,
@@ -175,7 +172,7 @@ export function compileProjectResourceMap(
       'shots',
       `SELECT id, title, scene_document_id AS sceneDocumentId, row_version AS rowVersion,
         CASE WHEN archived_at IS NULL THEN 'active' ELSE 'archived' END AS lifecycleStatus,
-        json_extract(authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
+        json_extract(bindings_json,'$.sceneDocumentIds') AS sceneDocumentIdsJson
        FROM scenes WHERE project_id = ? ${includeArchived ? '' : 'AND archived_at IS NULL'} ORDER BY position, id`,
     ],
     [
@@ -184,7 +181,7 @@ export function compileProjectResourceMap(
       `SELECT shots.id, shots.title, shots.scene_id AS sceneId,
         CASE WHEN shots.archived_at IS NULL AND scenes.archived_at IS NULL THEN 'active' ELSE 'archived' END AS lifecycleStatus,
         scenes.scene_document_id AS sceneDocumentId, shots.row_version AS rowVersion,
-        json_extract(scenes.authoring_ir_json,'$.references.sceneDocumentIds') AS sceneDocumentIdsJson
+        json_extract(scenes.bindings_json,'$.sceneDocumentIds') AS sceneDocumentIdsJson
        FROM shots JOIN scenes ON scenes.id = shots.scene_id
        WHERE scenes.project_id = ? ${includeArchived ? '' : 'AND scenes.archived_at IS NULL AND shots.archived_at IS NULL'} ORDER BY scenes.position, shots.position, shots.id`,
     ],
@@ -317,7 +314,7 @@ export function compileProjectResourceMap(
   }
   while (
     resources.length > WORKSPACES.length &&
-    Buffer.byteLength(JSON.stringify(resources), 'utf8') > 30_000
+    Buffer.byteLength(JSON.stringify(resources), 'utf8') > 30000
   ) {
     resources.pop();
     truncated = true;
@@ -331,7 +328,6 @@ export function compileProjectResourceMap(
     truncated,
   };
 }
-
 export const RESOURCE_ARGUMENT_KEYS = [
   'resourceId',
   'structureNodeId',
@@ -339,7 +335,6 @@ export const RESOURCE_ARGUMENT_KEYS = [
   'expectedRevision',
   'expectedRowVersion',
 ] as const;
-
 /** Resolve directly from current project facts, independent of the bounded preview. */
 export function resolveWriteResource(
   database: Database.Database,
@@ -376,7 +371,10 @@ export function resolveWriteResource(
             "SELECT document_id FROM novel_chapters WHERE project_id = ? AND id = ? AND lifecycle_status IN ('active', 'reserved')",
           )
           .get(project.id, resourceId.slice('novel-chapter:'.length)) as
-          { document_id: string } | undefined
+          | {
+              document_id: string;
+            }
+          | undefined
       )?.document_id;
     } else if (resourceId.startsWith('structure-node:')) {
       node = database
@@ -436,7 +434,11 @@ export function resolveWriteResource(
         'SELECT document_id, version_id FROM project_structure_nodes WHERE project_id = ? AND id = ?',
       )
       .get(project.id, args.structureNodeId) as
-      { document_id: string; version_id: string } | undefined;
+      | {
+          document_id: string;
+          version_id: string;
+        }
+      | undefined;
     if (
       !node ||
       node.document_id !== resource.documentId ||

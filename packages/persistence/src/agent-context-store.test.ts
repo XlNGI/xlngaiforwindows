@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AgentContextStore, type AgentTaskState } from './agent-context-store.js';
 import { applyMigrationV75 } from './migration-v75.js';
-
 function database(path = ':memory:') {
   const db = new Database(path);
   db.exec(
@@ -26,7 +25,6 @@ const state: AgentTaskState = {
   executionStatus: 'running',
   generatedArtifacts: [],
 };
-
 describe('durable Agent working data', () => {
   it('discovers damaged current slots through a coherent checkpoint without reviving terminal tasks', () => {
     const db = database(),
@@ -69,7 +67,9 @@ describe('durable Agent working data', () => {
           .map((r) => r.taskId)
           .sort(),
       ).toEqual(['damaged', 'healthy', 'runtime-damaged']);
-      const snapshot = store.loadSnapshot<{ messages: unknown[] }>('p', 'runtime-damaged');
+      const snapshot = store.loadSnapshot<{
+        messages: unknown[];
+      }>('p', 'runtime-damaged');
       expect(snapshot?.state.currentStage).toBe('shots');
       expect(snapshot?.state.userRequirements[0]?.text).toBe('新要求');
       expect(snapshot?.runtime?.messages).toEqual([{ checkpoint: 'runtime-damaged' }]);
@@ -106,11 +106,17 @@ describe('durable Agent working data', () => {
         .get(),
     ).toEqual({ n: 1 });
     const before = (
-      db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as { n: number }
+      db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as {
+        n: number;
+      }
     ).n;
     store.checkpoint('p', 't', 'duplicate');
     expect(
-      (db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as { n: number }).n,
+      (
+        db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as {
+          n: number;
+        }
+      ).n,
     ).toBe(before);
     db.exec(`UPDATE agent_context_tasks SET state_json='{}',runtime_json='{}';
       UPDATE agent_context_checkpoints SET state_json='{}',runtime_json='{}' WHERE rowid=(SELECT MAX(rowid) FROM agent_context_checkpoints);`);
@@ -124,7 +130,11 @@ describe('durable Agent working data', () => {
       messages: [{ timestamp: 3 }],
     });
     expect(
-      (db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as { n: number }).n,
+      (
+        db.prepare('SELECT COUNT(*) AS n FROM agent_context_checkpoints').get() as {
+          n: number;
+        }
+      ).n,
     ).toBe(before);
     db.close();
   });
@@ -147,7 +157,7 @@ describe('durable Agent working data', () => {
       let store = new AgentContextStore(db);
       const content = JSON.stringify({
         content: '完整小说'.repeat(30000),
-        contentIR: { exact: '手写' },
+        bindings: { exact: '手写' },
       });
       const result = store.putResult('p', 't', 'call', 'library.read', content, {
         unsavedDraft: '不能丢',

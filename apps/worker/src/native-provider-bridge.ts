@@ -394,11 +394,21 @@ export function createPiStreamFunction(
     stream.push({ type: 'start', partial: cloneMessage(message) });
     const startAttempt = (retryAttempt: number): void => {
       const requestId = randomUUID();
+      const workerStarted = performance.now();
+      const observedStages = new Set<string>();
+      const record = (id: string, stage: string, metadata: Record<string, unknown>) => {
+        const first = !observedStages.has(stage);
+        observedStages.add(stage);
+        observe?.(id, stage, {
+          ...metadata,
+          ...(first ? { workerElapsedMs: performance.now() - workerStarted } : {}),
+        });
+      };
       const retryMetadata = { retryAttempt };
       let unchangedContext = false;
       const cancelled = (): boolean => {
         if (!options?.signal?.aborted) return false;
-        observe?.(requestId, 'cancelled', retryMetadata);
+        record(requestId, 'cancelled', retryMetadata);
         finishPiError(stream, message, 'aborted', 'Native Provider request was cancelled.');
         return true;
       };
@@ -414,7 +424,7 @@ export function createPiStreamFunction(
                 'CONTEXT_BUDGET_EXCEEDED: Context recovery produced the same rejected request. Original task data and saved results are preserved.',
               );
             }
-            observe?.(requestId, 'dispatching', {
+            record(requestId, 'dispatching', {
               ...retryMetadata,
               inputHash,
               inputBytes: Buffer.byteLength(JSON.stringify(params)),
@@ -426,7 +436,7 @@ export function createPiStreamFunction(
             });
             let terminalObserved = false;
             let receivedOutput = false;
-            bridge.start(
+            const handle = bridge.start(
               params,
               {
                 onEvent: (event) => {
@@ -464,7 +474,7 @@ export function createPiStreamFunction(
                         )))
                   ) {
                     terminalObserved = true;
-                    observe?.(requestId, 'failed', {
+                    record(requestId, 'failed', {
                       ...retryMetadata,
                       errorCode: event.error.code,
                       failureOrigin: 'provider',
@@ -485,7 +495,7 @@ export function createPiStreamFunction(
                   ) {
                     terminalObserved = true;
                     contextRejected.add(inputHash);
-                    observe?.(requestId, 'failed', {
+                    record(requestId, 'failed', {
                       ...retryMetadata,
                       errorCode: 'CONTEXT_BUDGET_EXCEEDED',
                       failureOrigin:
@@ -500,47 +510,44 @@ export function createPiStreamFunction(
                   applyPiEvent(stream, message, event, toolArgumentOutputs);
                   if (message.stopReason === 'error' || message.stopReason === 'aborted') {
                     terminalObserved = true;
-                    observe?.(
-                      requestId,
-                      message.stopReason === 'aborted' ? 'cancelled' : 'failed',
-                      {
-                        errorCode:
-                          event.type === 'failed' ? event.error.code : 'INVALID_PROVIDER_RESPONSE',
-                        failureOrigin:
-                          event.type === 'failed' &&
-                          event.error.providerErrorCode === 'CONTEXT_BUDGET_EXCEEDED'
-                            ? 'local_context'
-                            : event.type === 'failed' && event.error.code === 'PROVIDER_FAILED'
-                              ? 'provider'
-                              : 'bridge',
-                        ...(event.type === 'failed'
-                          ? {
-                              providerStatus: event.error.providerStatus,
-                              providerErrorCode: event.error.providerErrorCode,
-                              providerErrorMessage: sanitizeTelemetryError(event.error.message),
-                            }
-                          : {}),
-                      },
-                    );
+                    record(requestId, message.stopReason === 'aborted' ? 'cancelled' : 'failed', {
+                      errorCode:
+                        event.type === 'failed' ? event.error.code : 'INVALID_PROVIDER_RESPONSE',
+                      failureOrigin:
+                        event.type === 'failed' &&
+                        event.error.providerErrorCode === 'CONTEXT_BUDGET_EXCEEDED'
+                          ? 'local_context'
+                          : event.type === 'failed' && event.error.code === 'PROVIDER_FAILED'
+                            ? 'provider'
+                            : 'bridge',
+                      ...(event.type === 'failed'
+                        ? {
+                            providerStatus: event.error.providerStatus,
+                            providerErrorCode: event.error.providerErrorCode,
+                            providerErrorMessage: sanitizeTelemetryError(event.error.message),
+                          }
+                        : {}),
+                    });
                     return;
                   }
                   if (event.type === 'request_progress')
-                    observe?.(requestId, event.stage, {
+                    record(requestId, event.stage, {
                       argumentBytes: event.argumentBytes,
                       toolName: event.toolName,
                       receivedBytes: event.receivedBytes,
                       requestBodyHash: event.requestBodyHash,
                       requestBodyBytes: event.requestBodyBytes,
                       wireContext: event.wireContext,
+                      nativeElapsedMs: event.nativeElapsedMs,
                     });
                   else if (event.type === 'text_delta' || event.type === 'thinking_delta')
-                    observe?.(
+                    record(
                       requestId,
                       event.type === 'text_delta' ? 'visible_text' : 'thinking',
                       {},
                     );
                   else if (['complete', 'failed', 'cancelled'].includes(event.type))
-                    observe?.(
+                    record(
                       requestId,
                       event.type,
                       event.type === 'complete'
@@ -559,12 +566,13 @@ export function createPiStreamFunction(
               },
               options?.signal,
             );
+            record(requestId, 'dispatching', { hostRequestId: handle.requestId });
           });
       const run = async () => {
-        observe?.(requestId, 'preparing', retryMetadata);
+        record(requestId, 'preparing', retryMetadata);
         if (retryAttempt > 0) {
           const delayMs = retryAttempt * 1000;
-          observe?.(requestId, 'retry_wait', { ...retryMetadata, delayMs });
+          record(requestId, 'retry_wait', { ...retryMetadata, delayMs });
           await waitForProviderRetry(delayMs, options?.signal);
           if (cancelled()) return;
           // Re-admit every HTTP request through the task budget and session fence.
@@ -579,7 +587,7 @@ export function createPiStreamFunction(
           errorMessage(error),
         )?.[1];
         try {
-          observe?.(requestId, aborted ? 'cancelled' : 'failed', {
+          record(requestId, aborted ? 'cancelled' : 'failed', {
             ...retryMetadata,
             errorCode: localContext ?? 'BRIDGE_FAILED',
             failureOrigin: localContext ? 'local_context' : 'bridge',
@@ -1023,6 +1031,7 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
         'requestBodyHash',
         'requestBodyBytes',
         'wireContext',
+        'nativeElapsedMs',
       ]);
       if (
         ![
@@ -1064,7 +1073,7 @@ function parseHostEvent(value: unknown): NativeProviderHostEvent {
         (typeof value.requestBodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.requestBodyHash))
       )
         throw new Error('Invalid request body hash.');
-      for (const field of ['argumentBytes', 'receivedBytes', 'requestBodyBytes'])
+      for (const field of ['argumentBytes', 'receivedBytes', 'requestBodyBytes', 'nativeElapsedMs'])
         if (
           value[field] !== undefined &&
           (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0)

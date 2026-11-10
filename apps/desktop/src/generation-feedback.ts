@@ -53,6 +53,15 @@ export interface GenerationErrorFeedback {
   technicalDetail?: string;
 }
 
+/** Keep the received error visible; localized guidance is supplementary. */
+export function generationErrorDisplayText(
+  message: string,
+  failureKind?: VideoGenerationFailureKind,
+): string {
+  const { userMessage } = generationErrorFeedback(message, failureKind);
+  return userMessage === message.trim() ? message : `${message}\n${userMessage}`;
+}
+
 export function generationStatusLabel(status: string): string {
   return statusLabels[status] ?? status;
 }
@@ -187,6 +196,21 @@ export function generationErrorFeedback(
   }
   if (/download/i.test(normalized)) {
     return { userMessage: '结果已生成，但保存到本地时失败，请重试。', technicalDetail };
+  }
+  if (/\bsize must be WIDTHxHEIGHT\b/i.test(normalized)) {
+    const requirements = ['尺寸须为“宽x高”格式'];
+    const multiple = normalized.match(/\b(?:multiples of|divisible by)\s+(\d+)\b/i)?.[1];
+    const ratio = normalized.match(/\baspect ratio at most\s+(\d+(?:\.\d+)?)\b/i)?.[1];
+    const pixels = normalized.match(/\b(\d[\d,]*)\s*\.\.\s*(\d[\d,]*)\s+pixels\b/i);
+    const edge = normalized.match(/\beach edge at most\s+(\d[\d,]*)\b/i)?.[1];
+    if (multiple) requirements.push(`宽高必须都是 ${multiple} 的倍数`);
+    if (ratio) requirements.push(`长边与短边的比例不能超过 ${ratio}:1`);
+    if (pixels) requirements.push(`像素总数须在 ${pixels[1]} 至 ${pixels[2]} 之间`);
+    if (edge) requirements.push(`任一边不能超过 ${edge} 像素`);
+    return {
+      userMessage: `图片尺寸不符合兼容服务要求：${requirements.join('；')}。请调整“尺寸”后重新提交。`,
+      technicalDetail: normalized,
+    };
   }
   if (
     /invalid_request|unsupported|not support|unknown (?:field|parameter)|is required/i.test(

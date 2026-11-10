@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import type { ProductionTarget } from '@ai-video/contracts';
 import { ProductionService, summarizeProductionNotices } from './production-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
-
 type Snapshot = ReturnType<ProductionService['readForAgent']>;
 export interface AgentProductionQueryResult extends Record<string, unknown> {
   status: string;
@@ -13,7 +12,10 @@ export interface AgentProductionQueryResult extends Record<string, unknown> {
   recordPage?: {
     view: string;
     unit: 'records';
-    records: Array<{ path: Array<string | number>; value: unknown }>;
+    records: Array<{
+      path: Array<string | number>;
+      value: unknown;
+    }>;
     context: unknown;
     offset: number;
     nextOffset?: number;
@@ -33,7 +35,6 @@ export interface AgentProductionQueryResult extends Record<string, unknown> {
 }
 const MAX_PAGE_CHARACTERS = 4096;
 const MAX_CACHE_BYTES = 2 * 1024 * 1024;
-
 /** Read models only. Authorization and batch limits remain in the caller. */
 export class AgentProductionQueryService {
   private readonly cache = new Map<
@@ -49,7 +50,6 @@ export class AgentProductionQueryService {
   private namespace = '';
   private bytes = 0;
   constructor(private readonly production: ProductionService) {}
-
   read(
     target: ProductionTarget,
     args: Record<string, unknown>,
@@ -171,7 +171,7 @@ export class AgentProductionQueryService {
       view === 'media'
         ? media
         : view === 'authoring'
-          ? (snapshot.authoringIR ?? null)
+          ? { prompt: snapshot.prompt, bindings: snapshot.bindings, timing: snapshot.timing }
           : view === 'text'
             ? snapshot.currentText
             : view === 'issues'
@@ -202,7 +202,10 @@ export class AgentProductionQueryService {
           ? {
               ...metadata,
               complete: true,
-              ...(value as { scene: Snapshot['scene']; shots: Snapshot['shots'] }),
+              ...(value as {
+                scene: Snapshot['scene'];
+                shots: Snapshot['shots'];
+              }),
             }
           : { ...metadata, complete: true, [view]: value };
       }
@@ -244,7 +247,10 @@ export class AgentProductionQueryService {
         ? {
             ...metadata,
             complete: true,
-            ...(value as { scene: Snapshot['scene']; shots: Snapshot['shots'] }),
+            ...(value as {
+              scene: Snapshot['scene'];
+              shots: Snapshot['shots'];
+            }),
           }
         : { ...metadata, complete: true, [view]: value };
     }
@@ -269,12 +275,17 @@ export class AgentProductionQueryService {
     };
   }
 }
-
 /** Whole entities keep their IDs, CAS and bindings together; paths allow exact reconstruction. */
 function productionRecords(view: string, value: unknown) {
-  const records: Array<{ path: Array<string | number>; value: unknown }> = [];
+  const records: Array<{
+    path: Array<string | number>;
+    value: unknown;
+  }> = [];
   if (view === 'structure') {
-    const structure = value as { scene: unknown; shots: unknown[] };
+    const structure = value as {
+      scene: unknown;
+      shots: unknown[];
+    };
     structure.shots.forEach((shot, i) => records.push({ path: ['shots', i], value: shot }));
     return { records, context: { scene: structure.scene, shots: [] } };
   }
@@ -282,7 +293,10 @@ function productionRecords(view: string, value: unknown) {
     (value as unknown[]).forEach((issue, i) => records.push({ path: [i], value: issue }));
     return { records, context: [] };
   }
-  const media = value as { bindings: unknown[]; inputs: Record<string, unknown[]> };
+  const media = value as {
+    bindings: unknown[];
+    inputs: Record<string, unknown[]>;
+  };
   media.bindings.forEach((binding, i) => records.push({ path: ['bindings', i], value: binding }));
   for (const [name, inputs] of Object.entries(media.inputs))
     inputs.forEach((input, i) => records.push({ path: ['inputs', name, i], value: input }));

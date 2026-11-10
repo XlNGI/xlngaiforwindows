@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AssetInfo,
   DocumentSummary,
-  ProductionShotAuthoringIR,
   ProductionImageBindingPromptEntry,
   SceneCharacterBindingInfo,
   ShotReferenceBindingInfo,
@@ -29,7 +28,6 @@ import {
   promptImageReferences as createPromptImageReferences,
   remapPromptReferences,
 } from './prompt-references';
-
 export function shotReferenceImageSelections(
   refs: ShotReferenceAssets,
 ): ProductionImageSelection[] {
@@ -60,11 +58,8 @@ export function shotReferenceImageSelections(
   refs.continuityReferenceAssetIds?.forEach((assetId) => add(assetId, 'reference'));
   return selections;
 }
-
 const STORAGE_PREFIX = 'ai-video.shot-reference-assets:';
-
 export type ShotReferenceSlot = 'character' | 'scene' | 'firstFrame';
-
 export interface ShotReferenceAssets {
   characterBindings?: NonNullable<ShotReferenceBindingInfo['characterBindings']>;
   sceneBindings?: NonNullable<ShotReferenceBindingInfo['sceneBindings']>;
@@ -78,7 +73,6 @@ export interface ShotReferenceAssets {
   continuityPrompt?: string;
   ignoreSceneBinding?: boolean;
 }
-
 function durableReferences(next: ShotReferenceAssets): ShotReferenceBindingInfo {
   return {
     ...(next.characterBindings?.length ? { characterBindings: next.characterBindings } : {}),
@@ -91,7 +85,6 @@ function durableReferences(next: ShotReferenceAssets): ShotReferenceBindingInfo 
     ...(next.ignoreSceneBinding ? { ignoreSceneBinding: true } : {}),
   };
 }
-
 export function loadShotReferences(projectId: string, shotId: string): ShotReferenceAssets {
   try {
     const raw = window.localStorage.getItem(STORAGE_PREFIX + projectId);
@@ -101,7 +94,6 @@ export function loadShotReferences(projectId: string, shotId: string): ShotRefer
     return {};
   }
 }
-
 export function saveShotReferences(
   projectId: string,
   shotId: string,
@@ -116,15 +108,12 @@ export function saveShotReferences(
     // Storage can be unavailable in restricted webviews.
   }
 }
-
 function isVideoKind(kind: string): boolean {
   return kind.includes('video');
 }
-
 export function ShotWorkspace(props: Parameters<typeof ShotWorkspaceContent>[0]) {
   return <ShotWorkspaceContent key={`${props.projectId}:${props.shotId}`} {...props} />;
 }
-
 function ShotWorkspaceContent({
   projectId,
   shotId,
@@ -152,7 +141,7 @@ function ShotWorkspaceContent({
   mediaRevision,
   onOpenDocument,
   referenceBindings,
-  authoringIR,
+  bindings,
   onSaveReferenceBindings,
   continuitySourceDirty = false,
   llm,
@@ -183,10 +172,15 @@ function ShotWorkspaceContent({
   mediaRevision?: number;
   onOpenDocument?: (id: string) => void;
   referenceBindings?: ShotReferenceBindingInfo;
-  authoringIR?: ProductionShotAuthoringIR;
+  bindings?: import('@ai-video/contracts').PromptBindingIR;
   onSaveReferenceBindings?: (bindings: ShotReferenceBindingInfo | null) => Promise<unknown>;
   continuitySourceDirty?: boolean;
-  llm?: { providerProfileId: string; modelId: string; name: string; vision: boolean };
+  llm?: {
+    providerProfileId: string;
+    modelId: string;
+    name: string;
+    vision: boolean;
+  };
 }) {
   const callWorker = projectWorker();
   const [refs, setRefs] = useState<ShotReferenceAssets>(() => {
@@ -209,7 +203,6 @@ function ShotWorkspaceContent({
     window.addEventListener('production-source-updated', refresh);
     return () => window.removeEventListener('production-source-updated', refresh);
   }, [projectId, shotId]);
-
   const continuityRefresh = useMemo(
     () => ({ mediaRevision, continuityRevision }),
     [mediaRevision, continuityRevision],
@@ -219,18 +212,19 @@ function ShotWorkspaceContent({
   const [promptCharacterScope, setPromptCharacterScope] = useState<
     | {
         key: string;
-        authoringIR?: ProductionShotAuthoringIR;
+        bindings?: import('@ai-video/contracts').PromptBindingIR;
+        timing?: import('@ai-video/contracts').ProductionTiming;
       }
     | undefined
   >();
   useEffect(() => {
     let active = true;
-    const apply = (ir?: ProductionShotAuthoringIR) => {
-      setPromptCharacterScope({ key: promptCharacterScopeKey, authoringIR: ir });
+    const apply = (value?: import('@ai-video/contracts').PromptBindingIR) => {
+      setPromptCharacterScope({ key: promptCharacterScopeKey, bindings: value });
     };
     setPromptCharacterScope(undefined);
-    if (authoringIR) {
-      apply(authoringIR);
+    if (bindings) {
+      apply(bindings);
       return () => {
         active = false;
       };
@@ -242,8 +236,8 @@ function ShotWorkspaceContent({
     void Promise.resolve()
       .then(() => callWorker('production.read', { target: { kind: 'shot', id: shotId } }))
       .then((production) => {
-        const ir = production?.authoringIR;
-        if (active) apply(ir?.kind === 'shot' ? (ir as ProductionShotAuthoringIR) : undefined);
+        const ir = production;
+        if (active) apply(ir.bindings ?? undefined);
       })
       .catch(() => {
         if (active) apply();
@@ -251,13 +245,13 @@ function ShotWorkspaceContent({
     return () => {
       active = false;
     };
-  }, [authoringIR, projectId, shotId, promptCharacterScopeKey]);
+  }, [bindings, projectId, shotId, promptCharacterScopeKey]);
   const currentPromptCharacterScope =
     promptCharacterScope?.key === promptCharacterScopeKey
       ? {
           key: promptCharacterScope.key,
           ...productionShotReferenceIds({
-            authoringIR: promptCharacterScope.authoringIR,
+            ...promptCharacterScope,
             referenceBindings,
           }),
         }
@@ -327,7 +321,6 @@ function ShotWorkspaceContent({
     projectId?: string;
     assets: AssetInfo[];
   }>();
-
   useEffect(() => {
     let active = true;
     if (projectId)
@@ -388,7 +381,6 @@ function ShotWorkspaceContent({
     },
     [],
   );
-
   const availableAssets = useMemo(
     () => [
       ...new Map(
@@ -422,7 +414,6 @@ function ShotWorkspaceContent({
           ? sceneReferenceEntries.map((binding) => binding.assetId)
           : undefined)),
   };
-
   useEffect(() => {
     const local = projectId ? loadShotReferences(projectId, shotId) : {};
     setRefs(
@@ -436,7 +427,6 @@ function ShotWorkspaceContent({
         : local,
     );
   }, [projectId, shotId, referenceBindings]);
-
   const persist = (next: ShotReferenceAssets, saveLocal = true) => {
     setRefs(next);
     if (saveLocal && projectId) saveShotReferences(projectId, shotId, next);
@@ -449,14 +439,12 @@ function ShotWorkspaceContent({
     }
     return referenceSave.current;
   };
-
   const persistFromControl = (next: ShotReferenceAssets) => {
     referenceEditRevision.current += 1;
     void persist(next).catch((error: unknown) => {
       setReferenceMessage(error instanceof Error ? error.message : '镜头参考图保存失败。');
     });
   };
-
   const assign = (slot: ShotReferenceSlot, assetId?: string) => {
     if (slot === 'firstFrame' && continuity?.binding) {
       const scope = currentScope.current;
@@ -503,7 +491,6 @@ function ShotWorkspaceContent({
     }
     persistFromControl(next);
   };
-
   const saveReferences = async () => {
     if (saving || !writable) return false;
     setSaving(true);
@@ -519,7 +506,6 @@ function ShotWorkspaceContent({
       setSaving(false);
     }
   };
-
   const repairBindings = async () => {
     if (!onRepairBindings || repairPending || !writable || !prompt.trim()) return;
     setRepairPending(true);
@@ -533,7 +519,6 @@ function ShotWorkspaceContent({
       setRepairPending(false);
     }
   };
-
   const resolveBoundReferences = async (
     beforeSave?: (references: ShotReferenceAssets) => void,
   ): Promise<ShotReferenceAssets> => {
@@ -624,7 +609,6 @@ function ShotWorkspaceContent({
       throw new Error('镜头或绑定已变化，请重新确认后再填表。');
     return next;
   };
-
   const generate = async (mode: 'image' | 'video') => {
     if (saving || !writable || fillingMode) return;
     const expectedScope = currentScope.current;
@@ -691,7 +675,6 @@ function ShotWorkspaceContent({
       setFillingMode(undefined);
     }
   };
-
   const bindingScopeLoading = Boolean(projectId && !currentPromptCharacterScope);
   const scopedCharacters = currentPromptCharacterScope ? characters : [];
   const effectivePromptCharacters = effectiveSceneCast(
@@ -777,7 +760,6 @@ function ShotWorkspaceContent({
     }
     promptReferenceSnapshot.current = promptReferences;
   }, [prompt, promptReferences, onPromptChange]);
-
   return (
     <div className="shot-workspace">
       <section className="shot-prompt-panel" aria-labelledby="shot-prompt-heading">
@@ -1112,7 +1094,6 @@ function ShotWorkspaceContent({
     </div>
   );
 }
-
 function ReferenceSlot({
   label,
   asset,

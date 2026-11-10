@@ -3,11 +3,8 @@ import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AssetInfo, DocumentSummary, SceneInfo, ShotInfo } from '@ai-video/contracts';
 import { SceneWorkspace } from './SceneWorkspace';
-
 vi.mock('./dubbing/DubbingScenePanel', () => ({ DubbingScenePanel: () => null }));
-
 afterEach(() => cleanup());
-
 const scene: SceneInfo = {
   id: 'scene',
   projectId: 'project',
@@ -17,7 +14,6 @@ const scene: SceneInfo = {
   createdAt: 'now',
   updatedAt: 'now',
 };
-
 const documents: DocumentSummary[] = [
   {
     id: 'actor',
@@ -53,7 +49,6 @@ const documents: DocumentSummary[] = [
     updatedAt: 'now',
   },
 ];
-
 const locationAsset: AssetInfo = {
   id: 'location-image',
   projectId: 'project',
@@ -63,11 +58,10 @@ const locationAsset: AssetInfo = {
   sizeBytes: 100,
   createdAt: 'now',
 };
-
 function shot(
   id: string,
   title: string,
-  references: NonNullable<ShotInfo['authoringIR']>['references'],
+  references: Omit<import('@ai-video/contracts').PromptBindingIR, 'schemaVersion'>,
   rowBindings?: ShotInfo['referenceBindings'],
 ): ShotInfo {
   return {
@@ -76,11 +70,9 @@ function shot(
     title,
     position: 0,
     status: 'draft',
-    authoringIR: {
-      schemaVersion: 1,
-      kind: 'shot',
+    ...{
       prompt: title,
-      references,
+      bindings: { schemaVersion: 1, ...references },
     },
     referenceBindings: rowBindings,
     rowVersion: 1,
@@ -88,7 +80,6 @@ function shot(
     updatedAt: 'now',
   };
 }
-
 function props(overrides: Partial<ComponentProps<typeof SceneWorkspace>> = {}) {
   return {
     projectId: 'project',
@@ -123,11 +114,9 @@ function props(overrides: Partial<ComponentProps<typeof SceneWorkspace>> = {}) {
     ...overrides,
   };
 }
-
 describe('SceneWorkspace shot binding summary', () => {
   it('shows the union of per-shot references and identifies which shots use each object', () => {
     render(<SceneWorkspace {...props()} />);
-
     expect(screen.getByRole('heading', { name: '镜头绑定汇总' })).toBeVisible();
     expect(screen.getByText('林澈')).toBeVisible();
     expect(screen.getByText('旧码头')).toBeVisible();
@@ -139,19 +128,15 @@ describe('SceneWorkspace shot binding summary', () => {
     expect(screen.queryByRole('button', { name: '助手关联' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('选择出场角色')).not.toBeInTheDocument();
   });
-
   it('opens an explicitly selected image from the shot summary', () => {
     const p = props();
     render(<SceneWorkspace {...p} />);
-
     fireEvent.click(screen.getByRole('button', { name: 'old-dock.png' }));
     expect(p.onOpenAsset).toHaveBeenCalledWith(locationAsset.id);
   });
-
   it('keeps scene prompt actions limited to prompt save and scene video form', () => {
     const p = props();
     render(<SceneWorkspace {...p} />);
-
     fireEvent.click(screen.getByRole('button', { name: '保存提示词' }));
     fireEvent.click(screen.getByRole('button', { name: '生成场次视频' }));
     expect(p.onSave).toHaveBeenCalledWith(p.prompt);

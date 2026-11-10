@@ -5,6 +5,7 @@ import { StructuredAssetDrop } from './assets/StructuredAssetDrop';
 import { imageAssetId } from './ParameterImagePreview';
 import { MediaReviewQueue } from './MediaReviewQueue';
 import { AgentQuestionForm } from './AgentQuestionForm';
+import { AgentDeliveryFeedback } from './AgentDeliveryFeedback';
 import {
   conversationProcessGroups,
   conversationTimeline,
@@ -63,6 +64,7 @@ import type {
   AdapterParameters,
   AdapterParameterProperty,
   AgentTaskDetail,
+  AgentTaskReviewTargetInfo,
   AgentLibrarySourceInfo,
   ConversationRuntimeLiveAction,
   MediaModelCandidate,
@@ -200,6 +202,7 @@ interface ChatPanelProps {
   loadingEarlierMessages?: boolean;
   onLoadEarlierMessages?: () => void;
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
+  onOpenReviewTarget?: (projectId: string, target: AgentTaskReviewTargetInfo) => void;
   agentParameterRequest?: {
     prompt: string;
     capability: 'image' | 'video';
@@ -286,6 +289,7 @@ export function ChatPanel({
   onSelectMediaModel,
   onCancelMediaModelSelection,
   onOpenLibrarySource,
+  onOpenReviewTarget,
   agentParameterRequest,
   onSubmitAgentParameters,
   canLoadEarlierMessages = false,
@@ -516,6 +520,7 @@ export function ChatPanel({
                   }
                   runningPlaceholder={item.live}
                   onOpenLibrarySource={onOpenLibrarySource}
+                  onOpenReviewTarget={onOpenReviewTarget}
                 />
               );
             const message = item.message;
@@ -586,6 +591,13 @@ export function ChatPanel({
                         <small>{resultDetail.task.errorMessage}</small>
                       )}
                   </footer>
+                )}
+                {resultLabel && resultDetail && (
+                  <AgentDeliveryFeedback
+                    key={resultDetail.task.id}
+                    detail={resultDetail}
+                    onOpenTarget={onOpenReviewTarget}
+                  />
                 )}
                 {message.role === 'assistant' &&
                   message.status === 'failed' &&
@@ -663,6 +675,7 @@ export function ChatPanel({
             liveActions={liveAgentActions}
             runningPlaceholder={generationLocked}
             onOpenLibrarySource={onOpenLibrarySource}
+            onOpenReviewTarget={onOpenReviewTarget}
           />
         ) : generationLocked &&
           !messages.some((item) => item.id === generation?.assistantMessage.id) ? (
@@ -1558,6 +1571,7 @@ const AGENT_TOOL_ACTION_LABELS: Record<string, string> = {
   'document.submit_draft': '保存文档草稿',
   'library.search': '检索项目资料',
   'library.read': '阅读资料正文',
+  'conversation.task.checkpoint': '核对任务进度与内容',
   'scene.submit_structure': '保存场次与镜头',
   'scene.structure.stage': '分段编排场次与镜头',
   'scene.read': '读取已有场次',
@@ -1648,7 +1662,12 @@ function taskResultLabel(detail: AgentTaskDetail | undefined): string | undefine
     return task.outcome === 'read-only' ? '未完成 · 未执行保存' : '部分完成';
   const hasSaves =
     detail.documents.length > 0 || Boolean(detail.savedProductionReceipts?.receipts.length);
-  return hasSaves ? '回复结束 · 已有保存记录' : '回复结束';
+  if (!hasSaves) return '回复结束';
+  return detail.deliveryReview?.state === 'verified'
+    ? '回复结束 · 已保存 · 内容已核验'
+    : detail.deliveryReview?.state === 'needs_revision'
+      ? '回复结束 · 已保存 · 内容需修复'
+      : '回复结束 · 已保存 · 内容未核验';
 }
 
 function agentTaskForAssistantMessage(
@@ -1880,6 +1899,7 @@ function AgentToolTimeline({
   runningPlaceholder = false,
   stage = false,
   onOpenLibrarySource,
+  onOpenReviewTarget,
 }: {
   detail?: AgentTaskDetail;
   generationStatus?: LlmGenerationInfo['status'];
@@ -1888,11 +1908,13 @@ function AgentToolTimeline({
   runningPlaceholder?: boolean;
   stage?: boolean;
   onOpenLibrarySource?: (source: AgentLibrarySourceInfo) => void;
+  onOpenReviewTarget?: (projectId: string, target: AgentTaskReviewTargetInfo) => void;
 }) {
   const generationFailed = generationStatus === 'failed' || generationStatus === 'cancelled';
   const generationSettled =
     generationStatus !== undefined && !['prepared', 'streaming'].includes(generationStatus);
   const running =
+    detail?.task.status !== 'waiting_review' &&
     !generationSettled &&
     (runningPlaceholder ||
       (!generationFailed &&
@@ -1963,21 +1985,28 @@ function AgentToolTimeline({
           >
             <Terminal size={12} />
             <span>
-              {running
-                ? retryingRequest
-                  ? '模型服务暂时异常，正在准备重试'
-                  : activeTool
-                    ? '正在调用工具'
-                    : composingReply
-                      ? '正在回复'
-                      : '等待助手回复'
-                : stage
-                  ? `已调用 ${actions.filter((action) => action.toolName).length} 个工具`
-                  : '调用了工具'}
+              {detail?.task.status === 'waiting_review'
+                ? '等待用户操作'
+                : running
+                  ? retryingRequest
+                    ? '模型服务暂时异常，正在准备重试'
+                    : activeTool
+                      ? '正在调用工具'
+                      : composingReply
+                        ? '正在回复'
+                        : '等待助手回复'
+                  : stage
+                    ? `已调用 ${actions.filter((action) => action.toolName).length} 个工具`
+                    : '调用了工具'}
             </span>
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
           <small className="agent-tool-timeline-progress">
+            {detail &&
+            (detail.documents.length > 0 ||
+              Boolean(detail.savedProductionReceipts?.receipts.length))
+              ? `草稿已保存 · ${detail.deliveryReview?.state === 'verified' ? '内容已核验' : detail.deliveryReview?.state === 'needs_revision' ? '内容需修复' : '内容未核验'} · `
+              : ''}
             {running
               ? `${completedActionCount} 项已完成${activeTool ? ' · 正在执行下一步' : ''}`
               : attentionActionCount > 0
@@ -2042,6 +2071,13 @@ function AgentToolTimeline({
         </>
       ) : null}
       {errorMessage && rawError ? <AgentTaskError error={rawError} message={errorMessage} /> : null}
+      {running && detail && (
+        <AgentDeliveryFeedback
+          key={detail.task.id}
+          detail={detail}
+          onOpenTarget={onOpenReviewTarget}
+        />
+      )}
     </section>
   );
 }

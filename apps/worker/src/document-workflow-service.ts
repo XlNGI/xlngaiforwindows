@@ -39,7 +39,7 @@ import type {
   TaskLogPage,
   TaskLogListParams,
 } from '@ai-video/contracts';
-import { validateProjectContentIR, type ProjectContentIR } from '@ai-video/contracts';
+import { validatePromptBindings, type PromptBindingIR } from '@ai-video/contracts';
 import type {
   DocumentWorkflowAuditAction,
   DocumentWorkflowAuditActorType,
@@ -54,9 +54,14 @@ import {
 } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { AgentInputService } from './agent-input-service.js';
-
+import { scriptToMediaCompletionPending } from './production-skill-validation.js';
+import type { TaskReviewState } from './agent-task-review.js';
+import { deliveryFeedback } from './agent-delivery-feedback.js';
+import { bundleSavedObjects } from './production-bundle-service.js';
+import { isBundleTask } from './production-bundle-state.js';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 const LOCAL_USER = 'local-user';
-const MAX_DOCUMENT_LENGTH = 1_000_000;
+const MAX_DOCUMENT_LENGTH = 1000000;
 const MAX_TITLE_LENGTH = 200;
 const AGENT_ATTEMPT_SUMMARY_SELECT = `
   COALESCE(
@@ -95,14 +100,12 @@ const AGENT_ATTEMPT_SUMMARY_SELECT = `
     WHERE links.task_id = tasks.id
     ORDER BY attempts.started_at DESC, attempts.id DESC LIMIT 1) AS estimated_cost
 `;
-
 type WorkflowErrorCode =
   | 'DOCUMENT_BASE_CONFLICT'
   | 'DOCUMENT_PUBLISHED_READ_ONLY'
   | 'IDEMPOTENCY_KEY_REUSED'
   | 'CONFLICT'
   | 'INVALID_STATE';
-
 export class DocumentWorkflowError extends Error {
   constructor(
     message: string,
@@ -112,7 +115,6 @@ export class DocumentWorkflowError extends Error {
     this.name = 'DocumentWorkflowError';
   }
 }
-
 interface DocumentRow {
   id: string;
   project_id: string;
@@ -129,13 +131,13 @@ interface DocumentRow {
   created_at: string;
   updated_at: string;
 }
-
 interface DocumentVersionRow {
   id: string;
   document_id: string;
   version: number;
   content_markdown: string;
-  content_ir_json?: string | null;
+  bindings_json?: string | null;
+  sample_text?: string | null;
   state: string;
   base_version_id: string | null;
   title_snapshot: string | null;
@@ -148,7 +150,6 @@ interface DocumentVersionRow {
   state_version: number;
   created_at: string;
 }
-
 interface AgentTaskRow {
   id: string;
   project_id: string;
@@ -181,7 +182,6 @@ interface AgentTaskRow {
   output_tokens?: number;
   estimated_cost?: string;
 }
-
 interface AgentTaskEventRow {
   id: string;
   task_id: string;
@@ -192,7 +192,6 @@ interface AgentTaskEventRow {
   created_at: string;
   payload_json?: string | null;
 }
-
 interface ReviewRow {
   id: string;
   project_id: string;
@@ -205,7 +204,6 @@ interface ReviewRow {
   comment: string | null;
   version: number;
 }
-
 interface PublicationRow {
   id: string;
   document_id: string;
@@ -214,14 +212,12 @@ interface PublicationRow {
   publication_no: number;
   published_at: string;
 }
-
 interface TaskDocumentRow {
   document_id: string;
   document_version_id: string;
   operation: 'create' | 'update' | 'regenerate';
   created_at: string;
 }
-
 interface AgentProviderStepRow {
   id: string;
   generation_id: string;
@@ -243,7 +239,6 @@ interface AgentProviderStepRow {
   started_at: string;
   completed_at: string | null;
 }
-
 interface AgentResearchSourceRow {
   id: string;
   title: string;
@@ -260,12 +255,12 @@ interface AgentResearchSourceRow {
   cache_status: string | null;
   cache_error_code: string | null;
 }
-
 export interface TrustedAgentDraftParams {
   taskId: string;
   title: string;
   contentMarkdown: string;
-  contentIR?: ProjectContentIR;
+  bindings?: PromptBindingIR;
+  sampleText?: string;
   kind?: DocumentKind;
   scopeType: DocumentSummary['scopeType'];
   scopeId?: string;
@@ -274,31 +269,33 @@ export interface TrustedAgentDraftParams {
   /** Defaults to a reviewable task unless a trusted workflow opts out. */
   reviewRequired?: boolean;
 }
-
 export interface TrustedAgentUpdateParams extends TrustedAgentDraftParams {
   documentId: string;
   expectedDocumentRowVersion: number;
   baseVersionId: string | null;
 }
-
 export interface TrustedAgentLifecycleParams {
   taskId: string;
   documentId: string;
   expectedDocumentRowVersion: number;
   outcome: 'archived' | 'restored';
 }
-
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
-
 function required(value: string, name: string, maxLength: number): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${name} is required.`);
   if (normalized.length > maxLength) throw new Error(`${name} exceeds ${maxLength} characters.`);
   return normalized;
 }
-
+function requiredContent(value: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > MAX_DOCUMENT_LENGTH)
+    throw new Error(
+      `Document content must contain between 1 and ${MAX_DOCUMENT_LENGTH} characters.`,
+    );
+  return value;
+}
 function documentKind(value: string): DocumentSummary['kind'] {
   return [
     'outline',
@@ -307,13 +304,13 @@ function documentKind(value: string): DocumentSummary['kind'] {
     'character',
     'scene',
     'prop',
+    'voice',
     'storyboard',
     'note',
   ].includes(value)
     ? (value as DocumentSummary['kind'])
     : 'note';
 }
-
 function documentState(value: string): DocumentVersionInfo['state'] {
   return [
     'draft',
@@ -327,12 +324,10 @@ function documentState(value: string): DocumentVersionInfo['state'] {
     ? (value as DocumentVersionInfo['state'])
     : 'draft';
 }
-
 function scopeType(value: string): DocumentSummary['scopeType'] {
   if (value === 'project' || value === 'scene' || value === 'shot') return value;
   throw new Error('Document scope is invalid.');
 }
-
 function toDocumentSummary(row: DocumentRow): DocumentSummary {
   return {
     id: row.id,
@@ -351,15 +346,15 @@ function toDocumentSummary(row: DocumentRow): DocumentSummary {
     updatedAt: row.updated_at,
   };
 }
-
 function toDocumentVersion(row: DocumentVersionRow): DocumentVersionInfo {
   return {
     id: row.id,
     documentId: row.document_id,
     version: row.version,
     contentMarkdown: row.content_markdown,
-    ...(row.content_ir_json
-      ? { contentIR: validateProjectContentIR(JSON.parse(row.content_ir_json)) }
+    sampleText: row.sample_text ?? undefined,
+    ...(row.bindings_json
+      ? { bindings: validatePromptBindings(JSON.parse(row.bindings_json)) }
       : {}),
     state: documentState(row.state),
     baseVersionId: row.base_version_id ?? undefined,
@@ -375,7 +370,6 @@ function toDocumentVersion(row: DocumentVersionRow): DocumentVersionInfo {
     createdAt: row.created_at,
   };
 }
-
 function taskType(value: string): AgentTaskInfo['taskType'] {
   if (
     [
@@ -391,14 +385,12 @@ function taskType(value: string): AgentTaskInfo['taskType'] {
   }
   throw new Error('Agent task type is invalid.');
 }
-
 function taskStatus(value: string): AgentTaskInfo['status'] {
   if (['queued', 'running', 'waiting_review', 'completed', 'failed', 'cancelled'].includes(value)) {
     return value as AgentTaskInfo['status'];
   }
   throw new Error('Agent task state is invalid.');
 }
-
 function toTask(row: AgentTaskRow): AgentTaskInfo {
   return {
     id: row.id,
@@ -443,7 +435,6 @@ function toTask(row: AgentTaskRow): AgentTaskInfo {
       : {}),
   };
 }
-
 function toEvent(row: AgentTaskEventRow): AgentTaskEventInfo {
   let messageBoundary: AgentTaskEventInfo['messageBoundary'];
   if (row.event_type === 'agent.assistant.started' && row.payload_json) {
@@ -467,7 +458,6 @@ function toEvent(row: AgentTaskEventRow): AgentTaskEventInfo {
     ...(messageBoundary ? { messageBoundary } : {}),
   };
 }
-
 function toReview(row: ReviewRow): DocumentReviewInfo {
   return {
     id: row.id,
@@ -482,7 +472,6 @@ function toReview(row: ReviewRow): DocumentReviewInfo {
     version: row.version,
   };
 }
-
 function toPublication(row: PublicationRow): DocumentPublicationInfo {
   return {
     id: row.id,
@@ -493,10 +482,8 @@ function toPublication(row: PublicationRow): DocumentPublicationInfo {
     publishedAt: row.published_at,
   };
 }
-
 export class DocumentWorkflowService {
   constructor(private readonly projects: ProjectService) {}
-
   listDocuments(): DocumentSummary[] {
     return this.projects.access(false, (database, project) =>
       (
@@ -517,7 +504,6 @@ export class DocumentWorkflowService {
       ).map(toDocumentSummary),
     );
   }
-
   listArchivedDocuments(): DocumentSummary[] {
     return this.projects.access(false, (database, project) =>
       (
@@ -535,7 +521,6 @@ export class DocumentWorkflowService {
       ).map(toDocumentSummary),
     );
   }
-
   archiveDocument(params: DocumentArchiveParams): DocumentDetail {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -584,7 +569,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   unarchiveDocument(params: DocumentUnarchiveParams): DocumentDetail {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -633,13 +617,11 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   getDocument(documentId: string): DocumentDetail {
     return this.projects.access(false, (database, project) =>
       this.getDocumentInProject(database, project, documentId),
     );
   }
-
   /**
    * User-only transition from authority to a fresh editable draft. Publication
    * rows and the old published version remain immutable history.
@@ -672,7 +654,9 @@ export class DocumentWorkflowService {
           ((
             database
               .prepare('SELECT MAX(version) AS value FROM document_versions WHERE document_id = ?')
-              .get(document.id) as { value: number | null }
+              .get(document.id) as {
+              value: number | null;
+            }
           ).value ?? 0) + 1;
         return withDocumentMutationAuthorization(database, document.id, 'unpublish', () => {
           this.appendAudit(database, project.id, {
@@ -687,17 +671,18 @@ export class DocumentWorkflowService {
           database
             .prepare(
               `INSERT INTO document_versions
-               (id, document_id, version, content_markdown, content_ir_json, created_at,
+               (id, document_id, version, content_markdown, bindings_json, sample_text, created_at,
                 state, base_version_id, title_snapshot, scope_type_snapshot, scope_id_snapshot,
                 author_type, author_id, content_hash, state_updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'draft', NULL, ?, ?, ?, 'user', ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', NULL, ?, ?, ?, 'user', ?, ?, ?)`,
             )
             .run(
               versionId,
               document.id,
               versionNumber,
               publishedVersion.content_markdown,
-              publishedVersion.content_ir_json,
+              publishedVersion.bindings_json,
+              publishedVersion.sample_text ?? null,
               now,
               publishedVersion.title_snapshot ?? document.title,
               publishedVersion.scope_type_snapshot ?? document.scope_type,
@@ -738,7 +723,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   listVersions(documentId: string): DocumentVersionInfo[] {
     return this.projects.access(false, (database, project) => {
       this.requireDocument(database, project, documentId);
@@ -751,19 +735,28 @@ export class DocumentWorkflowService {
       ).map(toDocumentVersion);
     });
   }
-
-  saveDraft(params: DocumentDraftSaveParams): DocumentDetail {
+  saveDraft(
+    params: DocumentDraftSaveParams,
+    allocation?: {
+      newId: string;
+    },
+  ): DocumentDetail {
     const title = required(params.title, 'Document title', MAX_TITLE_LENGTH);
     if (params.contentMarkdown.length > MAX_DOCUMENT_LENGTH) {
       throw new Error(`Document content exceeds ${MAX_DOCUMENT_LENGTH} characters.`);
     }
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
-        const document = this.writeDraft(database, project, {
-          ...params,
-          title,
-          authorType: params.authorType ?? 'user',
-        });
+        const document = this.writeDraft(
+          database,
+          project,
+          {
+            ...params,
+            title,
+            authorType: params.authorType ?? 'user',
+          },
+          allocation,
+        );
         const version = document.currentVersion;
         if (!version) throw new DocumentWorkflowError('EXPECTED_VERSION_MISSING', 'CONFLICT');
         this.appendAudit(database, project.id, {
@@ -784,7 +777,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   restoreDocument(params: DocumentRestoreParams): DocumentDetail {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -795,15 +787,9 @@ export class DocumentWorkflowService {
           kind: documentKind(document.kind),
           title: document.title,
           contentMarkdown: sourceVersion.content_markdown,
-          contentIR: sourceVersion.content_ir_json
-            ? validateProjectContentIR(
-                JSON.parse(sourceVersion.content_ir_json),
-                document.kind === 'character' ||
-                  document.kind === 'scene' ||
-                  document.kind === 'prop'
-                  ? document.kind
-                  : undefined,
-              )
+          sampleText: sourceVersion.sample_text ?? undefined,
+          bindings: sourceVersion.bindings_json
+            ? validatePromptBindings(JSON.parse(sourceVersion.bindings_json))
             : undefined,
           scopeType: scopeType(document.scope_type),
           scopeId: document.scope_id ?? undefined,
@@ -828,7 +814,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   submitReview(params: DocumentReviewSubmitParams): DocumentReviewInfo {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -918,7 +903,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   requestChanges(params: DocumentReviewRequestChangesParams): DocumentReviewInfo {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -947,7 +931,7 @@ export class DocumentWorkflowService {
           );
         }
         const now = new Date().toISOString();
-        const comment = params.comment?.trim().slice(0, 2_000) || null;
+        const comment = params.comment?.trim().slice(0, 2000) || null;
         database
           .prepare(
             `UPDATE document_reviews
@@ -988,7 +972,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   rejectReview(params: DocumentReviewRejectParams): DocumentReviewInfo {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -1017,7 +1000,7 @@ export class DocumentWorkflowService {
           );
         }
         const now = new Date().toISOString();
-        const comment = params.comment?.trim().slice(0, 2_000) || null;
+        const comment = params.comment?.trim().slice(0, 2000) || null;
         database
           .prepare(
             `UPDATE document_reviews
@@ -1065,7 +1048,6 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   publish(params: DocumentPublishParams): {
     document: DocumentDetail;
     publication: DocumentPublicationInfo;
@@ -1074,7 +1056,6 @@ export class DocumentWorkflowService {
       database.transaction(() => this.publishInTransaction(database, project, params))(),
     );
   }
-
   selfPublish(params: DocumentPublishParams): {
     document: DocumentDetail;
     publication: DocumentPublicationInfo;
@@ -1164,12 +1145,14 @@ export class DocumentWorkflowService {
       })(),
     );
   }
-
   private publishInTransaction(
     database: Database.Database,
     project: OpenProject,
     params: DocumentPublishParams,
-  ): { document: DocumentDetail; publication: DocumentPublicationInfo } {
+  ): {
+    document: DocumentDetail;
+    publication: DocumentPublicationInfo;
+  } {
     const document = this.requireDocument(database, project, params.documentId);
     this.requireDocumentRowVersion(document, params.expectedDocumentRowVersion);
     if (document.published_version_id) {
@@ -1227,14 +1210,20 @@ export class DocumentWorkflowService {
           .prepare(
             'SELECT MAX(publication_no) AS value FROM document_publications WHERE document_id = ?',
           )
-          .get(document.id) as { value: number | null }
+          .get(document.id) as {
+          value: number | null;
+        }
       ).value ?? 0) + 1;
     const previousPublicationVersionId = database
       .prepare(
         `SELECT document_version_id FROM document_publications
          WHERE document_id = ? ORDER BY publication_no DESC LIMIT 1`,
       )
-      .get(document.id) as { document_version_id: string } | undefined;
+      .get(document.id) as
+      | {
+          document_version_id: string;
+        }
+      | undefined;
     const publicationId = randomUUID();
     database
       .prepare(
@@ -1316,7 +1305,6 @@ export class DocumentWorkflowService {
       ),
     };
   }
-
   createDocumentDraftFromMessage(
     params: AgentTaskCreateDocumentDraftParams,
   ): AgentTaskCreateDocumentDraftResult {
@@ -1326,7 +1314,6 @@ export class DocumentWorkflowService {
       )(),
     );
   }
-
   writeTrustedAgentDraftInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1334,7 +1321,11 @@ export class DocumentWorkflowService {
   ): DocumentDetail {
     const existingArtifact = database
       .prepare('SELECT document_id FROM agent_task_document_artifacts WHERE task_id = ?')
-      .get(params.taskId) as { document_id: string } | undefined;
+      .get(params.taskId) as
+      | {
+          document_id: string;
+        }
+      | undefined;
     if (existingArtifact) {
       const existingDocument = this.getDocumentInProject(
         database,
@@ -1353,8 +1344,9 @@ export class DocumentWorkflowService {
     const document = this.writeDraft(database, project, {
       kind: params.kind ?? 'note',
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
-      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
-      contentIR: params.contentIR,
+      contentMarkdown: requiredContent(params.contentMarkdown),
+      bindings: params.bindings,
+      sampleText: params.sampleText,
       scopeType: params.scopeType,
       scopeId: params.scopeId,
       sourceTaskId: params.taskId,
@@ -1434,7 +1426,6 @@ export class DocumentWorkflowService {
     }
     return document;
   }
-
   /**
    * Writes a Pi-managed reviewable draft without taking ownership of the
    * parent task's terminal state. A single Pi task can produce several
@@ -1451,8 +1442,9 @@ export class DocumentWorkflowService {
     const document = this.writeDraft(database, project, {
       kind: params.kind ?? 'note',
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
-      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
-      contentIR: params.contentIR,
+      contentMarkdown: requiredContent(params.contentMarkdown),
+      bindings: params.bindings,
+      sampleText: params.sampleText,
       scopeType: params.scopeType,
       scopeId: params.scopeId,
       sourceTaskId: params.taskId,
@@ -1491,7 +1483,6 @@ export class DocumentWorkflowService {
     );
     return document;
   }
-
   writeTrustedAgentUpdateInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1506,8 +1497,9 @@ export class DocumentWorkflowService {
       documentId: params.documentId,
       kind: documentKind(existing.kind),
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
-      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
-      contentIR: params.contentIR,
+      contentMarkdown: requiredContent(params.contentMarkdown),
+      bindings: params.bindings,
+      sampleText: params.sampleText,
       scopeType: scopeType(existing.scope_type),
       scopeId: existing.scope_id ?? undefined,
       expectedDocumentRowVersion: params.expectedDocumentRowVersion,
@@ -1591,7 +1583,6 @@ export class DocumentWorkflowService {
     }
     return document;
   }
-
   writeRecoveredUserDraftInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1606,7 +1597,7 @@ export class DocumentWorkflowService {
     const document = this.writeDraft(database, project, {
       documentId: params.documentId,
       title: required(params.title, 'Document title', MAX_TITLE_LENGTH),
-      contentMarkdown: required(params.contentMarkdown, 'Document content', MAX_DOCUMENT_LENGTH),
+      contentMarkdown: requiredContent(params.contentMarkdown),
       expectedDocumentRowVersion: params.expectedDocumentRowVersion,
       baseVersionId: params.baseVersionId,
       authorType: 'user',
@@ -1624,7 +1615,6 @@ export class DocumentWorkflowService {
     });
     return document;
   }
-
   applyTrustedAgentLifecycleInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1664,7 +1654,6 @@ export class DocumentWorkflowService {
     );
     return this.getDocumentInProject(database, project, document.id);
   }
-
   listAgentDocumentsInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1681,7 +1670,6 @@ export class DocumentWorkflowService {
         .all(project.id) as DocumentRow[]
     ).map(toDocumentSummary);
   }
-
   readAgentDocumentInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -1691,7 +1679,6 @@ export class DocumentWorkflowService {
     if (document.lifecycle_status === 'archived') throw new Error('Document is archived.');
     return this.getDocumentInProject(database, project, documentId);
   }
-
   listTasks(params: AgentTaskListParams = {}): AgentTaskInfo[] {
     return this.projects.access(false, (database, project) => {
       const limit = Math.min(Math.max(params.limit ?? 100, 1), 300);
@@ -1714,7 +1701,6 @@ export class DocumentWorkflowService {
       return rows.map(toTask);
     });
   }
-
   getTask(params: AgentTaskGetParams): AgentTaskDetail {
     return this.projects.access(false, (database, project) => {
       const task = this.requireTask(database, project, params.taskId);
@@ -1843,6 +1829,17 @@ export class DocumentWorkflowService {
         operation: item.operation,
         createdAt: item.created_at,
       }));
+      for (const item of bundleSavedObjects(database, project.id, task.id).filter(
+        (o) => o.kind === 'document',
+      )) {
+        if (!documents.some((d) => d.documentId === item.id))
+          documents.push({
+            documentId: item.id,
+            documentVersionId: item.versionId!,
+            operation: 'create',
+            createdAt: task.created_at,
+          });
+      }
       const providerSteps = (
         database
           .prepare(
@@ -1956,7 +1953,11 @@ export class DocumentWorkflowService {
              WHERE task_id = ? AND tool_name = 'adapter.schema.propose' AND status = 'succeeded'
              ORDER BY created_at DESC, id DESC LIMIT 1`,
         )
-        .get(task.id) as { result_summary_json: string | null } | undefined;
+        .get(task.id) as
+        | {
+            result_summary_json: string | null;
+          }
+        | undefined;
       let pendingSchemaConfirmation: AgentTaskPendingSchemaConfirmationInfo | undefined;
       if (
         task.task_type === 'schema-query' &&
@@ -1992,8 +1993,23 @@ export class DocumentWorkflowService {
           // Malformed tool summaries are ignored; the task log retains the raw audit record.
         }
       }
+      const generation = database
+        .prepare(
+          'SELECT generation_id FROM agent_task_generations WHERE task_id=? ORDER BY ordinal DESC LIMIT 1',
+        )
+        .get(task.id) as
+        | {
+            generation_id: string;
+          }
+        | undefined;
+      const checks = generation
+        ? scriptToMediaCompletionPending(database, project.id, generation.generation_id, task.id)
+        : undefined;
+      const review = checks?.[0]?.semanticReview as TaskReviewState | undefined;
+      const deliveryReview = deliveryFeedback(database, project.id, task.id, documents, review);
       return {
         task: toTask(task),
+        deliveryReview,
         resourceChanges: database
           .prepare(
             `SELECT COALESCE(MAX(sequence),0) AS sequence,
@@ -2039,7 +2055,6 @@ export class DocumentWorkflowService {
       };
     });
   }
-
   getTaskEvents(params: AgentTaskEventsParams): AgentTaskEventsResult {
     return this.projects.access(false, (database, project) => {
       const task = this.requireTask(database, project, params.taskId);
@@ -2067,11 +2082,10 @@ export class DocumentWorkflowService {
       };
     });
   }
-
   listTaskLog(params: TaskLogListParams = {}): TaskLogPage {
     return this.projects.access(false, (database, project) => {
       const pageLimit = Math.min(Math.max(params.limit ?? 50, 1), 100);
-      const maxFetch = 5_000;
+      const maxFetch = 5000;
       const includeTasks = params.kind === undefined || params.kind === 'agent-document';
       const includeJobs =
         params.kind === undefined || params.kind === 'image' || params.kind === 'video';
@@ -2192,7 +2206,12 @@ export class DocumentWorkflowService {
                     'SELECT schedule_state AS state, wait_reason AS waitReason, row_version AS revision FROM task_schedule_entries WHERE owner_job_id=? AND project_id=?',
                   )
                   .get(job.id, project.id) as
-                  { state: string; waitReason: string | null; revision: number } | undefined)
+                  | {
+                      state: string;
+                      waitReason: string | null;
+                      revision: number;
+                    }
+                  | undefined)
               : undefined;
             return {
               id: `job:${job.id}`,
@@ -2228,7 +2247,6 @@ export class DocumentWorkflowService {
       };
     });
   }
-
   private createDocumentDraftFromMessageInTransaction(
     database: Database.Database,
     project: OpenProject,
@@ -2288,7 +2306,10 @@ export class DocumentWorkflowService {
            FROM agent_tasks tasks WHERE tasks.project_id = ? AND tasks.idempotency_key = ?`,
         )
         .get(project.id, params.idempotencyKey) as
-        (AgentTaskRow & { request_hash: string }) | undefined;
+        | (AgentTaskRow & {
+            request_hash: string;
+          })
+        | undefined;
       if (existing) {
         if (existing.request_hash !== requestHash) {
           throw new DocumentWorkflowError(
@@ -2301,7 +2322,11 @@ export class DocumentWorkflowService {
             `SELECT document_id FROM agent_task_document_artifacts
              WHERE task_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
           )
-          .get(existing.id) as { document_id: string } | undefined;
+          .get(existing.id) as
+          | {
+              document_id: string;
+            }
+          | undefined;
         if (!artifact) {
           throw new DocumentWorkflowError(
             'The existing task has no document artifact.',
@@ -2321,7 +2346,11 @@ export class DocumentWorkflowService {
         `SELECT context_snapshot_id FROM llm_generation_attempts
          WHERE assistant_message_id = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
       )
-      .get(message.id) as { context_snapshot_id: string } | undefined;
+      .get(message.id) as
+      | {
+          context_snapshot_id: string;
+        }
+      | undefined;
     database
       .prepare(
         `INSERT INTO agent_tasks
@@ -2504,11 +2533,16 @@ export class DocumentWorkflowService {
       document: this.getDocumentInProject(database, project, document.id),
     };
   }
-
   private writeDraft(
     database: Database.Database,
     project: OpenProject,
-    params: DocumentDraftSaveParams & { title: string; authorType: 'user' | 'agent' | 'import' },
+    params: DocumentDraftSaveParams & {
+      title: string;
+      authorType: 'user' | 'agent' | 'import';
+    },
+    allocation?: {
+      newId: string;
+    },
   ): DocumentDetail {
     const existing = params.documentId
       ? this.requireDocument(database, project, params.documentId)
@@ -2533,19 +2567,25 @@ export class DocumentWorkflowService {
     const nextScopeId =
       nextScopeType === 'project' ? undefined : (params.scopeId ?? existing?.scope_id ?? undefined);
     this.assertScope(database, project, nextScopeType, nextScopeId);
-    const documentId = existing?.id ?? randomUUID();
-    const expectedContentIRKind = params.kind ?? existing?.kind;
-    if (params.contentIR !== undefined) {
-      if (!['character', 'scene', 'prop'].includes(expectedContentIRKind ?? ''))
-        throw new Error('contentIR is only valid for character, scene or prop documents.');
-      params.contentIR = validateProjectContentIR(
-        params.contentIR,
-        expectedContentIRKind as 'character' | 'scene' | 'prop',
-      );
-    }
+    const documentId = existing?.id ?? allocation?.newId ?? randomUUID();
+    const documentKind = params.kind ?? existing?.kind;
     const current = existing?.current_version_id
       ? this.requireVersion(database, documentId, existing.current_version_id)
       : undefined;
+    if (params.bindings === undefined && current?.bindings_json)
+      params.bindings = validatePromptBindings(JSON.parse(current.bindings_json));
+    if (params.bindings) {
+      params.bindings = validatePromptBindings(params.bindings);
+      validatePromptBindingReferences(database, project.id, params.bindings);
+    }
+    if (params.sampleText === undefined) params.sampleText = current?.sample_text ?? undefined;
+    if (
+      params.sampleText !== undefined &&
+      (documentKind !== 'voice' ||
+        typeof params.sampleText !== 'string' ||
+        params.sampleText.length > 10000)
+    )
+      throw new Error('sampleText is a voice document text field of at most 10000 characters.');
     const inheritsDraftProvenance =
       current !== undefined && ['draft', 'changes_requested'].includes(current.state);
     const inheritedSourceTaskId =
@@ -2574,7 +2614,9 @@ export class DocumentWorkflowService {
       ((
         database
           .prepare('SELECT MAX(version) AS value FROM document_versions WHERE document_id = ?')
-          .get(documentId) as { value: number | null }
+          .get(documentId) as {
+          value: number | null;
+        }
       ).value ?? 0) + 1;
     if (!existing) {
       database
@@ -2606,17 +2648,18 @@ export class DocumentWorkflowService {
     database
       .prepare(
         `INSERT INTO document_versions
-         (id, document_id, version, content_markdown, content_ir_json, created_at, state, base_version_id,
+         (id, document_id, version, content_markdown, bindings_json, sample_text, created_at, state, base_version_id,
           title_snapshot, scope_type_snapshot, scope_id_snapshot, author_type, author_id,
           source_task_id, source_message_id, context_snapshot_id, content_hash, state_updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         versionId,
         documentId,
         versionNumber,
         params.contentMarkdown,
-        params.contentIR ? JSON.stringify(params.contentIR) : null,
+        params.bindings ? JSON.stringify(params.bindings) : null,
+        params.sampleText ?? null,
         now,
         baseVersionId ?? null,
         params.title,
@@ -2658,7 +2701,13 @@ export class DocumentWorkflowService {
         )
         .run(versionId, now, documentId);
     }
-    if (inheritedSourceTaskId) {
+    if (inheritedSourceTaskId && isBundleTask(database, inheritedSourceTaskId)) {
+      database
+        .prepare(
+          "INSERT INTO agent_task_document_versions(task_id,document_id,document_version_id,operation,created_at) VALUES(?,?,?,'update',?)",
+        )
+        .run(inheritedSourceTaskId, documentId, versionId, now);
+    } else if (inheritedSourceTaskId) {
       const taskUpdate = database
         .prepare(
           `UPDATE agent_tasks
@@ -2714,7 +2763,6 @@ export class DocumentWorkflowService {
     rebuildLibraryChunksForDocument(database, project.id, documentId, now);
     return this.getDocumentInProject(database, project, documentId);
   }
-
   private requirePublishedDocumentIsEditable(document: DocumentRow): void {
     if (document.published_version_id) {
       throw new DocumentWorkflowError(
@@ -2723,7 +2771,6 @@ export class DocumentWorkflowService {
       );
     }
   }
-
   private getDocumentInProject(
     database: Database.Database,
     project: OpenProject,
@@ -2746,7 +2793,6 @@ export class DocumentWorkflowService {
       publishedVersion: publishedVersion ? toDocumentVersion(publishedVersion) : undefined,
     };
   }
-
   private requireDocument(
     database: Database.Database,
     project: OpenProject,
@@ -2763,7 +2809,6 @@ export class DocumentWorkflowService {
     if (!document || document.project_id !== project.id) throw new Error('Document was not found.');
     return document;
   }
-
   private requireNonChapterLifecycleTarget(
     database: Database.Database,
     project: OpenProject,
@@ -2779,7 +2824,6 @@ export class DocumentWorkflowService {
       );
     }
   }
-
   private requireVersion(
     database: Database.Database,
     documentId: string,
@@ -2793,7 +2837,6 @@ export class DocumentWorkflowService {
       throw new Error('Document version was not found.');
     return version;
   }
-
   private requireTask(
     database: Database.Database,
     project: OpenProject,
@@ -2808,13 +2851,11 @@ export class DocumentWorkflowService {
     if (!task || task.project_id !== project.id) throw new Error('Agent task was not found.');
     return task;
   }
-
   private requireDocumentRowVersion(document: DocumentRow, expected: number): void {
     if (!Number.isInteger(expected) || expected < 0 || document.row_version !== expected) {
       throw new DocumentWorkflowError('Document was changed in another window.', 'CONFLICT');
     }
   }
-
   private requireCurrentVersion(document: DocumentRow, version: DocumentVersionRow): void {
     if (document.current_version_id !== version.id) {
       throw new DocumentWorkflowError(
@@ -2823,7 +2864,6 @@ export class DocumentWorkflowService {
       );
     }
   }
-
   private bumpDocument(
     database: Database.Database,
     documentId: string,
@@ -2840,7 +2880,6 @@ export class DocumentWorkflowService {
       throw new DocumentWorkflowError('Document was changed in another window.', 'CONFLICT');
     }
   }
-
   private updateVersionState(
     database: Database.Database,
     version: DocumentVersionRow,
@@ -2861,7 +2900,6 @@ export class DocumentWorkflowService {
       );
     }
   }
-
   private appendAudit(
     database: Database.Database,
     projectId: string,
@@ -2880,14 +2918,16 @@ export class DocumentWorkflowService {
     },
   ): void {
     const metadataJson = JSON.stringify(entry.metadata ?? {});
-    if (metadataJson.length > 4_096) {
+    if (metadataJson.length > 4096) {
       throw new Error('Document audit metadata exceeds 4096 characters.');
     }
     const sequence =
       ((
         database
           .prepare('SELECT MAX(sequence) AS value FROM document_audit_events WHERE project_id = ?')
-          .get(projectId) as { value: number | null }
+          .get(projectId) as {
+          value: number | null;
+        }
       ).value ?? -1) + 1;
     createRepositories(database).documentWorkflowAudits.append({
       id: randomUUID(),
@@ -2906,7 +2946,6 @@ export class DocumentWorkflowService {
       createdAt: entry.createdAt,
     });
   }
-
   private appendEvent(
     database: Database.Database,
     projectId: string,
@@ -2922,7 +2961,9 @@ export class DocumentWorkflowService {
       ((
         database
           .prepare('SELECT MAX(sequence) AS value FROM agent_task_events WHERE task_id = ?')
-          .get(taskId) as { value: number | null }
+          .get(taskId) as {
+          value: number | null;
+        }
       ).value ?? -1) + 1;
     database
       .prepare(
@@ -2943,7 +2984,6 @@ export class DocumentWorkflowService {
         createdAt,
       );
   }
-
   private completeSourceTask(
     database: Database.Database,
     projectId: string,
@@ -2992,7 +3032,6 @@ export class DocumentWorkflowService {
       now,
     );
   }
-
   private assertScope(
     database: Database.Database,
     project: OpenProject,
@@ -3016,7 +3055,6 @@ export class DocumentWorkflowService {
       .get(id, project.id);
     if (!shot) throw new Error('Shot was not found.');
   }
-
   private assertMessageInProject(
     database: Database.Database,
     project: OpenProject,
@@ -3031,7 +3069,6 @@ export class DocumentWorkflowService {
       .get(messageId, project.id);
     if (!row) throw new Error('Message was not found.');
   }
-
   private assertContextInProject(
     database: Database.Database,
     project: OpenProject,
@@ -3042,7 +3079,6 @@ export class DocumentWorkflowService {
       .get(snapshotId, project.id);
     if (!row) throw new Error('Context snapshot was not found.');
   }
-
   private touchProject(
     database: Database.Database,
     project: OpenProject,
@@ -3051,7 +3087,6 @@ export class DocumentWorkflowService {
     database.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').run(now, project.id);
     project.updatedAt = now;
   }
-
   private deriveTitle(content: string): string {
     const heading = content
       .split(/\r?\n/)
@@ -3063,7 +3098,6 @@ export class DocumentWorkflowService {
     );
   }
 }
-
 function toPendingConfirmationInfo(row: {
   id: string;
   task_id: string;
@@ -3130,10 +3164,11 @@ function toPendingConfirmationInfo(row: {
     status,
   };
 }
-
-function parseConfirmationEntities(
-  value: unknown,
-): Array<{ type: string; id: string; label?: string }> {
+function parseConfirmationEntities(value: unknown): Array<{
+  type: string;
+  id: string;
+  label?: string;
+}> {
   if (!Array.isArray(value)) return [];
   return value
     .flatMap((candidate) => {
@@ -3150,7 +3185,6 @@ function parseConfirmationEntities(
     })
     .slice(0, 100);
 }
-
 function parseProtectedUiHandoff(value: unknown): AgentProtectedUiHandoff | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const handoff = value as Record<string, unknown>;
@@ -3168,7 +3202,6 @@ function parseProtectedUiHandoff(value: unknown): AgentProtectedUiHandoff | unde
     ...(typeof handoff.focusId === 'string' ? { focusId: handoff.focusId.slice(0, 200) } : {}),
   };
 }
-
 function isProtectedConfirmationOperation(operation: string): boolean {
   return (
     operation === 'project.backup.prepare' ||
@@ -3180,7 +3213,6 @@ function isProtectedConfirmationOperation(operation: string): boolean {
     operation === 'maintenance.diagnostics.prepare'
   );
 }
-
 function librarySourcesFromToolCalls(
   database: Database.Database,
   taskId: string,
@@ -3258,7 +3290,6 @@ function librarySourcesFromToolCalls(
   }
   return [...sources.values()];
 }
-
 function asLibrarySourceStatus(
   value: string | undefined,
 ): AgentLibrarySourceInfo['status'] | undefined {

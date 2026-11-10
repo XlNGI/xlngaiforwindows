@@ -229,12 +229,11 @@ export class ImageGenerationService {
     }
     if (params.providerStatus < 200 || params.providerStatus >= 300) {
       const providerMessage = providerErrorMessage(params.providerBody);
-      const message =
-        params.providerStatus === 401
+      const message = providerMessage
+        ? `Provider request failed with HTTP ${params.providerStatus}: ${providerMessage}`
+        : params.providerStatus === 401
           ? 'Provider authentication failed with HTTP 401. Check the selected service region and API key.'
-          : providerMessage
-            ? `Provider request failed with HTTP ${params.providerStatus}: ${providerMessage}`
-            : `Provider request failed with HTTP ${params.providerStatus}.`;
+          : `Provider request failed with HTTP ${params.providerStatus}.`;
       return this.fail(job.id, message, projectSessionId);
     }
     let images: DownloadedImage[];

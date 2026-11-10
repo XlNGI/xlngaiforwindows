@@ -18,6 +18,7 @@ import {
   modelResultReceipt,
   projectTaskStateResult,
   projectTaskPending,
+  projectBundleReadResult,
   savedArtifactReceipt,
 } from './agent-context-results.js';
 import { estimateTokenCount } from '@ai-video/context';
@@ -33,7 +34,10 @@ import { hasVerifiedContextLimit } from './model-context-policy.js';
 import { contextWorkingSet } from './agent-context-working-set.js';
 import { ContextService } from './context-service.js';
 import { ProductionService } from './production-service.js';
-
+import { splitConversationRequest } from './conversation-request.js';
+import { bundleCurrentHashes } from './production-bundle-state.js';
+// A soft per-request compaction target for old tool history, never a task input cap.
+const REQUEST_HISTORY_TARGET_TOKENS = 64_000;
 const scalarText = (value: unknown, fallback = ''): string =>
   typeof value === 'string' || typeof value === 'number' ? String(value) : fallback;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -54,7 +58,6 @@ export type ContextRecoverySnapshot = {
   mode: string;
   visibleText?: string;
 };
-
 /** Owns persistence and per-request projection; existing compiler, authorization and Pi stay in place. */
 export class AgentContextManager {
   private readonly observed = new Set<string>();
@@ -64,10 +67,13 @@ export class AgentContextManager {
   private recoveryLevel = 0;
   private previousCompactedProjection = '';
   private calibrationKey = '';
-  private calibration?: { system: number; tools: number; messages: number };
+  private calibration?: {
+    system: number;
+    tools: number;
+    messages: number;
+  };
   private readonly deferredTools = new Set<string>();
   lastInfo?: LlmRequestContextInfo;
-
   constructor(
     private readonly projects: ProjectService,
     readonly identity: LlmGenerationIdentity,
@@ -78,7 +84,7 @@ export class AgentContextManager {
     this.state = this.access((store) => store.loadTask(identity.projectId, taskId)) ?? {
       taskId,
       taskGoal: prompt,
-      userRequirements: [{ id: 'original', text: prompt, source: 'current-user-request' }],
+      userRequirements: this.initialRequirements(prompt),
       projectConstraints: [],
       confirmedDecisions: [],
       currentStage: 'initial',
@@ -89,7 +95,31 @@ export class AgentContextManager {
     };
     this.persist();
   }
-
+  private initialRequirements(prompt: string): AgentTaskState['userRequirements'] {
+    const input = splitConversationRequest(prompt);
+    const make = (id: string, text: string, source: string, sourceKey: string) => ({
+      id,
+      text,
+      source,
+      sourceKey,
+      sourceVersion: contextContentHash(text),
+      originTaskId: this.taskId,
+      originRequirementId: id,
+    });
+    return [
+      make('original', input.request, 'current-user-request', `${this.taskId}:original`),
+      ...(input.constraints
+        ? [
+            make(
+              'session-constraints',
+              input.constraints,
+              'session-constraints',
+              `conversation:${this.identity.conversationId}:session-constraints`,
+            ),
+          ]
+        : []),
+    ];
+  }
   private access<T>(fn: (store: AgentContextStore, db: Database.Database) => T): T {
     return this.projects.access(true, (db, project) => {
       if (
@@ -120,10 +150,17 @@ export class AgentContextManager {
   get checkpointId(): string | undefined {
     return this.state.checkpoint?.checkpointId as string | undefined;
   }
-
   recordUserRequirement(text: string, id: string): void {
     if (!this.state.userRequirements.some((r) => r.id === id)) {
-      this.state.userRequirements.push({ id, text, source: 'user-supplement' });
+      this.state.userRequirements.push({
+        id,
+        text,
+        source: 'user-supplement',
+        sourceKey: `${this.taskId}:supplement:${id}`,
+        sourceVersion: contextContentHash(text),
+        originTaskId: this.taskId,
+        originRequirementId: id,
+      });
       const cursor = this.access(
         (_, db) =>
           (
@@ -131,7 +168,9 @@ export class AgentContextManager {
               .prepare(
                 'SELECT COALESCE(MAX(rowid),0) AS n FROM agent_context_results WHERE project_id=? AND task_id=?',
               )
-              .get(this.identity.projectId, this.taskId) as { n: number }
+              .get(this.identity.projectId, this.taskId) as {
+              n: number;
+            }
           ).n,
       );
       this.state.recoveryState = {
@@ -142,7 +181,6 @@ export class AgentContextManager {
     }
     this.persist();
   }
-
   recordExecutionDirective(instruction: string): void {
     const baseline = this.access((_, db) =>
       JSON.stringify({
@@ -151,14 +189,18 @@ export class AgentContextManager {
             .prepare(
               'SELECT COALESCE(MAX(sequence),0) AS n FROM agent_execution_commits WHERE project_id=? AND task_id=?',
             )
-            .get(this.identity.projectId, this.taskId) as { n: number }
+            .get(this.identity.projectId, this.taskId) as {
+            n: number;
+          }
         ).n,
         change: (
           db
             .prepare(
               'SELECT COALESCE(MAX(sequence),0) AS n FROM agent_resource_changes WHERE project_id=? AND task_id=?',
             )
-            .get(this.identity.projectId, this.taskId) as { n: number }
+            .get(this.identity.projectId, this.taskId) as {
+            n: number;
+          }
         ).n,
         evidence:
           (this.state.recoveryState?.readSupervision as ReadLoopSupervision | undefined)
@@ -180,7 +222,6 @@ export class AgentContextManager {
     };
     this.persist();
   }
-
   /** Consume complete durable results once; model history trimming never resets supervision. */
   private supervise(): void {
     const supervision = (this.state.recoveryState?.readSupervision ?? {}) as ReadLoopSupervision;
@@ -236,7 +277,6 @@ export class AgentContextManager {
       this.persist();
     }
   }
-
   recovery(): ContextRecoverySnapshot | undefined {
     const snapshot = this.access((store) =>
       store.loadRuntime<ContextRecoverySnapshot>(this.identity.projectId, this.taskId),
@@ -280,9 +320,14 @@ export class AgentContextManager {
     this.observe({ messages: snapshot.messages });
     return snapshot;
   }
-
   observe(context: Context): void {
-    const calls = new Map<string, { name: string; arguments: unknown }>();
+    const calls = new Map<
+      string,
+      {
+        name: string;
+        arguments: unknown;
+      }
+    >();
     for (const message of context.messages) {
       if (message.role === 'assistant')
         for (const part of message.content) if (part.type === 'toolCall') calls.set(part.id, part);
@@ -340,13 +385,21 @@ export class AgentContextManager {
           if (typeof value.documentId === 'string')
             prefixes.push('document:' + value.documentId + ':');
           if (Array.isArray(value.shots))
-            for (const shot of value.shots as Array<{ shotId?: string; changed?: boolean }>)
+            for (const shot of value.shots as Array<{
+              shotId?: string;
+              changed?: boolean;
+            }>)
               if (shot.shotId && shot.changed !== false) prefixes.push('shot:' + shot.shotId + ':');
           // Historical writes are observed again after restart; only invalidate data
           // read before this durable write, never a later refreshed working set.
           store.retireEvidence(this.identity.projectId, this.taskId, prefixes, stored.id);
         }
-        const target = value.target as { kind?: string; id?: string } | undefined;
+        const target = value.target as
+          | {
+              kind?: string;
+              id?: string;
+            }
+          | undefined;
         const sourceId =
           typeof value.sourceId === 'string'
             ? value.sourceId
@@ -366,9 +419,18 @@ export class AgentContextManager {
               value.rowVersion,
             stored.contentHash,
           );
-          const page = value.contentPage as { offset?: unknown; nextOffset?: unknown } | undefined;
+          const page = value.contentPage as
+            | {
+                offset?: unknown;
+                nextOffset?: unknown;
+              }
+            | undefined;
           const records = value.recordPage as
-            { offset?: unknown; nextOffset?: unknown } | undefined;
+            | {
+                offset?: unknown;
+                nextOffset?: unknown;
+              }
+            | undefined;
           const ref = store.putEvidence(this.identity.projectId, this.taskId, stored, {
             key: `${sourceType}:${sourceId}:${scalarText(value.sourceStatus)}:${scalarText(value.view)}`,
             version,
@@ -411,7 +473,13 @@ export class AgentContextManager {
             key: `navigation:${message.toolName}`,
             range: digest(calls.get(message.toolCallId)?.arguments ?? {}),
             version: scalarText(
-              (value.resourceMap as { revision?: string } | undefined)?.revision ?? value.revision,
+              (
+                value.resourceMap as
+                  | {
+                      revision?: string;
+                    }
+                  | undefined
+              )?.revision ?? value.revision,
               stored.contentHash,
             ),
             type: 'navigation',
@@ -443,10 +511,24 @@ export class AgentContextManager {
             for (const requirement of parent.userRequirements) {
               const inherited = {
                 ...requirement,
-                id: value.targetGenerationId + ':' + requirement.id,
+                id:
+                  (requirement.originTaskId ?? parent.taskId) +
+                  ':' +
+                  (requirement.originRequirementId ?? requirement.id),
+                originTaskId: requirement.originTaskId ?? parent.taskId,
+                originRequirementId: requirement.originRequirementId ?? requirement.id,
                 source: 'follow-up:' + requirement.source,
               };
-              if (!this.state.userRequirements.some((r) => r.id === inherited.id))
+              if (
+                !this.state.userRequirements.some(
+                  (r) =>
+                    r.id === inherited.id ||
+                    (r.sourceKey &&
+                      r.sourceKey === inherited.sourceKey &&
+                      r.sourceVersion === inherited.sourceVersion &&
+                      r.text === inherited.text),
+                )
+              )
                 this.state.userRequirements.push(inherited);
             }
             for (const decision of parent.confirmedDecisions)
@@ -534,13 +616,16 @@ export class AgentContextManager {
     this.persist();
     this.supervise();
   }
-
   /** Metadata only; no evidence body is copied into the system instruction. */
-  view<T extends Context>(context: T): { context: T; rolled: boolean } {
+  view<T extends Context>(
+    context: T,
+  ): {
+    context: T;
+    rolled: boolean;
+  } {
     this.observe(context);
     return { context, rolled: false };
   }
-
   snapshot(
     runtime: LlmGenerationRuntimeRequest,
     context: Context,
@@ -616,7 +701,6 @@ export class AgentContextManager {
       ),
     );
   }
-
   compactHistory(context: Context): Context['messages'] {
     // Every original message was archived by snapshot before projecting the Pi working set.
     const snapshot = this.access((store) =>
@@ -624,7 +708,6 @@ export class AgentContextManager {
     );
     return snapshot?.messages ?? context.messages;
   }
-
   private projectArguments(callId: string, args: unknown): Record<string, unknown> {
     const value = args as Record<string, unknown>;
     if (value?.archivedArguments === true && typeof value.resultId === 'string') return value;
@@ -645,7 +728,6 @@ export class AgentContextManager {
       },
     };
   }
-
   prepare(
     runtime: LlmGenerationRuntimeRequest,
     context: Context,
@@ -658,7 +740,11 @@ export class AgentContextManager {
               'SELECT history_cutoff,excluded_generation_ids_json FROM generation_branches WHERE generation_id=?',
             )
             .get(this.identity.generationId) as
-            { history_cutoff: number; excluded_generation_ids_json: string } | undefined;
+            | {
+                history_cutoff: number;
+                excluded_generation_ids_json: string;
+              }
+            | undefined;
           const compiled = this.contexts!.compile(
             this.identity.conversationId,
             undefined,
@@ -710,7 +796,12 @@ export class AgentContextManager {
         )
           return true;
         const value = JSON.parse(result.content) as Record<string, unknown>;
-        const target = value.target as { kind?: string; id?: string } | undefined;
+        const target = value.target as
+          | {
+              kind?: string;
+              id?: string;
+            }
+          | undefined;
         if (
           target?.id &&
           (target.kind === 'shot' || target.kind === 'scene') &&
@@ -767,21 +858,35 @@ export class AgentContextManager {
       const ids = new Set(activeTargetIds);
       for (const id of activeTargetIds) {
         const sceneShots = db
-          .prepare(
-            'SELECT id,authoring_ir_json FROM shots WHERE scene_id=? AND archived_at IS NULL',
-          )
-          .all(id) as Array<{ id: string; authoring_ir_json: string }>;
+          .prepare('SELECT id,bindings_json FROM shots WHERE scene_id=? AND archived_at IS NULL')
+          .all(id) as Array<{
+          id: string;
+          bindings_json: string;
+        }>;
         const shot = db
-          .prepare('SELECT id,authoring_ir_json FROM shots WHERE id=? AND archived_at IS NULL')
-          .get(id) as { id: string; authoring_ir_json: string } | undefined;
+          .prepare('SELECT id,bindings_json FROM shots WHERE id=? AND archived_at IS NULL')
+          .get(id) as
+          | {
+              id: string;
+              bindings_json: string;
+            }
+          | undefined;
         for (const target of [...sceneShots, ...(shot ? [shot] : [])]) {
           ids.add(target.id);
           try {
-            const ir = JSON.parse(target.authoring_ir_json) as {
-              references?: Record<string, string[]>;
-            };
-            for (const values of Object.values(ir.references ?? {}))
-              for (const value of values) ids.add(value);
+            const bindings = JSON.parse(target.bindings_json) as
+              import('@ai-video/contracts').PromptBindingIR | null;
+            for (const values of [
+              bindings?.characterDocumentIds,
+              bindings?.sceneDocumentIds,
+              bindings?.propDocumentIds,
+            ])
+              for (const id of values ?? []) ids.add(id);
+            if (bindings?.voiceDocumentId) ids.add(bindings.voiceDocumentId);
+            for (const pair of bindings?.voiceBindings ?? []) {
+              ids.add(pair.voiceDocumentId);
+              if (pair.characterDocumentId) ids.add(pair.characterDocumentId);
+            }
           } catch {
             /* Invalid authored data stays pending in the completion check. */
           }
@@ -793,17 +898,27 @@ export class AgentContextManager {
     // Project bodies remain on demand; these are only declarations already read by this task.
     const activeSkills = refs
       .filter((ref) => ref.sourceType === 'skill')
-      .map((ref) => ({
-        evidenceId: ref.evidenceId,
-        resultId: ref.resultId,
-        declaration: this.access((store) => {
-          const result = store.result(this.identity.projectId, this.taskId, ref.resultId);
-          return result ? (JSON.parse(result.content) as Record<string, unknown>) : undefined;
-        }),
-      }));
+      .map((ref) => {
+        const result = this.access((store) =>
+          store.result(this.identity.projectId, this.taskId, ref.resultId),
+        );
+        const declaration = result ? (JSON.parse(result.content) as Record<string, unknown>) : {};
+        return {
+          evidenceId: ref.evidenceId,
+          resultId: ref.resultId,
+          skillId: declaration.skillId,
+          revision: declaration.revision,
+          read: {
+            tool: 'conversation.task.checkpoint',
+            operation: 'result',
+            resultId: ref.resultId,
+          },
+        };
+      });
     // Keep explicitly selected source material usable after recent tool turns
     // roll off. Selection follows the user's source ID/title, never all project
     // documents. Large sources remain immutable range-readable references.
+    const bundleTask = runtime.tools?.some((tool) => tool.name === 'production.bundle.submit');
     const workingData = refs.flatMap((ref) => {
       if (['skill', 'navigation'].includes(ref.sourceType)) return [];
       return this.access((store, db) => {
@@ -816,12 +931,23 @@ export class AgentContextManager {
             'novel.chapter.read',
             'production.read',
             'scene.read',
+            'production.bundle',
           ].includes(result.toolName)
         )
           return [];
         const value = JSON.parse(result.content) as Record<string, unknown>;
+        // Bundle sources and candidates remain in Result Store and are range-read on demand.
+        if (bundleTask && result.toolName === 'production.bundle') return [];
         const sourceId =
-          value.sourceId ?? value.documentId ?? (value.target as { id?: string } | undefined)?.id;
+          value.sourceId ??
+          value.documentId ??
+          (
+            value.target as
+              | {
+                  id?: string;
+                }
+              | undefined
+          )?.id;
         // Retrieval titles may contain a chapter label. Match the user selection
         // against project-owned identity metadata, never by stripping arbitrary text.
         const canonicalTitle =
@@ -832,17 +958,22 @@ export class AgentContextManager {
                     `SELECT d.title FROM novel_chapters c JOIN documents d ON d.id=c.document_id
             WHERE c.id=? AND c.project_id=? AND c.lifecycle_status='active'`,
                   )
-                  .get(sourceId, this.identity.projectId) as { title: string } | undefined
+                  .get(sourceId, this.identity.projectId) as
+                  | {
+                      title: string;
+                    }
+                  | undefined
               )?.title
             : undefined;
         const selected =
-          (typeof sourceId === 'string' && this.state.taskGoal.includes(sourceId)) ||
-          (canonicalTitle &&
-            canonicalTitle.length > 2 &&
-            this.state.taskGoal.includes(canonicalTitle)) ||
-          (typeof value.title === 'string' &&
-            value.title.length > 2 &&
-            this.state.taskGoal.includes(value.title));
+          !bundleTask &&
+          ((typeof sourceId === 'string' && this.state.taskGoal.includes(sourceId)) ||
+            (canonicalTitle &&
+              canonicalTitle.length > 2 &&
+              this.state.taskGoal.includes(canonicalTitle)) ||
+            (typeof value.title === 'string' &&
+              value.title.length > 2 &&
+              this.state.taskGoal.includes(value.title)));
         return selected ||
           ref.purpose === 'constraint' ||
           (typeof sourceId === 'string' && workingSetIds.has(sourceId))
@@ -858,8 +989,26 @@ export class AgentContextManager {
           : [];
       });
     });
+    const candidateHashes = this.access((_, db) =>
+      bundleCurrentHashes(db, this.identity.projectId, this.taskId),
+    );
     const manifest = refs.slice(-(this.recoveryLevel ? 8 : 48)).map((ref) => this.manifest(ref));
-    const requirements = this.state.userRequirements.filter((r) => r.id !== 'original');
+    const currentInput = splitConversationRequest(runtime.prompt);
+    const projectedSources = new Set<string>();
+    const requirements = this.state.userRequirements.filter((r) => {
+      if (r.id === 'original') return false; // Already in the unchanged runtime prompt.
+      if (!r.sourceKey || !r.sourceVersion) return true; // Never guess legacy provenance.
+      if (
+        r.sourceKey === `conversation:${this.identity.conversationId}:session-constraints` &&
+        r.sourceVersion === contextContentHash(currentInput.constraints) &&
+        r.text === currentInput.constraints
+      )
+        return false;
+      const identity = JSON.stringify([r.sourceKey, r.sourceVersion, r.text]);
+      if (projectedSources.has(identity)) return false;
+      projectedSources.add(identity);
+      return true;
+    });
     const stateView = {
       taskId: this.taskId,
       taskContract: taskScope,
@@ -880,8 +1029,9 @@ export class AgentContextManager {
       executionDirective: this.state.recoveryState?.executionDirective,
       ...(this.state.pendingSteps.length
         ? {
-            nextAction:
-              'Task is unfinished. Follow pendingSteps.nextAction: reconcile plan allocation conflicts before business writes, finish missing outputs in source order, repair listed existing outputs in place, then review text across the full deliverable. persistedCount includes outputs needing repair; savedCount counts validated outputs. missingTexts is coverage so far; never move later scenes into earlier saved shots just to clear it. Once outputs exist, read/edit relevant current outputs with CAS. Correct mistaken model plan estimates with checkpoint operation=plan and revisionReason; never create surplus outputs for a mistaken estimate or recreate outputs with invalid references. A ready stage or saved receipt does not complete other pending work.',
+            nextAction: bundleTask
+              ? 'Task is unfinished. Follow pendingSteps.nextAction and author the requested ordinary text and explicit bindings. Correct only reported structural, relationship, source-version or target-version errors. The Worker performs structural validation and independent readback; this workflow has no semantic-review submission step.'
+              : 'Task is unfinished. Follow pendingSteps.nextAction: reconcile plan allocation conflicts before business writes, finish missing outputs in source order, repair listed existing outputs in place, then review text across the full deliverable. persistedCount includes outputs needing repair; savedCount counts validated outputs. missingTexts is coverage so far; never move later scenes into earlier saved shots just to clear it. Once outputs exist, read/edit relevant current outputs with CAS. Correct mistaken model plan estimates with checkpoint operation=plan and revisionReason; never create surplus outputs for a mistaken estimate or recreate outputs with invalid references. A ready stage or saved receipt does not complete other pending work.',
           }
         : {}),
       savedArtifacts: this.state.generatedArtifacts
@@ -939,8 +1089,16 @@ export class AgentContextManager {
     );
     const includedEvidence = new Set<string>();
     const projected: Array<
-      | { role: 'assistant'; content: AssistantMessage['content'] }
-      | { role: 'toolResult'; toolName: string; callId: string; result: string }
+      | {
+          role: 'assistant';
+          content: AssistantMessage['content'];
+        }
+      | {
+          role: 'toolResult';
+          toolName: string;
+          callId: string;
+          result: string;
+        }
     > = context.messages
       .filter((message) => message.role !== 'user')
       .slice()
@@ -958,6 +1116,8 @@ export class AgentContextManager {
                 message.toolCallId,
               );
               if (!r) return 'Result unavailable; inspect task receipts.';
+              const candidateRead = projectBundleReadResult(r, candidateHashes, []);
+              if (candidateRead !== undefined) return candidateRead;
               if (staleHashes.has(r.contentHash))
                 return 'Superseded evidence; use a matching current version in the evidence manifest if available, otherwise retrieve the current source. The historical result remains in Result Store.';
               if (workingData.some((data) => data.contentHash === r.contentHash))
@@ -970,10 +1130,10 @@ export class AgentContextManager {
                 });
               if (activeSkills.some((skill) => skill.resultId === r.id))
                 return JSON.stringify({
-                  status: 'active_skill_included',
+                  status: 'active_skill_reference',
                   resultId: r.id,
                   instruction:
-                    'The complete active declaration is in taskState.activeSkills. Continue execution without rereading it.',
+                    'The declaration remains in Result Store. Read it only when required.',
                 });
               if (evidenceHashes.has(r.contentHash)) {
                 if (includedEvidence.has(r.contentHash))
@@ -1046,13 +1206,21 @@ export class AgentContextManager {
     }
     const canDefer = runtime.tools?.some((tool) => tool.name === 'tools.load');
     let selectedTools = (runtime.tools ?? []).filter(
-      (tool) => !canDefer || !this.deferredTools.has(tool.name),
+      (tool) =>
+        (!canDefer || !this.deferredTools.has(tool.name)) &&
+        !(
+          tool.name === 'production.skill.read' &&
+          runtime.tools?.some((available) => available.name === 'production.bundle.submit') &&
+          activeSkills.some((skill) => skill.skillId === 'script-to-media')
+        ),
     );
     const latestTools = new Set(turns.at(-1)?.calls.map((call) => call.name));
     if (latestTools.has('tools.load')) {
       for (const call of turns.at(-1)!.calls) {
         if (call.name !== 'tools.load') continue;
-        const args = JSON.parse(call.argumentsJson) as { names?: string[] };
+        const args = JSON.parse(call.argumentsJson) as {
+          names?: string[];
+        };
         for (const name of args.names ?? []) latestTools.add(name);
       }
     }
@@ -1063,7 +1231,7 @@ export class AgentContextManager {
     let keep = this.recoveryLevel
       ? Math.min(this.recoveryLevel === 2 ? 1 : 2, turns.length)
       : turns.length;
-    const minimumKeep = turns.length ? 1 : 0;
+    const minimumKeep = Math.min(2, turns.length);
     let request: LlmGenerationRuntimeRequest;
     let planningInput = 0;
     for (;;) {
@@ -1106,21 +1274,19 @@ export class AgentContextManager {
       };
       const measured = this.budget.inspect(request, { messages: [] });
       const minimumOutput = Math.min(2048, measured.reservedOutputTokens);
-      const inputLimit = Math.min(
+      const projectionTarget = Math.min(
+        REQUEST_HISTORY_TARGET_TOKENS,
         runtime.modelCapabilities?.maxInputTokens ?? Infinity,
         measured.contextWindowTokens -
           minimumOutput -
           Math.ceil(measured.contextWindowTokens * 0.05),
       );
       planningInput = this.planningInput(measured);
-      if (
-        planningInput <= inputLimit ||
-        (!hasVerifiedContextLimit(runtime) && !this.recoveryLevel)
-      ) {
+      if (planningInput <= projectionTarget) {
         if (
           hasVerifiedContextLimit(runtime) &&
           request.inferenceSettings &&
-          planningInput <= inputLimit
+          planningInput <= projectionTarget
         )
           request.inferenceSettings = {
             ...request.inferenceSettings,
@@ -1140,8 +1306,8 @@ export class AgentContextManager {
       let removable = workingData.length - 1;
       while (removable >= 0 && workingData[removable]!.pinned) removable--;
       if (removable >= 0) {
-        // Data stays in the result/evidence manifest and can be range-read. Only
-        // this request's projection is reduced under measured model pressure.
+        // Data stays in Result Store and can be range-read. Only this request's
+        // projection is reduced under the estimated model-window pressure.
         workingData.splice(removable, 1);
         continue;
       }
@@ -1222,7 +1388,6 @@ export class AgentContextManager {
     }
     return { ...result, compacted: keep < projected.length };
   }
-
   recoverContextOverflow(): boolean {
     if (this.recoveryLevel >= 2) return false;
     this.recoveryLevel++;
@@ -1235,7 +1400,6 @@ export class AgentContextManager {
     );
     return true;
   }
-
   /** Native estimates calibrate planning only; original estimates and provider usage stay distinct. */
   observeNativeContext(wire: NonNullable<LlmRequestContextInfo['nativeWire']>): void {
     if (!this.lastInfo) return;
@@ -1249,7 +1413,6 @@ export class AgentContextManager {
       messages: Math.max(1, (wire.messageTokens + wire.imageTokens) / Math.max(1, messages)),
     };
   }
-
   modelRequestCompleted(): void {
     // Recovery is bounded per failed request, not a permanent loss of task working memory.
     this.recoveryLevel = 0;
@@ -1260,7 +1423,6 @@ export class AgentContextManager {
       this.persist();
     }
   }
-
   private planningInput(info: LlmRequestContextInfo): number {
     if (!this.calibration) return info.estimatedInputTokens;
     const system = info.sections.system?.estimatedTokens ?? 0;
@@ -1271,7 +1433,6 @@ export class AgentContextManager {
         (info.estimatedInputTokens - system - tools) * this.calibration.messages,
     );
   }
-
   private manifest(ref: AgentEvidenceRef) {
     return {
       ...ref,
@@ -1290,7 +1451,6 @@ export class AgentContextManager {
     this.state.executionStatus = status;
     this.persist();
   }
-
   suspend(
     reason: string,
     runtime: LlmGenerationRuntimeRequest,

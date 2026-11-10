@@ -1,12 +1,10 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AssistantReply } from './AssistantReply';
-
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
-
 describe('AssistantReply', () => {
   it('keeps all assistant content visible even when it contains a final-report marker', () => {
     const content =
@@ -17,7 +15,6 @@ describe('AssistantReply', () => {
     expect(screen.getByText('已完成：已修正镜头。')).toBeVisible();
     expect(screen.queryByText('工作过程（已折叠）')).toBeNull();
   });
-
   it('coalesces rapid updates every 40ms without postponing the timer', async () => {
     vi.useFakeTimers();
     const { rerender } = render(<AssistantReply content="" streaming />);
@@ -31,7 +28,6 @@ describe('AssistantReply', () => {
     expect(screen.getByText('complete')).toBeTruthy();
     expect(vi.getTimerCount()).toBe(0);
   });
-
   it('renders Markdown and GFM while rejecting executable links and raw HTML', () => {
     const { container } = render(
       <AssistantReply

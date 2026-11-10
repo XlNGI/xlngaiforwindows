@@ -76,6 +76,7 @@ import { applyMigrationV72 } from './migration-v72.js';
 import { MIGRATION_V73 } from './migration-v73.js';
 import { applyMigrationV74 } from './migration-v74.js';
 import { applyMigrationV75 } from './migration-v75.js';
+import { applyMigrationV77 } from './migration-v77.js';
 import { applyMigrationV76 } from './migration-v76.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
@@ -851,6 +852,14 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(76, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 77) {
+    database.transaction(() => {
+      applyMigrationV77(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(77, now);
     })();
   }
   return getSchemaVersion(database);

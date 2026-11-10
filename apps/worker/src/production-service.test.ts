@@ -7,8 +7,10 @@ import { createRepositories } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
-
-const fixtures: Array<{ projects: ProjectService; directory: string }> = [];
+const fixtures: Array<{
+  projects: ProjectService;
+  directory: string;
+}> = [];
 afterEach(async () => {
   for (const f of fixtures.splice(0)) {
     f.projects.close();
@@ -23,7 +25,7 @@ async function setup() {
   const content = new ContentService(projects);
   const scene = content.saveScene({
     title: '雨夜',
-    authoringIR: { schemaVersion: 1, kind: 'scene', prompt: '古道雨夜。' },
+    ...{ prompt: '古道雨夜。' },
   });
   return { projects, content, scene, service: new ProductionService(projects) };
 }
@@ -34,7 +36,6 @@ const wan = () =>
       a.capability === 'TEXT_TO_VIDEO' &&
       a.provider === 'wan-video',
   )!;
-
 it('keeps all three selected shot images and reports frame/reference incompatibility', async () => {
   const f = await setup();
   const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回头', prompt: '雨中回头' });
@@ -78,26 +79,26 @@ it('keeps all three selected shot images and reports frame/reference incompatibi
   });
   expect(compiled.source?.inputImages).toEqual(inputImages);
   expect(
-    (compiled.parameters.content as { role?: string }[])
+    (
+      compiled.parameters.content as {
+        role?: string;
+      }[]
+    )
       .filter((item) => item.role)
       .map((item) => item.role),
   ).toEqual(['reference_image', 'reference_image', 'first_frame']);
   expect(compiled.issues).toEqual([expect.objectContaining({ code: 'INPUT_SELECTION_CONFLICT' })]);
 });
-
-it('compiles the verbatim IR prompt and explicit timing without interpreting open data', async () => {
+it('compiles ordinary prompt text verbatim with independent numeric timing', async () => {
   const f = await setup();
   const ir = {
-    schemaVersion: 1 as const,
-    kind: 'shot' as const,
     prompt: '  她在发丝缝隙间看向镜头。\n保留雨声，无配乐。  ',
-    timing: { estimatedDurationSeconds: 5, rationale: '反手制敌和转身' },
-    data: { timing: { estimatedDurationSeconds: 999 }, audio: '这是开放描述，不是执行字段' },
+    timing: { estimatedDurationSeconds: 5 },
   };
-  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回身', authoringIR: ir });
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回身', ...ir });
   const target = { kind: 'shot' as const, id: shot.id };
   expect(f.service.read(target)).toMatchObject({
-    authoringIR: ir,
+    ...ir,
     compiledPrompt: ir.prompt,
     estimatedDurationSeconds: 5,
   });
@@ -110,38 +111,33 @@ it('compiles the verbatim IR prompt and explicit timing without interpreting ope
     timeline: [{ shotId: shot.id, startSeconds: 0, endSeconds: 5 }],
   });
 });
-
-it('rejects conflicting prompt projections and stale CAS without changing the saved IR', async () => {
+it('edits the canonical prompt while preserving bindings and rejects stale CAS', async () => {
   const f = await setup();
-  const ir = { schemaVersion: 1 as const, kind: 'shot' as const, prompt: '原始提示词' };
-  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '回身', authoringIR: ir });
-  const update = {
+  const bindings = { schemaVersion: 1 as const, characterDocumentIds: [] };
+  const shot = f.content.saveShot({ sceneId: f.scene.id, title: '镜头', prompt: '原文', bindings });
+  const saved = f.content.saveShot({
     shotId: shot.id,
     sceneId: shot.sceneId,
     title: shot.title,
     expectedRowVersion: shot.rowVersion,
-    authoringIR: ir,
-  };
-  expect(() => f.content.saveShot({ ...update, prompt: '不同正文' })).toThrow('must match');
+    prompt: '  新正文\n ',
+  });
+  expect(f.service.read({ kind: 'shot', id: shot.id })).toMatchObject({
+    prompt: '  新正文\n ',
+    bindings,
+  });
   expect(() =>
-    f.content.saveShot({ ...update, authoringIR: null, prompt: '不能同时清除和写入正文' }),
-  ).toThrow('must be empty');
-  expect(() =>
-    f.content.saveScene({
-      sceneId: f.scene.id,
-      title: f.scene.title,
-      expectedRowVersion: f.scene.rowVersion,
-      authoringIR: null,
-      videoPrompt: '冲突正文',
+    f.content.saveShot({
+      shotId: shot.id,
+      sceneId: shot.sceneId,
+      title: shot.title,
+      expectedRowVersion: shot.rowVersion,
+      prompt: '过期正文',
     }),
-  ).toThrow('must be empty');
-  expect(() => f.content.saveShot({ ...update, expectedRowVersion: shot.rowVersion - 1 })).toThrow(
-    'SHOT_ROW_VERSION_CONFLICT',
-  );
-  expect(f.service.read({ kind: 'shot', id: shot.id }).authoringIR).toEqual(ir);
+  ).toThrow('SHOT_ROW_VERSION_CONFLICT');
+  expect(saved.prompt).toBe('  新正文\n ');
 });
-
-it('does not revive prompt-column or archive rendering when the authoritative IR is absent', async () => {
+it('compiles the canonical prompt column without an additional content representation', async () => {
   const f = await setup();
   const shot = f.content.saveShot({ sceneId: f.scene.id, title: '空镜头' });
   f.projects.access(true, (db) =>
@@ -151,10 +147,9 @@ it('does not revive prompt-column or archive rendering when the authoritative IR
     target: { kind: 'shot', id: shot.id },
     adapterKey: wan().key,
   });
-  expect(compiled.compiledPrompt).toBeUndefined();
-  expect(compiled.parameters).toEqual({});
+  expect(compiled.compiledPrompt).toBe('仅存于投影列');
+  expect(compiled.parameters.prompt).toBe('仅存于投影列');
 });
-
 it('keeps provider defaults independent, enforces CAS and invalidates compiled form tokens', async () => {
   const f = await setup();
   const target = { kind: 'scene' as const, id: f.scene.id };
@@ -172,30 +167,24 @@ it('keeps provider defaults independent, enforces CAS and invalidates compiled f
     watermark: false,
   });
 });
-
 it('uses the complete scene prompt once and keeps ranges within selected shot prompts and timing', async () => {
   const f = await setup();
   f.content.saveScene({
     sceneId: f.scene.id,
     title: f.scene.title,
     expectedRowVersion: f.scene.rowVersion,
-    authoringIR: {
-      schemaVersion: 1,
-      kind: 'scene',
+    ...{
       prompt: '整场最终正文，包括结尾。',
-      timing: { estimatedDurationSeconds: 20, rationale: '完整剧情' },
-      data: { sharedPrompt: '不得从开放数据渲染' },
+      timing: { estimatedDurationSeconds: 20 },
     },
   });
   const shots = [1, 2].map((i) =>
     f.content.saveShot({
       sceneId: f.scene.id,
       title: `镜${i}`,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: `第${i}镜完整正文`,
-        timing: { estimatedDurationSeconds: 4, rationale: '本镜动作' },
+        timing: { estimatedDurationSeconds: 4 },
       },
     }),
   );
@@ -208,7 +197,6 @@ it('uses the complete scene prompt once and keeps ranges within selected shot pr
   expect(range.estimatedDurationSeconds).toBe(4);
   expect(range.timeline).toMatchObject([{ shotId: shots[0]!.id, startSeconds: 0, endSeconds: 4 }]);
 });
-
 it('invalidates scene structure reads on child edits and shot forms on parent binding edits', async () => {
   const f = await setup();
   const shot = f.content.saveShot({ sceneId: f.scene.id, title: '镜头', prompt: '镜头正文' });
@@ -232,7 +220,6 @@ it('invalidates scene structure reads on child edits and shot forms on parent bi
     f.service.compile({ target: shotTarget, adapterKey: wan().key, expectedToken: token }),
   ).toThrow('已变化');
 });
-
 it('revalidates child IR references and does not report out-of-range references', async () => {
   const f = await setup();
   const actor = f.content.saveDocument({
@@ -244,11 +231,12 @@ it('revalidates child IR references and does not report out-of-range references'
   const second = f.content.saveShot({
     sceneId: f.scene.id,
     title: '第二镜',
-    authoringIR: {
-      schemaVersion: 1,
-      kind: 'shot',
+    ...{
       prompt: '角色回头',
-      references: { characterDocumentIds: [actor.id] },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [actor.id] },
+      },
     },
   });
   f.projects.access(true, (db) =>
@@ -256,11 +244,10 @@ it('revalidates child IR references and does not report out-of-range references'
   );
   const target = { kind: 'scene' as const, id: f.scene.id };
   expect(f.service.read(target).issues).toMatchObject([
-    { code: 'INVALID_IR_REFERENCE', target: { kind: 'shot', id: second.id } },
+    { code: 'INVALID_BINDING_REFERENCE', target: { kind: 'shot', id: second.id } },
   ]);
   expect(f.service.read(target, [first.id]).issues).toEqual([]);
 });
-
 it('builds scene cast only from shot references, never from scene-level bindings', async () => {
   const f = await setup();
   const actor = f.content.saveDocument({
@@ -279,22 +266,24 @@ it('builds scene cast only from shot references, never from scene-level bindings
   const first = f.content.saveShot({
     sceneId: f.scene.id,
     title: '空镜',
-    authoringIR: {
-      schemaVersion: 1,
-      kind: 'shot',
+    ...{
       prompt: '空镜正文',
-      references: { characterDocumentIds: [] },
-      timing: { estimatedDurationSeconds: 4, rationale: '空镜时长' },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [] },
+      },
+      timing: { estimatedDurationSeconds: 4 },
     },
   });
   const second = f.content.saveShot({
     sceneId: f.scene.id,
     title: '角色镜头',
-    authoringIR: {
-      schemaVersion: 1,
-      kind: 'shot',
+    ...{
       prompt: '人物出现',
-      references: { characterDocumentIds: [actor.id] },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [actor.id] },
+      },
     },
   });
   const target = { kind: 'scene' as const, id: f.scene.id };

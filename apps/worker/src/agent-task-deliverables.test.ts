@@ -8,8 +8,16 @@ import {
 } from './agent-task-deliverables.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { validateToolArguments } from '@earendil-works/pi-ai';
-
 const databases: Database.Database[] = [];
+function shotFields(value: unknown): [string | null, string | null, string | null] {
+  if (!value || typeof value !== 'object') return [null, null, null];
+  const record = value as Record<string, unknown>;
+  return [
+    typeof record.prompt === 'string' ? record.prompt : null,
+    record.timing ? JSON.stringify(record.timing) : null,
+    record.bindings ? JSON.stringify(record.bindings) : null,
+  ];
+}
 function fixture() {
   const db = new Database(':memory:');
   databases.push(db);
@@ -20,7 +28,7 @@ function fixture() {
     CREATE TABLE documents (id TEXT,project_id TEXT,kind TEXT,current_version_id TEXT,lifecycle_status TEXT);
     CREATE TABLE document_versions (id TEXT,document_id TEXT,content_markdown TEXT DEFAULT '');
     CREATE TABLE scenes (id TEXT,project_id TEXT,archived_at TEXT);
-    CREATE TABLE shots (id TEXT,scene_id TEXT,authoring_ir_json TEXT,archived_at TEXT);`);
+    CREATE TABLE shots (id TEXT,scene_id TEXT,prompt TEXT,timing_json TEXT,bindings_json TEXT,archived_at TEXT);`);
   const receipt = (tool: string, result: unknown, status = 'succeeded', generation = 'g') =>
     db
       .prepare('INSERT INTO agent_tool_calls VALUES (?,?,?,?,?)')
@@ -45,24 +53,83 @@ function fixture() {
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
 });
-
-it('checks typed duration, shot fields and derived prompt documents against current saved facts', () => {
+it('rejects summaries, reordered or stale whole-scene projections while preserving actual prompt text', () => {
+  const f = fixture();
+  f.db.exec(
+    'ALTER TABLE scenes ADD COLUMN video_prompt TEXT; ALTER TABLE shots ADD COLUMN position INTEGER',
+  );
+  const first = '0–2秒：甲说“留下”。2–4秒：甲收好信件。';
+  const second = '0–3秒：乙回头，说“我等你”。';
+  f.db.prepare('INSERT INTO scenes VALUES(?,?,NULL,?)').run('scene', 'p', '两人交谈后分开。');
+  for (const [index, prompt] of [first, second].entries())
+    f.db
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json,archived_at,position) VALUES (?,?,?,?,?,NULL,?)',
+      )
+      .run(`s${index}`, 'scene', ...shotFields({ prompt }), index);
+  f.receipt('scene.submit_structure', {
+    status: 'scene_structure_saved',
+    sceneIds: ['scene'],
+    shotIds: ['s0', 's1'],
+  });
+  f.plan([
+    {
+      key: 'scene',
+      toolName: 'scene.submit_structure',
+      minimumCount: 1,
+      targetIds: ['scene'],
+      criteria: [{ kind: 'scene_prompt_projection' }],
+    },
+  ]);
+  const write = (prompt: string) => f.db.prepare('UPDATE scenes SET video_prompt=?').run(prompt);
+  for (const prompt of ['两人交谈后分开。', `${second}\n${first}`, first]) {
+    write(prompt);
+    expect(f.assess()?.pending).toHaveLength(1);
+  }
+  const full = `${first}\n${second}`;
+  write(full);
+  expect(f.assess()?.pending).toEqual([]);
+  f.db
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ prompt: '乙转身离开。' }), 's1');
+  expect(f.assess()?.pending).toHaveLength(1);
+  expect(f.db.prepare('SELECT video_prompt FROM scenes').get()).toEqual({ video_prompt: full });
+});
+it('registers chapter creation and counts only its current committed document receipt', () => {
+  const f = fixture();
+  f.plan([
+    { key: 'chapter', toolName: 'novel.chapter.write_draft', minimumCount: 1, intent: 'create' },
+  ]);
+  expect(f.assess()?.pending).toHaveLength(1);
+  f.db.prepare("INSERT INTO documents VALUES ('chapter','p','novel-chapter','v1','active')").run();
+  f.db.prepare("INSERT INTO document_versions VALUES ('v1','chapter','完整正文')").run();
+  f.receipt('novel.chapter.write_draft', {
+    status: 'draft_saved',
+    documentId: 'chapter',
+    documentVersionId: 'v1',
+  });
+  expect(f.assess()?.pending).toEqual([]);
+  f.db.prepare("UPDATE documents SET current_version_id='v2'").run();
+  expect(f.assess()?.pending).toHaveLength(1);
+});
+it('checks typed duration and derived prompt documents against current saved facts', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes VALUES('scene','p',NULL)").run();
-  const ir = (prompt: string, seconds: number, scale?: string) => ({
-    schemaVersion: 1,
-    kind: 'shot',
+  const ir = (prompt: string, seconds: number) => ({
     prompt,
     timing: { estimatedDurationSeconds: seconds },
-    data: scale ? { shotScale: scale } : {},
   });
-  const first = ir('近景：人物接过信件。', 4, '近景');
+  const first = ir('近景：人物接过信件。', 4);
   let second = ir('人物转身。', 3);
   for (const [id, value] of [
     ['s1', first],
     ['s2', second],
   ] as const)
-    f.db.prepare('INSERT INTO shots VALUES(?,?,?,NULL)').run(id, 'scene', JSON.stringify(value));
+    f.db
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json,archived_at) VALUES (?,?,?,?,?,NULL)',
+      )
+      .run(id, 'scene', ...shotFields(value));
   f.receipt('scene.submit_structure', {
     status: 'scene_structure_saved',
     sceneIds: ['scene'],
@@ -87,10 +154,7 @@ it('checks typed duration, shot fields and derived prompt documents against curr
     toolName: 'scene.submit_structure',
     minimumCount: 1,
     targetIds: ['scene'],
-    criteria: [
-      { kind: 'total_duration', seconds: 10, toleranceSeconds: 0 },
-      { kind: 'shot_field', path: 'data.shotScale', inPrompt: true },
-    ],
+    criteria: [{ kind: 'total_duration', seconds: 10, toleranceSeconds: 0 }],
   };
   // Consumer deliberately precedes its source in plan order.
   f.plan([document, shots]);
@@ -100,8 +164,10 @@ it('checks typed duration, shot fields and derived prompt documents against curr
   expect(() => f.plan([{ ...shots, criteria: undefined, revisionReason: '想跳过验收' }])).toThrow(
     'Cannot weaken',
   );
-  second = ir('双人中景：人物转身。', 6, '双人中景');
-  f.db.prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?').run(JSON.stringify(second), 's2');
+  second = ir('双人中景：人物转身。', 6);
+  f.db
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields(second), 's2');
   expect(f.assess()?.pending.map((p) => p.key)).toEqual(['prompts']);
   const full = `# 完整提示词\n\n${first.prompt}\n\n${second.prompt}`;
   f.db.prepare('INSERT INTO document_versions VALUES (?,?,?)').run('v2', 'prompts', full);
@@ -113,8 +179,8 @@ it('checks typed duration, shot fields and derived prompt documents against curr
   });
   expect(f.assess()?.pending).toEqual([]);
   f.db
-    .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-    .run(JSON.stringify({ ...second, prompt: '双人中景：人物向后退半步。' }), 's2');
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ ...second, prompt: '双人中景：人物向后退半步。' }), 's2');
   expect(f.assess()?.pending.map((p) => p.key)).toEqual(['prompts']);
   expect(
     f.db
@@ -122,7 +188,6 @@ it('checks typed duration, shot fields and derived prompt documents against curr
       .get(),
   ).toEqual({ content_markdown: '' });
 });
-
 it('rejects unsafe, unknown or unbound program criteria without changing the plan', () => {
   const f = fixture();
   const item = { key: 'shots', toolName: 'scene.submit_structure', minimumCount: 1 };
@@ -145,19 +210,22 @@ it('rejects unsafe, unknown or unbound program criteria without changing the pla
   ).toThrow('dependsOn');
   expect(f.assess()).toBeUndefined();
 });
-
 it('requires a separate saved prompt occurrence for every shot and rejects malformed IR without throwing', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes VALUES('scene','p',NULL)").run();
   for (const id of ['s1', 's2'])
-    f.db.prepare('INSERT INTO shots VALUES(?,?,?,NULL)').run(
-      id,
-      'scene',
-      JSON.stringify({
-        prompt: '近景：接过信件。',
-        data: { shotScale: '近景' },
-      }),
-    );
+    f.db
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json,archived_at) VALUES (?,?,?,?,?,NULL)',
+      )
+      .run(
+        id,
+        'scene',
+        ...shotFields({
+          prompt: '近景：接过信件。',
+          data: { shotScale: '近景' },
+        }),
+      );
   f.receipt('scene.submit_structure', {
     status: 'scene_structure_saved',
     sceneIds: ['scene'],
@@ -170,7 +238,7 @@ it('requires a separate saved prompt occurrence for every shot and rejects malfo
       toolName: 'scene.submit_structure',
       minimumCount: 1,
       targetIds: ['scene'],
-      criteria: [{ kind: 'shot_field', path: 'data.shotScale', inPrompt: true }],
+      requiredTexts: ['近景：接过信件。'],
     },
     {
       key: 'prompts',
@@ -194,12 +262,11 @@ it('requires a separate saved prompt occurrence for every shot and rejects malfo
     'invalid IR',
   ]) {
     f.db
-      .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-      .run(JSON.stringify(malformed), 's2');
-    expect(f.assess()?.pending.map((p) => p.key)).toEqual(['shots', 'prompts']);
+      .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+      .run(...shotFields(malformed), 's2');
+    expect(f.assess()?.pending.map((p) => p.key)).toEqual(['prompts']);
   }
 });
-
 it('validates typed criteria through the actual tool argument schema', () => {
   const definition = SYSTEM_AGENT_TOOLS.find((t) => t.name === 'conversation.task.checkpoint')!;
   const validate = (criteria: unknown): void => {
@@ -216,10 +283,7 @@ it('validates typed criteria through the actual tool argument schema', () => {
     });
   };
   expect(() =>
-    validate([
-      { kind: 'total_duration', seconds: 60, toleranceSeconds: 0.5 },
-      { kind: 'shot_field', path: 'data.cameraPlan.shotScale', inPrompt: true },
-    ]),
+    validate([{ kind: 'total_duration', seconds: 60, toleranceSeconds: 0.5 }]),
   ).not.toThrow();
   for (const criterion of [
     { kind: 'total_duration', seconds: -1, toleranceSeconds: 0 },
@@ -229,16 +293,18 @@ it('validates typed criteria through the actual tool argument schema', () => {
   ])
     expect(() => validate([criterion]), JSON.stringify(criterion)).toThrow();
 });
-
 it('allocates explicitly bound outputs to their own plan item regardless of save order', () => {
   const f = fixture();
   const plan = f.plan([
     { key: 'analysis', toolName: 'document.submit_draft', documentKind: 'plan', minimumCount: 1 },
     { key: 'storyboard', toolName: 'document.submit_draft', documentKind: 'plan', minimumCount: 1 },
   ]);
-  const binding = (plan.outputBindings as Array<{ key: string; outputId: string }>).find(
-    (b) => b.key === 'storyboard',
-  )!;
+  const binding = (
+    plan.outputBindings as Array<{
+      key: string;
+      outputId: string;
+    }>
+  ).find((b) => b.key === 'storyboard')!;
   f.db
     .prepare("INSERT INTO documents VALUES ('storyboard','p','plan','v-storyboard','active')")
     .run();
@@ -253,7 +319,6 @@ it('allocates explicitly bound outputs to their own plan item regardless of save
   });
   expect(f.assess()?.pending.map((item) => item.key)).toEqual(['analysis']);
 });
-
 it('shares only explicit target IDs and does not fill a partial target group with another output', () => {
   const f = fixture();
   f.document('pinned', 'plan');
@@ -267,9 +332,12 @@ it('shares only explicit target IDs and does not fill a partial target group wit
     },
     { key: 'storyboard', toolName: 'document.submit_draft', documentKind: 'plan', minimumCount: 1 },
   ]);
-  const binding = (plan.outputBindings as Array<{ key: string; outputId: string }>).find(
-    (b) => b.key === 'storyboard',
-  )!;
+  const binding = (
+    plan.outputBindings as Array<{
+      key: string;
+      outputId: string;
+    }>
+  ).find((b) => b.key === 'storyboard')!;
   f.db
     .prepare("INSERT INTO documents VALUES ('storyboard','p','plan','v-storyboard','active')")
     .run();
@@ -303,16 +371,18 @@ it('shares only explicit target IDs and does not fill a partial target group wit
   ]);
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it('preserves output ownership when a bound document is later updated through its real target ID', () => {
   const f = fixture();
   const plan = f.plan([
     { key: 'analysis', toolName: 'document.submit_draft', documentKind: 'plan', minimumCount: 1 },
     { key: 'storyboard', toolName: 'document.submit_draft', documentKind: 'plan', minimumCount: 1 },
   ]);
-  const outputId = (plan.outputBindings as Array<{ key: string; outputId: string }>).find(
-    (b) => b.key === 'storyboard',
-  )!.outputId;
+  const outputId = (
+    plan.outputBindings as Array<{
+      key: string;
+      outputId: string;
+    }>
+  ).find((b) => b.key === 'storyboard')!.outputId;
   f.db.prepare("INSERT INTO documents VALUES ('storyboard','p','plan','v2','active')").run();
   f.db
     .prepare(
@@ -333,14 +403,16 @@ it('preserves output ownership when a bound document is later updated through it
   });
   expect(f.assess()?.pending.map((item) => item.key)).toEqual(['analysis']);
 });
-
 it('keeps staged outputs with their planned owner when another stage finishes first', () => {
   const f = fixture();
   const plan = f.plan([
     { key: 'first', toolName: 'scene.structure.stage', minimumCount: 1 },
     { key: 'second', toolName: 'scene.structure.stage', minimumCount: 1 },
   ]);
-  for (const binding of plan.outputBindings as Array<{ key: string; outputId: string }>)
+  for (const binding of plan.outputBindings as Array<{
+    key: string;
+    outputId: string;
+  }>)
     f.receipt('scene.structure.stage', {
       status: 'scene_structure_staging',
       stageId: `stage-${binding.key}`,
@@ -348,8 +420,8 @@ it('keeps staged outputs with their planned owner when another stage finishes fi
     });
   f.db.prepare("INSERT INTO scenes(id,project_id) VALUES('second','p')").run();
   f.db
-    .prepare('INSERT INTO shots(id,scene_id,authoring_ir_json) VALUES(?,?,?)')
-    .run('shot-second', 'second', JSON.stringify({ prompt: '第二场正文' }));
+    .prepare('INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)')
+    .run('shot-second', 'second', ...shotFields({ prompt: '第二场正文' }));
   f.receipt('scene.structure.stage', {
     status: 'scene_structure_saved',
     stageId: 'stage-second',
@@ -366,7 +438,6 @@ it('keeps staged outputs with their planned owner when another stage finishes fi
   });
   expect(f.assess()?.pending.map((item) => item.key)).toEqual(['first']);
 });
-
 it('continues missing scenes before auditing whole-episode text instead of forcing it into the first scene', () => {
   const f = fixture();
   f.plan([
@@ -380,8 +451,10 @@ it('continues missing scenes before auditing whole-episode text instead of forci
   const saveScene = (id: string, prompt: string) => {
     f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
     f.db
-      .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-      .run(`shot-${id}`, id, JSON.stringify({ prompt }));
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run(`shot-${id}`, id, ...shotFields({ prompt }));
     f.receipt('scene.structure.stage', {
       status: 'scene_structure_saved',
       sceneIds: [id],
@@ -409,11 +482,10 @@ it('continues missing scenes before auditing whole-episode text instead of forci
     nextAction: { kind: 'repair_outputs', planChangeRequired: false },
   });
   f.db
-    .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-    .run(JSON.stringify({ prompt: '结尾对白。' }), 'shot-fourth');
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ prompt: '结尾对白。' }), 'shot-fourth');
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it.each(STRUCTURE_DELIVERABLE_TOOLS)(
   'repairs persisted scenes from %s instead of reporting them as missing outputs',
   (toolName) => {
@@ -430,14 +502,18 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     ]);
     for (const id of ['first', 'second']) {
       f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
-      f.db.prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)').run(
-        `shot-${id}`,
-        id,
-        JSON.stringify({
-          prompt: id === 'first' ? '首场对白。' : '末场对白。',
-          references: { characterDocumentIds: id === 'first' ? ['actor'] : [] },
-        }),
-      );
+      f.db
+        .prepare(
+          'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+        )
+        .run(
+          `shot-${id}`,
+          id,
+          ...shotFields({
+            prompt: id === 'first' ? '首场对白。' : '末场对白。',
+            bindings: { schemaVersion: 1, characterDocumentIds: id === 'first' ? ['actor'] : [] },
+          }),
+        );
       f.receipt(toolName, {
         status: 'scene_structure_partially_saved',
         sceneIds: [id],
@@ -462,23 +538,25 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     });
     expect(f.assess()?.pending[0]).not.toHaveProperty('missingTexts');
     // Repair in place is sufficient: no new scene or structure receipt is needed.
-    f.db
-      .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-      .run(
-        JSON.stringify({ prompt: '末场对白。', references: { characterDocumentIds: ['actor'] } }),
-        'shot-second',
-      );
+    f.db.prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?').run(
+      ...shotFields({
+        prompt: '末场对白。',
+        bindings: { schemaVersion: 1, characterDocumentIds: ['actor'] },
+      }),
+      'shot-second',
+    );
     expect(f.assess()?.pending).toEqual([]);
     expect(f.db.prepare('SELECT COUNT(*) n FROM scenes').get()).toEqual({ n: 2 });
   },
 );
-
 it('repairs existing target-shot references without requesting new outputs or weakening the plan', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes (id,project_id) VALUES ('scene','p')").run();
   f.db
-    .prepare("INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES ('shot','scene',?)")
-    .run(JSON.stringify({ prompt: '已保存的对白。', references: {} }));
+    .prepare(
+      "INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES ('shot','scene',?,?,?)",
+    )
+    .run(...shotFields({ prompt: '已保存的对白。', bindings: { schemaVersion: 1 } }));
   f.plan([
     {
       key: 'shot',
@@ -503,16 +581,19 @@ it('repairs existing target-shot references without requesting new outputs or we
   });
   expect(f.assess()?.pending[0]).not.toHaveProperty('missingTexts');
 });
-
 it('recognizes the actual episode_structure_saved receipt for scenes, prompts and timing', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes (id,project_id) VALUES ('scene','p')").run();
-  f.db.prepare("INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES ('shot','scene',?)").run(
-    JSON.stringify({
-      prompt: '完整正文。',
-      timing: { estimatedDurationSeconds: 3, rationale: '自然动作' },
-    }),
-  );
+  f.db
+    .prepare(
+      "INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES ('shot','scene',?,?,?)",
+    )
+    .run(
+      ...shotFields({
+        prompt: '完整正文。',
+        timing: { estimatedDurationSeconds: 3 },
+      }),
+    );
   f.plan([
     { key: 'episode', toolName: 'novel.episode.submit_structure', minimumCount: 1 },
     { key: 'prompts', toolName: 'scene.update_shot_prompts', minimumCount: 1 },
@@ -525,7 +606,6 @@ it('recognizes the actual episode_structure_saved receipt for scenes, prompts an
   });
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it.each(STRUCTURE_DELIVERABLE_TOOLS)(
   'recognizes committed shots from %s without requiring redundant prompt edits',
   (toolName) => {
@@ -533,15 +613,18 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     f.document('actor', 'character');
     f.db.prepare("INSERT INTO scenes (id,project_id) VALUES ('scene','p')").run();
     const ir = {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: '桥边有人。',
-      references: { characterDocumentIds: ['actor'], sceneDocumentIds: [], propDocumentIds: [] },
-      timing: { estimatedDurationSeconds: 4, rationale: '自然对白和反应' },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: ['actor'], sceneDocumentIds: [], propDocumentIds: [] },
+      },
+      timing: { estimatedDurationSeconds: 4 },
     };
     f.db
-      .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-      .run('shot', 'scene', JSON.stringify(ir));
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run('shot', 'scene', ...shotFields(ir));
     f.plan([
       {
         key: 'prompts',
@@ -571,21 +654,20 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     expect(f.assess()?.pending).toEqual([]);
     // A receipt does not validate removed timing or an archived current output.
     f.db
-      .prepare('UPDATE shots SET authoring_ir_json=?')
-      .run(JSON.stringify({ ...ir, timing: undefined }));
+      .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=?')
+      .run(...shotFields({ ...ir, timing: undefined }));
     expect(f.assess()?.pending.map((p) => p.key)).toEqual(['timing']);
     f.db.prepare("UPDATE shots SET archived_at='archived'").run();
     expect(f.assess()?.pending).toHaveLength(2);
   },
 );
-
 it('does not count a structure receipt for shots outside its committed scene IDs', () => {
   const f = fixture();
   for (const id of ['committed', 'unrelated'])
     f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
   f.db
-    .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-    .run('shot', 'unrelated', JSON.stringify({ prompt: '正文' }));
+    .prepare('INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)')
+    .run('shot', 'unrelated', ...shotFields({ prompt: '正文' }));
   f.plan([{ key: 'prompts', toolName: 'scene.update_shot_prompts', minimumCount: 1 }]);
   f.receipt('scene.structure.stage', {
     status: 'scene_structure_saved',
@@ -594,7 +676,6 @@ it('does not count a structure receipt for shots outside its committed scene IDs
   });
   expect(f.assess()?.pending[0]).toMatchObject({ savedCount: 0 });
 });
-
 it('keeps discovered targets mandatory while completing the rest of a minimum-count group from saved outputs', () => {
   const f = fixture();
   f.document('first', 'plan');
@@ -618,7 +699,6 @@ it('keeps discovered targets mandatory while completing the rest of a minimum-co
   f.document('replacement', 'plan');
   expect(f.assess()?.pending[0]).toMatchObject({ missingTargetIds: ['first'] });
 });
-
 it('shares saveable document kinds and field combination rules with the provider schema', () => {
   const f = fixture();
   const definition = SYSTEM_AGENT_TOOLS.find(
@@ -657,7 +737,6 @@ it('shares saveable document kinds and field combination rules with the provider
     expect(() => fixture().plan([item])).not.toThrow();
   }
 });
-
 it('keeps discussion unplanned but detects an action plan with zero writes', () => {
   const f = fixture();
   expect(f.assess()).toBeUndefined();
@@ -674,7 +753,6 @@ it('keeps discussion unplanned but detects an action plan with zero writes', () 
   f.receipt('project.structure.get', { status: 'read' });
   expect(f.assess()?.pending).toHaveLength(1);
 });
-
 it('can repair a historical script plan without weakening obligations or rewriting its audit', () => {
   const f = fixture();
   const legacy = {
@@ -690,13 +768,16 @@ it('can repair a historical script plan without weakening obligations or rewriti
   expect(f.assess()?.pending).toEqual([]);
   const audit = f.db
     .prepare('SELECT result_summary_json FROM agent_tool_calls ORDER BY rowid LIMIT 1')
-    .get() as { result_summary_json: string };
+    .get() as {
+    result_summary_json: string;
+  };
   const original = JSON.parse(audit.result_summary_json) as {
-    deliverables: Array<{ documentKind: string }>;
+    deliverables: Array<{
+      documentKind: string;
+    }>;
   };
   expect(original.deliverables[0]!.documentKind).toBe('script');
 });
-
 it('checks actual document kinds and distinct current-generation persisted documents', () => {
   const f = fixture();
   f.plan([
@@ -724,7 +805,6 @@ it('checks actual document kinds and distinct current-generation persisted docum
   f.document('actor2', 'character');
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it('requires independent saved outputs for several unbound deliverables of the same kind', () => {
   const f = fixture();
   f.plan(
@@ -745,7 +825,6 @@ it('requires independent saved outputs for several unbound deliverables of the s
   f.document('prompts', 'plan');
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it('rejects renamed re-registration after recovery while allowing stable refinements and distinct targets', () => {
   const f = fixture();
   const item = {
@@ -774,7 +853,6 @@ it('rejects renamed re-registration after recovery while allowing stable refinem
   expect(() => f.plan([{ ...item, key: 'independent', targetIds: ['other-actor'] }])).not.toThrow();
   expect(f.assess()?.pending).toHaveLength(2);
 });
-
 it('diagnoses historical plan allocation conflicts and repairs shared identities without new writes', () => {
   const f = fixture();
   const base = { toolName: 'document.submit_draft', documentKind: 'plan' };
@@ -796,12 +874,13 @@ it('diagnoses historical plan allocation conflicts and repairs shared identities
   expect(f.db.prepare('SELECT count(*) n FROM documents').get()).toEqual({ n: 2 });
   const original = f.db
     .prepare('SELECT result_summary_json FROM agent_tool_calls ORDER BY rowid LIMIT 1')
-    .get() as { result_summary_json: string };
+    .get() as {
+    result_summary_json: string;
+  };
   expect(JSON.parse(original.result_summary_json) as unknown).toMatchObject({
     deliverables: legacy,
   });
 });
-
 it.each(['document.submit_draft', 'scene.update_shot_prompts'] as const)(
   'reconciles an explicitly allocated %s output before requesting more business writes',
   (toolName) => {
@@ -810,7 +889,9 @@ it.each(['document.submit_draft', 'scene.update_shot_prompts'] as const)(
       if (toolName === 'document.submit_draft')
         f.db.prepare('UPDATE document_versions SET content_markdown=?').run(text);
       else
-        f.db.prepare('UPDATE shots SET authoring_ir_json=?').run(JSON.stringify({ prompt: text }));
+        f.db
+          .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=?')
+          .run(...shotFields({ prompt: text }));
     };
     if (toolName === 'document.submit_draft') f.document('saved', 'plan');
     else {
@@ -853,7 +934,6 @@ it.each(['document.submit_draft', 'scene.update_shot_prompts'] as const)(
     ).toEqual({ n: 1 });
   },
 );
-
 it.each(['document.submit_draft', 'scene.structure.stage'] as const)(
   'rejects retrospective target groups that take saved outputs away from an existing %s obligation',
   (toolName) => {
@@ -879,7 +959,6 @@ it.each(['document.submit_draft', 'scene.structure.stage'] as const)(
     expect(f.assess()?.pending).toEqual([]);
   },
 );
-
 it('checks all 16 target shots and actual nonempty, correctly typed references', () => {
   const f = fixture();
   const ids = Array.from({ length: 16 }, (_, i) => `s${i}`);
@@ -887,8 +966,14 @@ it('checks all 16 target shots and actual nonempty, correctly typed references',
   f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run('scene', 'p');
   for (const id of ids)
     f.db
-      .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-      .run(id, 'scene', JSON.stringify({ references: { characterDocumentIds: ['actor'] } }));
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run(
+        id,
+        'scene',
+        ...shotFields({ bindings: { schemaVersion: 1, characterDocumentIds: ['actor'] } }),
+      );
   f.plan([
     {
       key: 'bindings',
@@ -909,15 +994,14 @@ it('checks all 16 target shots and actual nonempty, correctly typed references',
   });
   expect(f.assess()?.pending).toEqual([]);
   f.db
-    .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-    .run(JSON.stringify({ references: {} }), 's15');
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ bindings: { schemaVersion: 1 } }), 's15');
   expect(f.assess()?.pending[0]?.missingTargetIds).toEqual(['s15']);
   f.db
-    .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-    .run(JSON.stringify({ references: { propDocumentIds: ['actor'] } }), 's15');
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ bindings: { schemaVersion: 1, propDocumentIds: ['actor'] } }), 's15');
   expect(f.assess()?.pending[0]?.missingTargetIds).toEqual(['s15']);
 });
-
 it('cannot weaken or remove registered obligations and keeps explicit partial reasons', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes (id,project_id) VALUES ('scene','p')").run();
@@ -942,7 +1026,6 @@ it('cannot weaken or remove registered obligations and keeps explicit partial re
   expect(f.assess()?.partialReason).toBe('目标工具当前不可用');
   expect(f.assess()?.pending).toHaveLength(2);
 });
-
 it('corrects model-estimated scene counts using actual targets without losing text or binding requirements', () => {
   const f = fixture();
   const item = {
@@ -957,14 +1040,18 @@ it('corrects model-estimated scene counts using actual targets without losing te
   const ids = ['one', 'two', 'three', 'four'];
   for (const id of ids) {
     f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
-    f.db.prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)').run(
-      'shot-' + id,
-      id,
-      JSON.stringify({
-        prompt: id === 'one' ? '桥边有人。' : '继续',
-        references: { characterDocumentIds: ['actor'] },
-      }),
-    );
+    f.db
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run(
+        'shot-' + id,
+        id,
+        ...shotFields({
+          prompt: id === 'one' ? '桥边有人。' : '继续',
+          bindings: { schemaVersion: 1, characterDocumentIds: ['actor'] },
+        }),
+      );
   }
   const correction = {
     ...item,
@@ -1003,12 +1090,13 @@ it('corrects model-estimated scene counts using actual targets without losing te
   expect(() => f.plan([{ ...correction, targetIds: ids.slice(1) }])).toThrow('weaken');
   const original = f.db
     .prepare('SELECT result_summary_json FROM agent_tool_calls ORDER BY rowid LIMIT 1')
-    .get() as { result_summary_json: string };
+    .get() as {
+    result_summary_json: string;
+  };
   expect(JSON.parse(original.result_summary_json) as unknown).toMatchObject({
     deliverables: [{ minimumCount: 16 }],
   });
 });
-
 it('corrects a model plan before creating outputs without treating the revision as a save', () => {
   const f = fixture();
   const item = {
@@ -1042,7 +1130,6 @@ it('corrects a model plan before creating outputs without treating the revision 
     .run();
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it('corrects a mistaken homogeneous document plan against the actual saved mixed reference set', () => {
   const f = fixture();
   const item = {
@@ -1076,7 +1163,6 @@ it('corrects a mistaken homogeneous document plan against the actual saved mixed
   expect(f.assess()?.pending).toEqual([]);
   expect(f.db.prepare('SELECT count(*) n FROM documents').get()).toEqual({ n: 4 });
 });
-
 it.each(STRUCTURE_DELIVERABLE_TOOLS)(
   'counts real committed scenes for %s, never staged or duplicate receipts',
   (toolName) => {
@@ -1087,8 +1173,14 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     for (const id of ids) {
       f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
       f.db
-        .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-        .run(`shot-${id}`, id, JSON.stringify({ references: { characterDocumentIds: ['actor'] } }));
+        .prepare(
+          'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+        )
+        .run(
+          `shot-${id}`,
+          id,
+          ...shotFields({ bindings: { schemaVersion: 1, characterDocumentIds: ['actor'] } }),
+        );
     }
     const saved = { sceneIds: ids, shotIds: ids.map((id) => `shot-${id}`) };
     for (const status of [
@@ -1110,14 +1202,16 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     f.receipt(toolName, { status: 'scene_structure_saved', ...saved });
     expect(f.assess()?.pending).toEqual([]);
     f.db
-      .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-      .run(JSON.stringify({ references: { sceneDocumentIds: ['actor'] } }), 'shot-second');
+      .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+      .run(
+        ...shotFields({ bindings: { schemaVersion: 1, sceneDocumentIds: ['actor'] } }),
+        'shot-second',
+      );
     expect(f.assess()?.pending[0]?.savedCount).toBe(1);
     f.db.prepare("UPDATE scenes SET archived_at='archived' WHERE id='first'").run();
     expect(f.assess()?.pending[0]?.savedCount).toBe(0);
   },
 );
-
 it('reserves explicit scene targets and allocates unbound outputs across structure tools only once', () => {
   const f = fixture();
   f.db.prepare("INSERT INTO scenes (id,project_id) VALUES ('first','p')").run();
@@ -1134,7 +1228,6 @@ it('reserves explicit scene targets and allocates unbound outputs across structu
     });
   expect(f.assess()?.pending.map((item) => item.key)).toEqual(['second']);
 });
-
 it('validates output targets before registration and repairs only legacy workspace locators without erasing obligations', () => {
   const f = fixture();
   const item = {
@@ -1159,8 +1252,14 @@ it('validates output targets before registration and repairs only legacy workspa
   for (const id of ['a', 'b']) {
     f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
     f.db
-      .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-      .run(`shot-${id}`, id, JSON.stringify({ references: { characterDocumentIds: ['actor'] } }));
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run(
+        `shot-${id}`,
+        id,
+        ...shotFields({ bindings: { schemaVersion: 1, characterDocumentIds: ['actor'] } }),
+      );
   }
   f.receipt('scene.submit_structure', {
     status: 'scene_structure_saved',
@@ -1169,7 +1268,6 @@ it('validates output targets before registration and repairs only legacy workspa
   });
   expect(f.assess()?.pending).toEqual([]);
 });
-
 it.each([false, true])(
   'requires a real non-retryable blocker for missing outputs or text (text=%s)',
   (text) => {
@@ -1202,7 +1300,6 @@ it.each([false, true])(
     }
   },
 );
-
 it('checks verbatim requirements against current saved Markdown and never weakens the persisted checklist', () => {
   const f = fixture();
   const item = {
@@ -1257,7 +1354,6 @@ it('checks verbatim requirements against current saved Markdown and never weaken
     .run('修改后漏了对白', 'v-draft');
   expect(f.assess()?.pending[0]?.missingTexts).toEqual(['原文对白。']);
 });
-
 it.each(STRUCTURE_DELIVERABLE_TOOLS)(
   'verifies all source lines across real shot prompts for %s, excluding audio metadata',
   (toolName) => {
@@ -1266,14 +1362,18 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
     f.plan([{ key: 'episode', toolName, minimumCount: 2, requiredTexts }]);
     for (const id of ['first', 'second']) {
       f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
-      f.db.prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)').run(
-        `shot-${id}`,
-        id,
-        JSON.stringify({
-          prompt: id === 'first' ? '第一句。' : '遗漏正文',
-          data: { audioPlan: { line: '第二句。' } },
-        }),
-      );
+      f.db
+        .prepare(
+          'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+        )
+        .run(
+          `shot-${id}`,
+          id,
+          ...shotFields({
+            prompt: id === 'first' ? '第一句。' : '遗漏正文',
+            data: { audioPlan: { line: '第二句。' } },
+          }),
+        );
     }
     f.receipt(toolName, {
       status: 'scene_structure_saved',
@@ -1292,14 +1392,13 @@ it.each(STRUCTURE_DELIVERABLE_TOOLS)(
       },
     });
     f.db
-      .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-      .run(JSON.stringify({ prompt: '第二句。' }), 'shot-second');
+      .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+      .run(...shotFields({ prompt: '第二句。' }), 'shot-second');
     expect(f.assess()?.pending).toEqual([]);
     f.db.prepare("UPDATE shots SET archived_at='archived' WHERE id='shot-second'").run();
     expect(f.assess()?.pending[0]?.missingTexts).toEqual(['第二句。']);
   },
 );
-
 it('checks required text across every scene in one deliverable even when its minimum count is one', () => {
   const f = fixture();
   f.plan([
@@ -1316,8 +1415,10 @@ it('checks required text across every scene in one deliverable even when its min
   ]) {
     f.db.prepare('INSERT INTO scenes (id,project_id) VALUES (?,?)').run(id, 'p');
     f.db
-      .prepare('INSERT INTO shots (id,scene_id,authoring_ir_json) VALUES (?,?,?)')
-      .run(`shot-${id}`, id, JSON.stringify({ prompt }));
+      .prepare(
+        'INSERT INTO shots (id,scene_id,prompt,timing_json,bindings_json) VALUES (?,?,?,?,?)',
+      )
+      .run(`shot-${id}`, id, ...shotFields({ prompt }));
   }
   f.receipt('scene.structure.stage', {
     status: 'scene_structure_saved',
@@ -1326,8 +1427,8 @@ it('checks required text across every scene in one deliverable even when its min
   });
   expect(f.assess()?.pending).toEqual([]);
   f.db
-    .prepare('UPDATE shots SET authoring_ir_json=? WHERE id=?')
-    .run(JSON.stringify({ prompt: '漏掉结尾' }), 'shot-last');
+    .prepare('UPDATE shots SET prompt=?,timing_json=?,bindings_json=? WHERE id=?')
+    .run(...shotFields({ prompt: '漏掉结尾' }), 'shot-last');
   expect(f.assess()?.pending[0]?.missingTexts).toEqual(['结尾原句。']);
   expect(f.assess()?.pending[0]?.nextAction).toMatchObject({
     kind: 'repair_outputs',
@@ -1335,7 +1436,6 @@ it('checks required text across every scene in one deliverable even when its min
     planChangeRequired: false,
   });
 });
-
 it('keeps exact-text schema validation aligned with runtime and accepts compatible plans without it', () => {
   const f = fixture();
   const definition = SYSTEM_AGENT_TOOLS.find((t) => t.name === 'conversation.task.checkpoint')!;

@@ -517,6 +517,7 @@ describe('createPiStreamFunction', () => {
         stage: 'tool_arguments',
         toolName: 'scene.structure.stage',
         argumentBytes: 20000,
+        nativeElapsedMs: 123,
       }),
     );
     bridge.handleEnvelope(
@@ -527,8 +528,18 @@ describe('createPiStreamFunction', () => {
     expect(observe).toHaveBeenCalledWith(
       expect.any(String),
       'tool_arguments',
-      expect.objectContaining({ argumentBytes: 20000 }),
+      expect.objectContaining({ argumentBytes: 20000, nativeElapsedMs: 123 }),
     );
+    expect(observe).toHaveBeenCalledWith(
+      expect.any(String),
+      'dispatching',
+      expect.objectContaining({ hostRequestId: 'progress-request' }),
+    );
+    const timing = observe.mock.calls.find((call) => call[1] === 'tool_arguments')?.[2] as Record<
+      string,
+      unknown
+    >;
+    expect(typeof timing.workerElapsedMs).toBe('number');
     expect(events.some((item) => item.type === 'toolcall_start')).toBe(false);
     expect(io.sent[0]!.params).toMatchObject({ inferenceSettings });
   });
@@ -684,10 +695,14 @@ describe('createPiStreamFunction', () => {
       });
       expect(observe.mock.calls.filter(([, stage]) => stage === 'failed')).toHaveLength(1);
       expect(observe.mock.calls.filter(([, stage]) => stage === 'complete')).toHaveLength(1);
-      expect(observe).toHaveBeenCalledWith(expect.any(String), 'retry_wait', {
-        retryAttempt: 1,
-        delayMs: 1000,
-      });
+      expect(observe).toHaveBeenCalledWith(
+        expect.any(String),
+        'retry_wait',
+        expect.objectContaining({
+          retryAttempt: 1,
+          delayMs: 1000,
+        }),
+      );
       expect(vi.getTimerCount()).toBe(0);
     },
   );

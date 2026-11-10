@@ -6,15 +6,12 @@ import { ChangeSetService } from './change-set-service.js';
 import { ContentService } from './content-service.js';
 import { ProjectService } from './project-service.js';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
-
 const directories: string[] = [];
 const services: ProjectService[] = [];
-
 afterEach(async () => {
   for (const service of services.splice(0)) service.close();
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
-
 async function setup(name = 'change-set') {
   const directory = await mkdtemp(join(tmpdir(), `ai-video-${name}-`));
   directories.push(directory);
@@ -27,26 +24,22 @@ async function setup(name = 'change-set') {
     changeSets: new ChangeSetService(projects),
   };
 }
-
 describe('ChangeSetService', () => {
-  it('normalizes manual text proposals to the same IR and preserves open fields and whitespace', async () => {
+  it('saves verbatim text proposals and preserves independent bindings', async () => {
     const { content, changeSets } = await setup();
     const sceneIR = {
-      schemaVersion: 1 as const,
-      kind: 'scene' as const,
       prompt: '  场次原文\n',
-      data: { weather: '雨' },
     };
-    const scene = content.saveScene({ title: '场次', authoringIR: sceneIR });
+    const scene = content.saveScene({ title: '场次', ...sceneIR });
     const shotIR = {
-      schemaVersion: 1 as const,
-      kind: 'shot' as const,
       prompt: '镜头原文',
-      references: { characterDocumentIds: [] },
-      timing: { estimatedDurationSeconds: 4, rationale: '动作时长' },
-      data: { beats: ['转身'] },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [] },
+      },
+      timing: { estimatedDurationSeconds: 4 },
     };
-    const shot = content.saveShot({ sceneId: scene.id, title: '镜头', authoringIR: shotIR });
+    const shot = content.saveShot({ sceneId: scene.id, title: '镜头', ...shotIR });
     const scenePrompt = '  场次修订\n';
     const shotPrompt = '  镜头修订\n';
     const result = changeSets.saveDraft({
@@ -58,9 +51,8 @@ describe('ChangeSetService', () => {
           targetId: scene.id,
           expectedRowVersion: scene.rowVersion,
           title: scene.title,
-          videoPrompt: scenePrompt,
-          sceneDocumentId: null,
-          characterDocumentIds: [],
+          prompt: scenePrompt,
+          bindings: { schemaVersion: 1 as const, sceneDocumentIds: [], characterDocumentIds: [] },
         },
         {
           entityType: 'shot',
@@ -74,15 +66,13 @@ describe('ChangeSetService', () => {
     });
     expect(result.status).toBe('applied');
     expect(content.listScenes()[0]).toMatchObject({
-      videoPrompt: scenePrompt,
-      authoringIR: { ...sceneIR, prompt: scenePrompt },
+      ...{ ...sceneIR, prompt: scenePrompt },
     });
     expect(content.listShots(scene.id)[0]).toMatchObject({
-      prompt: shotPrompt,
-      authoringIR: { ...shotIR, prompt: shotPrompt },
+      ...{ ...shotIR, prompt: shotPrompt },
     });
   });
-  it('persists Agent-authored scene and shot IR through a change set without rewriting prompts', async () => {
+  it('persists ordinary scene and shot prompts and bindings through a change set without rewriting prompts', async () => {
     const { content, changeSets } = await setup();
     const actor = content.saveDocument({
       kind: 'character',
@@ -95,33 +85,33 @@ describe('ChangeSetService', () => {
       contentMarkdown: '# 铁木杖',
     });
     const sceneIR = {
-      schemaVersion: 1 as const,
-      kind: 'scene' as const,
       prompt: '土墙茅顶的铁匠铺，炉火正旺，门外山雾渐浓。',
-      references: { characterDocumentIds: [actor.id] },
-      data: { placement: { 江晚: '前景炉旁', 老瞎子: '东侧门口' } },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [actor.id] },
+      },
     };
     const shotIR = {
-      schemaVersion: 1 as const,
-      kind: 'shot' as const,
       prompt: '老瞎子以铁木杖探地，跛行离开铁匠铺。',
-      references: { characterDocumentIds: [actor.id], propDocumentIds: [prop.id] },
-      data: { action: ['杖尖点地', '左脚探步', '右足拖行'] },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [actor.id], propDocumentIds: [prop.id] },
+      },
     };
     const proposed = changeSets.create({
       title: '场次与镜头 IR',
       items: [
-        { entityType: 'scene', action: 'create', title: '离去', authoringIR: sceneIR },
+        { entityType: 'scene', action: 'create', title: '离去', ...sceneIR },
         {
           entityType: 'shot',
           action: 'create',
           parentItemOrdinal: 0,
           title: '雾中离去',
-          authoringIR: shotIR,
+          ...shotIR,
         },
       ],
     });
-    expect(proposed.items.map((item) => item.authoringIR)).toEqual([sceneIR, shotIR]);
+    expect(proposed.items).toMatchObject([sceneIR, shotIR]);
     const applied = changeSets.apply({
       changeSetId: proposed.id,
       expectedRowVersion: proposed.rowVersion,
@@ -129,11 +119,10 @@ describe('ChangeSetService', () => {
     expect(applied.status).toBe('applied');
     const scene = content.listScenes()[0]!;
     const shot = content.listShots(scene.id)[0]!;
-    expect(scene).toMatchObject({ videoPrompt: sceneIR.prompt, authoringIR: sceneIR });
+    expect(scene).toMatchObject({ ...sceneIR });
     expect(scene.characterBindings).toEqual([{ characterDocumentId: actor.id }]);
-    expect(shot).toMatchObject({ prompt: shotIR.prompt, authoringIR: shotIR });
+    expect(shot).toMatchObject({ ...shotIR });
   });
-
   it('saves generated documents, scenes and shots as editable drafts without approval', async () => {
     const { projects, content, changeSets } = await setup();
     const saved = changeSets.saveDraft({
@@ -177,7 +166,6 @@ describe('ChangeSetService', () => {
     expect(content.listShots(scene.id)[0]?.prompt).toBe('用户后期修改');
     expect(content.getDocument(documentId).currentVersion?.state).toBe('draft');
   });
-
   it('rolls back the whole draft save on a stale update without leaving a pending approval', async () => {
     const { content, changeSets } = await setup();
     const scene = content.saveScene({ title: '手动保存' });
@@ -204,7 +192,6 @@ describe('ChangeSetService', () => {
     expect(content.listScenes().map((item) => item.title)).toEqual(['最新内容']);
     expect(changeSets.list({ includeTerminal: true })).toHaveLength(0);
   });
-
   it('reviews LLM scene/cast IDs and follows character defaults, preserving explicit selections on revision', async () => {
     const { projects, content, changeSets } = await setup();
     const setting = content.saveDocument({
@@ -244,15 +231,18 @@ describe('ChangeSetService', () => {
       entityType: 'scene' as const,
       action: 'create' as const,
       title: '相遇',
-      sceneDocumentId: setting.id,
-      videoPrompt: '司机转身，他没有开口。',
-      characterDocumentIds: [actor.id],
+      prompt: '司机转身，他没有开口。',
+      bindings: {
+        schemaVersion: 1 as const,
+        sceneDocumentIds: [setting.id],
+        characterDocumentIds: [actor.id],
+      },
     };
     const proposal = changeSets.create({ title: 'LLM 方案', items: [item] });
     expect(content.listScenes()).toHaveLength(0);
     expect(changeSets.list()[0]?.items[0]).toMatchObject({
-      videoPrompt: item.videoPrompt,
-      characterDocumentIds: [actor.id],
+      prompt: item.prompt,
+      bindings: { schemaVersion: 1, characterDocumentIds: [actor.id] },
     });
     expect(
       changeSets.apply({ changeSetId: proposal.id, expectedRowVersion: proposal.rowVersion })
@@ -260,7 +250,7 @@ describe('ChangeSetService', () => {
     ).toBe('applied');
     const scene = content.listScenes()[0]!;
     expect(scene).toMatchObject({
-      videoPrompt: item.videoPrompt,
+      prompt: item.prompt,
       sceneDocumentId: setting.id,
       characterBindings: [
         {
@@ -284,7 +274,7 @@ describe('ChangeSetService', () => {
           action: 'update',
           targetId: scene.id,
           expectedRowVersion: scene.rowVersion,
-          videoPrompt: '他独自坐下。',
+          prompt: '他独自坐下。',
         },
       ],
     });
@@ -307,8 +297,8 @@ describe('ChangeSetService', () => {
           action: 'update',
           targetId: scene.id,
           expectedRowVersion: cleared.rowVersion,
-          sceneDocumentId: null,
-          videoPrompt: '他走进空白空间。',
+          prompt: '他走进空白空间。',
+          bindings: { ...item.bindings, schemaVersion: 1 as const, sceneDocumentIds: [] },
         },
       ],
     });
@@ -320,7 +310,6 @@ describe('ChangeSetService', () => {
     expect(content.listScenes()[0]?.materialBindings).toEqual([]);
     expect(content.listScenes()[0]?.characterBindings).toEqual([{ characterDocumentId: actor.id }]);
   });
-
   it('rejects invalid structured cast without partial proposals and revalidates archived roles at approval', async () => {
     const { projects, content, changeSets } = await setup();
     const actor = content.saveDocument({
@@ -361,9 +350,12 @@ describe('ChangeSetService', () => {
               entityType: 'scene',
               action: 'create',
               title: '第一场',
-              sceneDocumentId: setting.id,
-              videoPrompt: '他转身。',
-              characterDocumentIds: ids,
+              prompt: '他转身。',
+              bindings: {
+                schemaVersion: 1 as const,
+                sceneDocumentIds: [setting.id],
+                characterDocumentIds: ids,
+              },
             },
           ],
         }),
@@ -377,9 +369,12 @@ describe('ChangeSetService', () => {
           entityType: 'scene',
           action: 'create',
           title: '第一场',
-          sceneDocumentId: setting.id,
-          videoPrompt: '他转身。',
-          characterDocumentIds: [actor.id],
+          prompt: '他转身。',
+          bindings: {
+            schemaVersion: 1 as const,
+            sceneDocumentIds: [setting.id],
+            characterDocumentIds: [actor.id],
+          },
         },
       ],
     });
@@ -392,7 +387,6 @@ describe('ChangeSetService', () => {
     ).toBe('conflicted');
     expect(content.listScenes()).toEqual([]);
   });
-
   it('rolls back prompt and bindings when a proposal is stale or removes a speaking role', async () => {
     const { projects, content, changeSets } = await setup();
     const actor = content.saveDocument({
@@ -402,7 +396,7 @@ describe('ChangeSetService', () => {
     });
     const scene = content.saveScene({
       title: '第一场',
-      videoPrompt: '原提示词',
+      prompt: '原提示词',
       characterBindings: [{ characterDocumentId: actor.id }],
     });
     const propose = () =>
@@ -415,9 +409,8 @@ describe('ChangeSetService', () => {
             targetId: scene.id,
             expectedRowVersion: scene.rowVersion,
             title: scene.title,
-            sceneDocumentId: null,
-            videoPrompt: '新提示词',
-            characterDocumentIds: [],
+            prompt: '新提示词',
+            bindings: { schemaVersion: 1 as const, sceneDocumentIds: [], characterDocumentIds: [] },
           },
         ],
       });
@@ -434,7 +427,7 @@ describe('ChangeSetService', () => {
         .status,
     ).toBe('conflicted');
     expect(content.listScenes()[0]).toMatchObject({
-      videoPrompt: '原提示词',
+      prompt: '原提示词',
       rowVersion: scene.rowVersion,
       characterBindings: scene.characterBindings,
     });
@@ -447,7 +440,7 @@ describe('ChangeSetService', () => {
     expect(
       changeSets.apply({ changeSetId: stale.id, expectedRowVersion: stale.rowVersion }).status,
     ).toBe('conflicted');
-    expect(content.listScenes()[0]?.videoPrompt).toBe('原提示词');
+    expect(content.listScenes()[0]?.prompt).toBe('原提示词');
   });
   it('preserves scene bindings in proposals and rejects a scene document archived before approval', async () => {
     const { projects, content, changeSets } = await setup();
@@ -459,7 +452,12 @@ describe('ChangeSetService', () => {
     const proposal = changeSets.create({
       title: '相遇',
       items: [
-        { entityType: 'scene', action: 'create', title: '晨间相遇', sceneDocumentId: setting.id },
+        {
+          entityType: 'scene',
+          action: 'create',
+          title: '晨间相遇',
+          bindings: { schemaVersion: 1 as const, sceneDocumentIds: [setting.id] },
+        },
         {
           entityType: 'shot',
           action: 'create',
@@ -469,7 +467,7 @@ describe('ChangeSetService', () => {
         },
       ],
     });
-    expect(changeSets.list()[0]?.items[0]?.sceneDocumentId).toBe(setting.id);
+    expect(changeSets.list()[0]?.items[0]?.bindings?.sceneDocumentIds).toEqual([setting.id]);
     expect(content.listScenes()).toHaveLength(0);
     projects.access(true, (database) =>
       database
@@ -488,7 +486,12 @@ describe('ChangeSetService', () => {
     const next = changeSets.create({
       title: '再相遇',
       items: [
-        { entityType: 'scene', action: 'create', title: '晨间相遇', sceneDocumentId: setting.id },
+        {
+          entityType: 'scene',
+          action: 'create',
+          title: '晨间相遇',
+          bindings: { schemaVersion: 1 as const, sceneDocumentIds: [setting.id] },
+        },
       ],
     });
     changeSets.apply({ changeSetId: next.id, expectedRowVersion: next.rowVersion });
@@ -521,7 +524,6 @@ describe('ChangeSetService', () => {
     ]);
     expect(applied.items[1]!.appliedEntityId).toBeTruthy();
   });
-
   it('applies shot prompts into shots.prompt when approved', async () => {
     const { changeSets, content } = await setup();
     const proposed = changeSets.create({
@@ -551,17 +553,18 @@ describe('ChangeSetService', () => {
       prompt: '[场景:旧码头] 全景，台风前夜，海雾低垂。',
     });
   });
-
-  it('rejects shot prompts on scene proposals', async () => {
-    const { changeSets } = await setup();
-    expect(() =>
-      changeSets.create({
-        title: 'Invalid',
-        items: [{ entityType: 'scene', action: 'create', title: 'Scene', prompt: 'not allowed' }],
-      }),
-    ).toThrow(/Scene proposals cannot include shot parent, status or prompt fields/);
+  it('accepts ordinary scene text proposals without a separate authoring object', async () => {
+    const { changeSets, content } = await setup();
+    const proposed = changeSets.create({
+      title: '场次正文',
+      items: [{ entityType: 'scene', action: 'create', title: '场次', prompt: '  自由正文。  ' }],
+    });
+    expect(
+      changeSets.apply({ changeSetId: proposed.id, expectedRowVersion: proposed.rowVersion })
+        .status,
+    ).toBe('applied');
+    expect(content.listScenes()[0]?.prompt).toBe('  自由正文。  ');
   });
-
   it('rejects shot prompts on document proposals', async () => {
     const { changeSets } = await setup();
     expect(() =>
@@ -580,7 +583,6 @@ describe('ChangeSetService', () => {
       }),
     ).toThrow(/Document proposals cannot include a shot prompt/);
   });
-
   it('supports selected partial apply and reject', async () => {
     const { changeSets } = await setup();
     const proposed = changeSets.create({
@@ -604,7 +606,6 @@ describe('ChangeSetService', () => {
     expect(rejected.status).toBe('partially_applied');
     expect(rejected.items.map((item) => item.status)).toEqual(['applied', 'rejected']);
   });
-
   it('marks all selected items conflicted and rolls back when CAS fails', async () => {
     const { changeSets, content } = await setup();
     const scene = content.saveScene({ title: 'Existing' });
@@ -630,7 +631,6 @@ describe('ChangeSetService', () => {
     expect(conflicted.items.every((item) => item.status === 'conflicted')).toBe(true);
     expect(content.listScenes()).toMatchObject([{ id: scene.id, title: 'Concurrent name' }]);
   });
-
   it('applies a document and scene together in one transaction', async () => {
     const { changeSets, content } = await setup();
     const proposed = changeSets.create({
@@ -656,7 +656,6 @@ describe('ChangeSetService', () => {
     expect(document.currentVersion?.contentMarkdown).toContain('Blocking action.');
     expect(content.listScenes()).toHaveLength(1);
   });
-
   it('rolls back scene changes when an associated document CAS conflicts', async () => {
     const { changeSets, content } = await setup();
     const document = content.saveDocument({
@@ -695,7 +694,6 @@ describe('ChangeSetService', () => {
     expect(content.listScenes()).toHaveLength(0);
     expect(content.getDocument(document.id).title).toBe('Concurrent notes');
   });
-
   it('rejects cross-project access', async () => {
     const first = await setup('first');
     const proposed = first.changeSets.create({
@@ -708,7 +706,6 @@ describe('ChangeSetService', () => {
     ).toThrow('Change set is not available for review.');
     expect(second.changeSets.list()).toEqual([]);
   });
-
   it('rejects stale repeated application', async () => {
     const { changeSets } = await setup();
     const proposed = changeSets.create({

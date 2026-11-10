@@ -237,7 +237,12 @@ export function applyMigrationV62(database: Database.Database): void {
       WHERE execution_key LIKE 'shot-prompts:%' OR execution_key LIKE 'shot-timings:%';
     `);
 
-  backfillProductionIR(database);
+  if (
+    !(database.prepare('PRAGMA table_info(shots)').all() as Array<{ name: string }>).some(
+      (c) => c.name === 'bindings_json',
+    )
+  )
+    backfillProductionIR(database);
   retireStagedInstructions(database);
   migrateProviderDefaults(database);
 }

@@ -1,6 +1,5 @@
 export type ProjectOpenMode = 'read-write' | 'read-only';
 export type ConversationScopeType = 'project' | 'scene' | 'shot';
-
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -8,7 +7,6 @@ export interface ProjectRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export type NovelProfileStatus = 'active' | 'archived';
 export type NovelVolumeStatus = 'active' | 'archived';
 export type NovelChapterLifecycleStatus = 'reserved' | 'active' | 'archived';
@@ -28,7 +26,6 @@ export type DocumentBindingRole =
   | 'note';
 export type DocumentBindingDomain = 'shared' | 'novel' | 'short-drama';
 export type DocumentBindingStatus = 'active' | 'archived' | 'needs_review';
-
 export interface NovelProfileRecord {
   projectId: string;
   language: string;
@@ -37,7 +34,6 @@ export interface NovelProfileRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelVolumeRecord {
   id: string;
   projectId: string;
@@ -48,7 +44,6 @@ export interface NovelVolumeRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface NovelChapterRecord {
   id: string;
   projectId: string;
@@ -62,7 +57,6 @@ export interface NovelChapterRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface DocumentBindingRecord {
   id: string;
   projectId: string;
@@ -79,24 +73,20 @@ export interface DocumentBindingRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface OpenProject extends ProjectRecord {
   mode: ProjectOpenMode;
   schemaVersion: number;
 }
-
 export interface RecentProject {
   name: string;
   rootPath: string;
   lastOpenedAt: string;
 }
-
 export interface IntegrityReport {
   ok: boolean;
   messages: string[];
   schemaVersion: number;
 }
-
 export interface DocumentRecord {
   id: string;
   projectId: string;
@@ -111,7 +101,6 @@ export interface DocumentRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ContextSnapshotRecord {
   id: string;
   projectId: string;
@@ -119,13 +108,13 @@ export interface ContextSnapshotRecord {
   contentJson: string;
   createdAt: string;
 }
-
 export interface DocumentVersionRecord {
   id: string;
   documentId: string;
   version: number;
   contentMarkdown: string;
-  contentIRJson?: string;
+  sampleText?: string;
+  bindingsJson?: string;
   state?:
     | 'draft'
     | 'in_review'
@@ -148,7 +137,6 @@ export interface DocumentVersionRecord {
   stateVersion?: number;
   createdAt: string;
 }
-
 export type AgentTaskType =
   | 'document-create'
   | 'document-update'
@@ -170,7 +158,6 @@ export type AgentTaskPhase =
   | 'artifact_persisting'
   | 'waiting_review'
   | 'recovering';
-
 export interface AgentTaskRecord {
   id: string;
   projectId: string;
@@ -203,11 +190,9 @@ export interface AgentTaskRecord {
   lifecycleStatus: 'active' | 'archived';
   archivedAt?: string;
 }
-
 export type AgentTaskPlanStatus = 'frozen' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 export type AgentTaskDeliverableStatus =
   'pending' | 'ready' | 'in_progress' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
-
 export interface AgentTaskPlanRecord {
   id: string;
   taskId: string;
@@ -225,7 +210,6 @@ export interface AgentTaskPlanRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface AgentTaskDeliverableRecord {
   id: string;
   planId: string;
@@ -246,9 +230,7 @@ export interface AgentTaskDeliverableRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export type AgentTaskEventLevel = 'info' | 'warning' | 'error';
-
 export interface AgentTaskEventRecord {
   id: string;
   taskId: string;
@@ -263,7 +245,6 @@ export interface AgentTaskEventRecord {
   dedupeKey?: string;
   createdAt: string;
 }
-
 export interface AgentTaskGenerationRecord {
   taskId: string;
   generationId: string;
@@ -271,7 +252,6 @@ export interface AgentTaskGenerationRecord {
   purpose: string;
   createdAt: string;
 }
-
 export type AgentToolCallStatus =
   | 'received'
   | 'validated'
@@ -280,7 +260,6 @@ export type AgentToolCallStatus =
   | 'succeeded'
   | 'failed'
   | 'cancelled';
-
 export interface AgentToolCallRecord {
   id: string;
   taskId: string;
@@ -307,10 +286,8 @@ export interface AgentToolCallRecord {
   version: number;
   redactionState: 'native' | 'legacy_redacted';
 }
-
 export type LlmProviderStepStatus =
   'prepared' | 'in_flight' | 'complete' | 'failed' | 'interrupted';
-
 export interface LlmProviderStepRecord {
   id: string;
   projectId: string;
@@ -337,9 +314,7 @@ export interface LlmProviderStepRecord {
   errorCode?: string;
   errorMessage?: string;
 }
-
 export type AgentToolAuthorizationStatus = 'issued' | 'revoked' | 'expired';
-
 export interface AgentToolAuthorizationRecord {
   id: string;
   projectId: string;
@@ -365,9 +340,7 @@ export interface AgentToolAuthorizationRecord {
   rowVersion: number;
   createdAt: string;
 }
-
 export type AgentTaskConfirmationStatus = 'pending' | 'rejected' | 'expired' | 'consumed';
-
 export interface AgentTaskConfirmationRecord {
   id: string;
   projectId: string;
@@ -391,7 +364,6 @@ export interface AgentTaskConfirmationRecord {
   consumedAt?: string;
   createdAt: string;
 }
-
 export interface AgentTaskDocumentArtifactRecord {
   id: string;
   projectId: string;
@@ -404,10 +376,8 @@ export interface AgentTaskDocumentArtifactRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export type DocumentReviewStatus =
   'pending' | 'approved' | 'changes_requested' | 'rejected' | 'withdrawn';
-
 export interface DocumentReviewRecord {
   id: string;
   projectId: string;
@@ -424,7 +394,6 @@ export interface DocumentReviewRecord {
   comment?: string;
   version: number;
 }
-
 export interface DocumentPublicationRecord {
   id: string;
   projectId: string;
@@ -438,7 +407,6 @@ export interface DocumentPublicationRecord {
   publishedById?: string;
   publishedAt: string;
 }
-
 export interface AgentTaskDocumentVersionRecord {
   taskId: string;
   documentId: string;
@@ -446,7 +414,6 @@ export interface AgentTaskDocumentVersionRecord {
   operation: 'create' | 'update' | 'regenerate';
   createdAt: string;
 }
-
 /** Immutable, project-scoped history for document workflow state changes. */
 export type DocumentWorkflowAuditAction =
   | 'draft_saved'
@@ -458,9 +425,7 @@ export type DocumentWorkflowAuditAction =
   | 'review_changes_requested'
   | 'review_rejected'
   | 'published';
-
 export type DocumentWorkflowAuditActorType = 'user' | 'agent' | 'system' | 'import' | 'migration';
-
 export interface DocumentWorkflowAuditRecord {
   id: string;
   projectId: string;
@@ -477,15 +442,15 @@ export interface DocumentWorkflowAuditRecord {
   metadataJson?: string;
   createdAt: string;
 }
-
 export interface SceneRecord {
   id: string;
   projectId: string;
   archivedAt?: string;
   title: string;
   sceneDocumentId?: string;
-  videoPrompt?: string;
-  authoringIRJson?: string;
+  prompt?: string;
+  bindingsJson?: string;
+  timingJson?: string;
   materialBindingsJson?: string;
   dialogueAudioId?: string;
   position: number;
@@ -493,7 +458,6 @@ export interface SceneRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ShotRecord {
   id: string;
   sceneId: string;
@@ -504,12 +468,12 @@ export interface ShotRecord {
   documentId?: string;
   /** Short-drama episode shot prompt (image/video generation text). */
   prompt?: string;
-  authoringIRJson?: string;
+  bindingsJson?: string;
+  timingJson?: string;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ConversationRecord {
   id: string;
   projectId: string;
@@ -520,10 +484,8 @@ export interface ConversationRecord {
   updatedAt: string;
   archivedAt?: string;
 }
-
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type ChatMessageStatus = 'streaming' | 'complete' | 'failed';
-
 export interface ChatMessageRecord {
   id: string;
   conversationId: string;
@@ -533,12 +495,9 @@ export interface ChatMessageRecord {
   status: ChatMessageStatus;
   createdAt: string;
 }
-
 export type LlmAttemptStatus =
   'prepared' | 'streaming' | 'complete' | 'failed' | 'cancelled' | 'interrupted';
-
 export type LlmExecutionMode = 'legacy' | 'native';
-
 export interface LlmGenerationRecord {
   id: string;
   projectId: string;
@@ -561,7 +520,6 @@ export interface LlmGenerationRecord {
   updatedAt: string;
   version: number;
 }
-
 export interface LlmGenerationAttemptRecord {
   id: string;
   generationId: string;
@@ -592,7 +550,6 @@ export interface LlmGenerationAttemptRecord {
   errorCode?: string;
   errorMessage?: string;
 }
-
 export interface MemoryRecord {
   id: string;
   projectId: string;
@@ -602,11 +559,9 @@ export interface MemoryRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ConstraintRecord extends MemoryRecord {
   kind: string;
 }
-
 export interface AssetRecord {
   id: string;
   projectId: string;
@@ -621,7 +576,6 @@ export interface AssetRecord {
   trashRelativePath?: string;
   createdAt: string;
 }
-
 export interface AssetTagRecord {
   id: string;
   projectId: string;
@@ -631,7 +585,6 @@ export interface AssetTagRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface AssetGroupRecord {
   id: string;
   projectId: string;
@@ -643,7 +596,6 @@ export interface AssetGroupRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface GenerationResultRecord {
   id: string;
   jobId: string;
@@ -651,7 +603,6 @@ export interface GenerationResultRecord {
   providerUrl?: string;
   createdAt: string;
 }
-
 export type ProviderCategory = 'llm' | 'image' | 'video' | 'multi';
 export type ProviderAccessType = 'official' | 'custom';
 export type ProviderConnectionStatus =
@@ -665,7 +616,6 @@ export type ProviderConnectionStatus =
   | 'disabled';
 export type ProviderModelSource = 'remote' | 'built-in' | 'manual';
 export type ProviderDefaultRole = 'quality' | 'balanced' | 'fast' | 'vision' | 'embedding';
-
 export interface ProviderProfileRecord {
   id: string;
   name: string;
@@ -684,7 +634,6 @@ export interface ProviderProfileRecord {
   updatedAt: string;
   archivedAt?: string;
 }
-
 export interface ProviderModelRecord {
   id: string;
   providerProfileId: string;
@@ -704,7 +653,6 @@ export interface ProviderModelRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ModelPricingRecord {
   providerProfileId: string;
   modelId: string;
@@ -716,14 +664,12 @@ export interface ModelPricingRecord {
   creditPrice?: string;
   updatedAt: string;
 }
-
 export interface ProviderDefaultRecord {
   role: ProviderDefaultRole;
   providerProfileId: string;
   modelId: string;
   updatedAt: string;
 }
-
 export interface UsageIndexRecord {
   accountingJson?: string;
   providerReportedCostJson?: string;
@@ -744,7 +690,6 @@ export interface UsageIndexRecord {
   currency?: string;
   createdAt: string;
 }
-
 export interface GenerationDraftRecord {
   id: string;
   shotId: string;
@@ -752,7 +697,6 @@ export interface GenerationDraftRecord {
   parametersJson: string;
   updatedAt: string;
 }
-
 export interface JobRecord {
   id: string;
   projectId: string;
@@ -786,36 +730,30 @@ export interface JobRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ProjectRepository {
   get(): ProjectRecord;
   touch(updatedAt: string): void;
 }
-
 export interface NovelProfileRepository {
   get(projectId: string): NovelProfileRecord | undefined;
   save(record: NovelProfileRecord, expectedRowVersion?: number): boolean;
 }
-
 export interface NovelVolumeRepository {
   get(id: string): NovelVolumeRecord | undefined;
   listByProject(projectId: string, includeArchived?: boolean): NovelVolumeRecord[];
   save(record: NovelVolumeRecord, expectedRowVersion?: number): boolean;
 }
-
 export interface NovelChapterRepository {
   get(id: string): NovelChapterRecord | undefined;
   listByProject(projectId: string, includeArchived?: boolean): NovelChapterRecord[];
   save(record: NovelChapterRecord, expectedRowVersion?: number): boolean;
 }
-
 export interface DocumentBindingRepository {
   get(id: string): DocumentBindingRecord | undefined;
   getByDocument(documentId: string): DocumentBindingRecord | undefined;
   listByProject(projectId: string, includeNeedsReview?: boolean): DocumentBindingRecord[];
   save(record: DocumentBindingRecord, expectedRowVersion?: number): boolean;
 }
-
 export interface DocumentRepository {
   save(record: DocumentRecord): void;
   get(id: string): DocumentRecord | undefined;
@@ -836,7 +774,6 @@ export interface DocumentRepository {
     stateUpdatedAt: string,
   ): boolean;
 }
-
 export interface AgentTaskRepository {
   save(record: AgentTaskRecord): void;
   get(id: string): AgentTaskRecord | undefined;
@@ -844,17 +781,14 @@ export interface AgentTaskRepository {
   listByProject(projectId: string): AgentTaskRecord[];
   update(record: AgentTaskRecord, expectedVersion: number): boolean;
 }
-
 export interface AgentTaskEventRepository {
   append(record: AgentTaskEventRecord): void;
   listByTask(taskId: string): AgentTaskEventRecord[];
 }
-
 export interface AgentTaskGenerationRepository {
   link(record: AgentTaskGenerationRecord): void;
   listByTask(taskId: string): AgentTaskGenerationRecord[];
 }
-
 export interface AgentTaskPlanRepository {
   save(record: AgentTaskPlanRecord): void;
   get(id: string): AgentTaskPlanRecord | undefined;
@@ -866,7 +800,6 @@ export interface AgentTaskPlanRepository {
     expectedRowVersion: number,
   ): boolean;
 }
-
 export interface AgentTaskDeliverableRepository {
   save(record: AgentTaskDeliverableRecord): void;
   get(id: string): AgentTaskDeliverableRecord | undefined;
@@ -878,7 +811,6 @@ export interface AgentTaskDeliverableRepository {
     expectedRowVersion: number,
   ): boolean;
 }
-
 export interface AgentToolCallRepository {
   save(record: AgentToolCallRecord): void;
   get(id: string): AgentToolCallRecord | undefined;
@@ -892,32 +824,27 @@ export interface AgentToolCallRepository {
   listByTask(taskId: string): AgentToolCallRecord[];
   update(record: AgentToolCallRecord, expectedVersion: number): boolean;
 }
-
 export interface LlmProviderStepRepository {
   save(record: LlmProviderStepRecord): void;
   get(id: string): LlmProviderStepRecord | undefined;
   listByAttempt(attemptId: string): LlmProviderStepRecord[];
 }
-
 export interface AgentToolAuthorizationRepository {
   save(record: AgentToolAuthorizationRecord): void;
   get(id: string): AgentToolAuthorizationRecord | undefined;
   listByProviderStep(providerStepId: string): AgentToolAuthorizationRecord[];
   update(record: AgentToolAuthorizationRecord, expectedRowVersion: number): boolean;
 }
-
 export interface AgentTaskConfirmationRepository {
   save(record: AgentTaskConfirmationRecord): void;
   get(id: string): AgentTaskConfirmationRecord | undefined;
   getPendingByTask(taskId: string): AgentTaskConfirmationRecord | undefined;
 }
-
 export interface AgentTaskDocumentArtifactRepository {
   save(record: AgentTaskDocumentArtifactRecord): void;
   getPrimary(taskId: string): AgentTaskDocumentArtifactRecord | undefined;
   update(record: AgentTaskDocumentArtifactRecord, expectedRowVersion: number): boolean;
 }
-
 export interface DocumentReviewRepository {
   save(record: DocumentReviewRecord): void;
   get(id: string): DocumentReviewRecord | undefined;
@@ -925,44 +852,37 @@ export interface DocumentReviewRepository {
   listByDocument(documentId: string): DocumentReviewRecord[];
   update(record: DocumentReviewRecord, expectedVersion: number): boolean;
 }
-
 export interface DocumentPublicationRepository {
   append(record: DocumentPublicationRecord): void;
   get(id: string): DocumentPublicationRecord | undefined;
   listByDocument(documentId: string): DocumentPublicationRecord[];
 }
-
 export interface AgentTaskDocumentVersionRepository {
   link(record: AgentTaskDocumentVersionRecord): void;
   listByTask(taskId: string): AgentTaskDocumentVersionRecord[];
 }
-
 export interface DocumentWorkflowAuditRepository {
   append(record: DocumentWorkflowAuditRecord): void;
   listByProject(projectId: string, limit?: number): DocumentWorkflowAuditRecord[];
   listByDocument(documentId: string, limit?: number): DocumentWorkflowAuditRecord[];
 }
-
 export interface ContextSnapshotRepository {
   save(record: ContextSnapshotRecord): void;
   get(id: string): ContextSnapshotRecord | undefined;
   listByProject(projectId: string, limit: number): ContextSnapshotRecord[];
   deleteUnreferencedOlderThan(projectId: string, cutoff: string, limit: number): number;
 }
-
 export interface SceneRepository {
   save(record: SceneRecord): void;
   get(id: string): SceneRecord | undefined;
   listByProject(projectId: string, includeArchived?: boolean): SceneRecord[];
 }
-
 export interface ShotRepository {
   save(record: ShotRecord): void;
   get(id: string): ShotRecord | undefined;
   findByDocumentId(documentId: string): ShotRecord | undefined;
   listByScene(sceneId: string, includeArchived?: boolean): ShotRecord[];
 }
-
 export interface ConversationPageOptions {
   limit: number;
   cursor?: string;
@@ -970,14 +890,12 @@ export interface ConversationPageOptions {
   scopeId?: string;
   includeArchived?: boolean;
 }
-
 export interface ConversationRepository {
   save(record: ConversationRecord): void;
   get(id: string): ConversationRecord | undefined;
   listByProject(projectId: string): ConversationRecord[];
   listPageByProject(projectId: string, options: ConversationPageOptions): ConversationRecord[];
 }
-
 export interface ConversationModelPreferenceRecord {
   conversationId: string;
   capability:
@@ -987,7 +905,6 @@ export interface ConversationModelPreferenceRecord {
   confirmedAt: string;
   updatedAt: string;
 }
-
 export interface ConversationModelPreferenceRepository {
   save(record: ConversationModelPreferenceRecord): void;
   get(
@@ -997,7 +914,6 @@ export interface ConversationModelPreferenceRepository {
   listByConversation(conversationId: string): ConversationModelPreferenceRecord[];
   delete(conversationId: string, capability: ConversationModelPreferenceRecord['capability']): void;
 }
-
 export interface ChatMessageRepository {
   save(record: ChatMessageRecord): void;
   get(id: string): ChatMessageRecord | undefined;
@@ -1008,7 +924,6 @@ export interface ChatMessageRepository {
     excludedGenerationIds?: string[],
   ): number;
 }
-
 export interface LlmGenerationAttemptRepository {
   save(record: LlmGenerationAttemptRecord): void;
   get(id: string): LlmGenerationAttemptRecord | undefined;
@@ -1021,7 +936,6 @@ export interface LlmGenerationAttemptRepository {
     excludedGenerationIds?: string[],
   ): number;
 }
-
 export interface LlmGenerationRepository {
   insert(record: LlmGenerationRecord): void;
   get(id: string): LlmGenerationRecord | undefined;
@@ -1034,19 +948,16 @@ export interface LlmGenerationRepository {
     excludedGenerationIds?: string[],
   ): number;
 }
-
 export interface MemoryRepository {
   save(record: MemoryRecord): void;
   get(id: string): MemoryRecord | undefined;
   listByProject(projectId: string): MemoryRecord[];
 }
-
 export interface ConstraintRepository {
   save(record: ConstraintRecord): void;
   get(id: string): ConstraintRecord | undefined;
   listByProject(projectId: string): ConstraintRecord[];
 }
-
 export interface AssetRepository {
   save(record: AssetRecord): void;
   get(id: string): AssetRecord | undefined;
@@ -1079,21 +990,17 @@ export interface AssetRepository {
   deleteGroup(id: string): void;
   resolveGroup(groupId: string): AssetRecord[];
 }
-
 export interface GenerationDraftRepository {
   save(record: GenerationDraftRecord): void;
   get(shotId: string, adapterKey: string): GenerationDraftRecord | undefined;
 }
-
 export interface JobRepository {
   save(record: JobRecord): void;
   get(id: string): JobRecord | undefined;
   listByProject(projectId: string): JobRecord[];
 }
-
 export type GenerationJobEventPhase =
   'prepare' | 'submit' | 'poll' | 'download' | 'complete' | 'fail';
-
 export interface GenerationJobEventRecord {
   id: string;
   jobId: string;
@@ -1105,19 +1012,16 @@ export interface GenerationJobEventRecord {
   detailsJson?: string;
   createdAt: string;
 }
-
 export interface GenerationJobEventRepository {
   append(record: GenerationJobEventRecord): void;
   listByJob(jobId: string): GenerationJobEventRecord[];
   listByJobPage(jobId: string, afterSequence: number, limit: number): GenerationJobEventRecord[];
 }
-
 export interface GenerationResultRepository {
   save(record: GenerationResultRecord): void;
   listByJob(jobId: string): GenerationResultRecord[];
   findJobIdByAsset(assetId: string): string | undefined;
 }
-
 export interface ProviderProfileRepository {
   save(record: ProviderProfileRecord): void;
   get(id: string): ProviderProfileRecord | undefined;
@@ -1125,14 +1029,12 @@ export interface ProviderProfileRepository {
   getByMigrationSource(source: 'vidu' | 'vidu-cn'): ProviderProfileRecord | undefined;
   archive(id: string, archivedAt: string): void;
 }
-
 export interface ProviderModelRepository {
   save(record: ProviderModelRecord): void;
   get(id: string): ProviderModelRecord | undefined;
   getByRemoteId(providerProfileId: string, remoteModelId: string): ProviderModelRecord | undefined;
   listByProfile(providerProfileId: string): ProviderModelRecord[];
 }
-
 export interface ModelContractRecord {
   contractId: string;
   contractRevision: number;
@@ -1141,7 +1043,6 @@ export interface ModelContractRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ModelBindingRecord {
   bindingId: string;
   providerType: string;
@@ -1153,23 +1054,19 @@ export interface ModelBindingRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ModelContractRepository {
   save(record: ModelContractRecord): void;
   get(contractId: string, contractRevision: number): ModelContractRecord | undefined;
   list(): ModelContractRecord[];
 }
-
 export interface ModelBindingRepository {
   save(record: ModelBindingRecord): void;
   get(bindingId: string): ModelBindingRecord | undefined;
   list(): ModelBindingRecord[];
 }
-
 export type AdapterSchemaRecordSource =
   'official-adapter' | 'manual' | 'synced-catalog' | 'missing';
 export type AdapterSchemaRecordStatus = 'confirmed' | 'needs_confirmation' | 'missing';
-
 export interface AdapterSchemaRecord {
   adapterKey: string;
   descriptorJson: string;
@@ -1179,7 +1076,6 @@ export interface AdapterSchemaRecord {
   createdAt: string;
   updatedAt: string;
 }
-
 export interface AdapterSchemaAuditRecord {
   id: string;
   adapterKey: string;
@@ -1192,7 +1088,6 @@ export interface AdapterSchemaAuditRecord {
   afterJson?: string;
   createdAt: string;
 }
-
 export interface AdapterSchemaRepository {
   save(record: AdapterSchemaRecord): void;
   get(adapterKey: string): AdapterSchemaRecord | undefined;
@@ -1200,20 +1095,17 @@ export interface AdapterSchemaRepository {
   saveAudit(record: AdapterSchemaAuditRecord): void;
   listAudits(adapterKey: string, limit?: number): AdapterSchemaAuditRecord[];
 }
-
 export interface ModelPricingRepository {
   save(record: ModelPricingRecord): void;
   get(providerProfileId: string, modelId: string): ModelPricingRecord | undefined;
   listByProfile(providerProfileId: string): ModelPricingRecord[];
 }
-
 export interface ProviderDefaultRepository {
   save(record: ProviderDefaultRecord): void;
   get(role: ProviderDefaultRole): ProviderDefaultRecord | undefined;
   list(): ProviderDefaultRecord[];
   delete(role: ProviderDefaultRole): void;
 }
-
 export interface UsageIndexRepository {
   save(record: UsageIndexRecord): void;
   get(attemptId: string): UsageIndexRecord | undefined;

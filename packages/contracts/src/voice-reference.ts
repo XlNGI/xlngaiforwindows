@@ -40,7 +40,45 @@ export interface CharacterVoiceReferenceConfirmParams {
   confirmationToken: string;
   approved: boolean;
 }
+export interface CharacterVoiceDesignPrepareParams {
+  characterDocumentId: string;
+  voiceDocumentId: string;
+  expectedVoiceDocumentVersionId: string;
+  expectedCharacterRowVersion: number;
+  providerProfileId: string;
+  modelId: 'speech-2.8-hd' | 'speech-2.8-turbo';
+}
+export type CharacterVoiceDesignConfirmResult =
+  | { approved: false }
+  | {
+      approved: true;
+      audio: import('./dubbing.js').AudioFileInfo;
+      voiceProfile: import('./dubbing.js').VoiceProfileInfo;
+      reference: CharacterVoiceReferenceInfo;
+    };
+export interface NativeVoiceDesignParams {
+  projectRoot: string;
+  providerProfileId: string;
+  prompt: string;
+  previewText: string;
+  outputRelativePath: string;
+  operationId?: string;
+}
+export interface NativeVoiceDesignResult {
+  relativePath: string;
+  mime: string;
+  sizeBytes: number;
+  voiceId: string;
+}
 export interface VoiceReferenceWorkerMethodMap {
+  'characterVoiceDesign.prepare': {
+    params: CharacterVoiceDesignPrepareParams;
+    result: { confirmation: import('./index.js').MediaSubmissionConfirmationRequest };
+  };
+  'characterVoiceDesign.confirm': {
+    params: CharacterVoiceReferenceConfirmParams;
+    result: CharacterVoiceDesignConfirmResult;
+  };
   'characterVoiceReference.list': {
     params: Record<string, never>;
     result: CharacterVoiceReferenceInfo[];

@@ -1,0 +1,141 @@
+{
+  "revision": "34",
+  "result": "passed",
+  "scope": "real Native Worker provider run; structural validation and persistence only",
+  "provider": {
+    "profileId": "3c84cd7e-6093-42a5-b857-2d465da83c8c",
+    "modelId": "c540f921-12ca-4195-bf50-e3fbbd78e1cf",
+    "protocol": "openai-chat-completions",
+    "contextWindowTokens": 512000
+  },
+  "input": {
+    "promptCodePoints": 9034,
+    "promptSha256": "6e9f648565c60ed0c416901d39fd3ff9b25056adb9e4ff94231d2c9929aa280f",
+    "productionSourceCount": 1,
+    "productionSourceDocumentId": "a1b33ca3-379b-4abb-af08-bbc9abd2ccf4",
+    "productionSourceVersionId": "f3ec086b-08ae-484d-baa3-6902e06604a0",
+    "fixtureBaseline": {
+      "documents": 3,
+      "scenes": 0,
+      "shots": 0
+    },
+    "databaseCopy": "SQLite backup API from revision33-a; destination was new and isolated"
+  },
+  "runtime": {
+    "entryPoint": "agent.run (same Worker RPC used by the Desktop button)",
+    "actualUiClick": false,
+    "appDataDirectory": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-revision34-a/app-data",
+    "projectRoot": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261110-revision34-a/app-data/project",
+    "conversationId": "17f6200f-acf6-4370-b217-e72eb7f7fe05",
+    "projectId": "73f95ebe-0912-4ab3-a68d-41d33a834631",
+    "taskId": "08a6c594-8b53-40cc-a30e-0a5c76daa49d",
+    "generationId": "dfaff38d-bb7c-4ee7-a861-5f7837aa4120",
+    "nativeTest": "cargo test --lib context_e2e::context_management_real_bundle_agent_run -- --ignored --exact --nocapture",
+    "nativeTestResult": "1 passed; test body 379.25 seconds",
+    "taskCreatedAtUtc": "2026-11-10T06:08:29.344Z",
+    "taskCompletedAtUtc": "2026-11-10T06:14:46.874Z",
+    "taskElapsedSeconds": 377.53,
+    "taskStatus": "completed",
+    "taskOutcome": "read-only",
+    "generationStatus": "complete",
+    "generationFinishReason": "stop",
+    "workerEntrySha256": "efa916cae96cbebc96b1ca99263a7249ef95a15ef70adbd035d535554567a46d",
+    "workerDistFileCount": 448,
+    "workerDistManifestSha256": "2f319de2f4d83a3e06fda7f7c84ca1e7a67cea657fa83d15c80a25645fc845fc"
+  },
+  "structure": {
+    "sealed": true,
+    "structureReady": true,
+    "candidateCount": 12,
+    "structureErrorCount": 0,
+    "businessSaved": true,
+    "pendingDeliverables": 0,
+    "bundleReadbackStatus": "bundle_readback_verified",
+    "bundleReadbackVerified": true,
+    "bundleReadbackFailureCount": 0,
+    "bundleReadbackCounts": {
+      "characterDocuments": 2,
+      "locationDocuments": 3,
+      "propDocuments": 1,
+      "voiceDocuments": 1,
+      "planDocuments": 0,
+      "storyScenes": 2,
+      "shots": 3
+    },
+    "databaseTotalsAfterRun": {
+      "documents": 10,
+      "storyScenes": 2,
+      "shots": 3
+    },
+    "databaseCheck": {
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0,
+      "businessCommitCount": 1
+    },
+    "mediaJobs": 0,
+    "reviewForms": 0,
+    "audioFiles": 0,
+    "contentOrSemanticReviewPerformed": false
+  },
+  "requests": {
+    "providerAttempts": 15,
+    "providerRequestsWithUsage": 14,
+    "failedTransportAttempts": 1,
+    "toolValidationFailures": 5,
+    "successfulAgentToolCalls": 8,
+    "taskInputTokens": 371932,
+    "cachedInputTokens": 99682,
+    "taskOutputTokens": 11357,
+    "sumOfPerRequestInputEstimates": 396751,
+    "distinctInputHashesAmongAttempts": 14,
+    "inputTokenBudget": null,
+    "estimateBeforeEachRequest": true,
+    "requests": [
+      {"attempt":1,"tool":"production.skill.read","bytes":68107,"estimate":20453,"inputTokens":16140,"outputTokens":128,"retry":0,"result":"success"},
+      {"attempt":2,"tool":"conversation.task.checkpoint","bytes":69242,"estimate":20783,"inputTokens":16567,"outputTokens":96,"retry":0,"result":"success"},
+      {"attempt":3,"tool":"production.bundle","bytes":76683,"estimate":23093,"inputTokens":18466,"outputTokens":132,"retry":0,"result":"success"},
+      {"attempt":4,"tool":"production.bundle","bytes":78509,"estimate":23565,"inputTokens":18977,"cachedInputTokens":8006,"outputTokens":86,"retry":0,"result":"success"},
+      {"attempt":5,"tool":"production.bundle","bytes":79338,"estimate":23770,"inputTokens":19210,"cachedInputTokens":8017,"outputTokens":90,"retry":0,"result":"success"},
+      {"attempt":6,"tool":"production.bundle","bytes":81907,"estimate":24408,"inputTokens":19949,"cachedInputTokens":8704,"outputTokens":70,"retry":0,"result":"success"},
+      {"attempt":7,"tool":"library.search","bytes":94330,"estimate":28316,"inputTokens":32307,"cachedInputTokens":12000,"outputTokens":265,"retry":0,"result":"success"},
+      {"attempt":8,"tool":"library.read","bytes":97263,"estimate":29178,"inputTokens":24532,"cachedInputTokens":8704,"outputTokens":127,"retry":0,"result":"success"},
+      {"attempt":9,"tool":"production.bundle.submit","bytes":112729,"estimate":34107,"inputTokens":39373,"cachedInputTokens":12171,"outputTokens":4826,"retry":0,"result":"success"},
+      {"attempt":10,"tool":"conversation.task.checkpoint","bytes":115016,"estimate":34697,"inputTokens":40258,"cachedInputTokens":12171,"outputTokens":133,"retry":0,"result":"success"},
+      {"attempt":11,"tool":null,"bytes":108415,"estimate":32754,"inputTokens":null,"outputTokens":null,"retry":0,"result":"provider transport failure; WINHTTP_RESPONSE_HEADERS","inputHash":"c27789b4ef139d956c4177b09659ab1fc9de179205a60f1c8810c3793e50c5db"},
+      {"attempt":12,"tool":"production.bundle.submit","bytes":108415,"estimate":32754,"inputTokens":27933,"cachedInputTokens":8704,"outputTokens":451,"retry":1,"result":"success; same input hash as attempt 11","inputHash":"c27789b4ef139d956c4177b09659ab1fc9de179205a60f1c8810c3793e50c5db"},
+      {"attempt":13,"tool":"production.bundle.submit","bytes":109130,"estimate":32930,"inputTokens":28160,"cachedInputTokens":8704,"outputTokens":4252,"retry":0,"result":"success"},
+      {"attempt":14,"tool":"production.bundle.submit","bytes":110483,"estimate":33265,"inputTokens":38711,"cachedInputTokens":12501,"outputTokens":82,"retry":0,"result":"success"},
+      {"attempt":15,"tool":null,"bytes":118781,"estimate":35432,"inputTokens":31349,"outputTokens":619,"retry":0,"result":"success; finishReason=stop"}
+    ],
+    "toolValidationFailureEvents": [
+      {"atUtc":"2026-11-10T06:09:17.774Z","tool":"production.bundle","bytes":99,"cause":"old or malformed operation argument shape; the required nested operation fields did not match the current schema"},
+      {"atUtc":"2026-11-10T06:09:22.976Z","tool":"production.bundle","bytes":212,"cause":"preparedArguments patch shape unsupported for this stored begin/source-style operation"},
+      {"atUtc":"2026-11-10T06:11:13.145Z","tool":"production.bundle.submit","bytes":13885,"cause":"submitted 13 prompt objects; per-call maximum is 12"},
+      {"atUtc":"2026-11-10T06:12:05.633Z","tool":"production.bundle.submit","bytes":122,"cause":"repair patch attempted to set /prompts/12 beyond the existing array length"},
+      {"atUtc":"2026-11-10T06:14:10.279Z","tool":"production.bundle.submit","bytes":12688,"cause":"complete=false is invalid; incomplete chunks omit complete and only the final chunk sets complete=true"}
+    ]
+  },
+  "verification": {
+    "workerFullTest": "98 files; 1556 tests passed before final unused-parameter and formatting cleanup",
+    "postCleanupFocusedTests": "7 test files; 228 tests passed",
+    "typecheck": "passed",
+    "lint": "passed",
+    "formatCheck": "passed",
+    "workspaceBuild": "passed; Vite reported its existing main-chunk size warning",
+    "gitDiffCheck": "passed before documentation evidence was added"
+  },
+  "comparison": {
+    "previousSuccessfulRun": {
+      "directory": "p22-bundle-real-20261110-revision33-b",
+      "promptSha256": "6e9f648565c60ed0c416901d39fd3ff9b25056adb9e4ff94231d2c9929aa280f",
+      "profileId": "3c84cd7e-6093-42a5-b857-2d465da83c8c",
+      "modelId": "c540f921-12ca-4195-bf50-e3fbbd78e1cf",
+      "generationElapsedSeconds": 987.872,
+      "databaseDocuments": 13,
+      "storyScenes": 4,
+      "shots": 13,
+      "readbackVerified": true
+    },
+    "comparisonCaveat": "Same frozen prompt hash, provider profile, model and selected source version; delivered output scope differs. The two observations are not a paired performance experiment and do not establish an SLA."
+  }
+}

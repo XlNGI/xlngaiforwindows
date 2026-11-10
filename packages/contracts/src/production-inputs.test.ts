@@ -8,7 +8,6 @@ import {
   productionFrameInputConflict,
   productionImagesFromParameters,
 } from './production-inputs.js';
-
 function descriptor(
   properties: AdapterDescriptor['parameterSchema']['properties'],
 ): AdapterDescriptor {
@@ -35,7 +34,6 @@ function descriptor(
     uiSchema: { fields: [] },
   };
 }
-
 describe('production image binding prompts', () => {
   it('projects flat frame inputs according to the selected generation mode', () => {
     const adapter = descriptor({ images: { type: 'array', title: '图片' } });
@@ -99,13 +97,11 @@ describe('production image binding prompts', () => {
     const updated = productionImageBindingPrompt(first, 2, [
       { imageIndex: 2, role: 'character', label: '林澈' },
     ]);
-
     expect(updated).toBe(
       '镜头描述\n\n【输入图片说明】（本段传入2张参考图）：\n图片2为角色「林澈」的角色参考图。',
     );
     expect(productionImageBindingPrompt(updated, 2, [])).toBe('镜头描述');
   });
-
   it('maps character and scene bindings by their final media order and drops removed images', () => {
     const adapter = descriptor({
       prompt: { type: 'string', title: '提示词' },
@@ -128,7 +124,6 @@ describe('production image binding prompts', () => {
     );
     expect(parameters.prompt).toContain('图片2为角色「林澈」的角色参考图。');
     expect(parameters.prompt).toContain('图片1为场景「旧码头」的场景参考图。');
-
     const removed = addProductionImageBindings(
       adapter,
       { ...parameters, media: [{ type: 'reference_image', url: 'project-asset://scene' }] },
@@ -137,7 +132,6 @@ describe('production image binding prompts', () => {
     expect(removed.prompt).not.toContain('角色「林澈」');
     expect(removed.prompt).toContain('图片1为场景「旧码头」的场景参考图。');
   });
-
   it('updates structured content text without changing nested image objects', () => {
     const adapter = descriptor({
       content: { type: 'array', title: '内容', items: { type: 'object' } },
@@ -152,7 +146,6 @@ describe('production image binding prompts', () => {
       { content: [image, { type: 'text', text: '站在雨中。', note: 'keep' }] },
       [{ assetId: 'character', role: 'character', label: '林澈' }],
     );
-
     expect(parameters.content).toEqual([
       image,
       {
@@ -163,16 +156,16 @@ describe('production image binding prompts', () => {
     ]);
   });
 });
-
 describe('production shot reference IDs', () => {
   it('uses each explicit IR list and falls back to durable shot bindings only when omitted', () => {
     expect(
       productionShotReferenceIds({
-        authoringIR: {
-          schemaVersion: 1,
-          kind: 'shot',
+        ...{
           prompt: '角色回头。',
-          references: { characterDocumentIds: [], sceneDocumentIds: ['location'] },
+          bindings: {
+            schemaVersion: 1,
+            ...{ characterDocumentIds: [], sceneDocumentIds: ['location'] },
+          },
         },
         referenceBindings: {
           characterBindings: [{ characterDocumentId: 'legacy-character', assetId: 'image-1' }],
@@ -185,7 +178,6 @@ describe('production shot reference IDs', () => {
       propDocumentIds: [],
     });
   });
-
   it('uses shot-scoped durable bindings for old shots without an IR', () => {
     expect(
       productionShotReferenceIds({
@@ -204,7 +196,6 @@ describe('production shot reference IDs', () => {
     });
   });
 });
-
 describe('production audio binding prompts', () => {
   it('shows, replaces, and clears the selected role voice declarations', () => {
     const adapter = descriptor({ prompt: { type: 'string', title: '提示词' } });
@@ -218,18 +209,14 @@ describe('production audio binding prompts', () => {
       characterName: '江晚',
       versionId: 'voice-two',
     } as import('./index.js').CharacterVoiceReferenceInfo;
-
     const first = addProductionAudioBindings(adapter, { prompt: '镜头中人物对白' }, [firstVoice]);
     expect(first.prompt).toContain('【输入音频说明】（本段传入1段角色音色参考）：');
     expect(first.prompt).toContain('角色「林澈」使用音频1的音色。');
-
     const replaced = addProductionAudioBindings(adapter, first, [secondVoice]);
     expect(replaced.prompt).not.toContain('林澈');
     expect(replaced.prompt).toContain('角色「江晚」使用音频1的音色。');
-
     expect(addProductionAudioBindings(adapter, replaced, []).prompt).toBe('镜头中人物对白');
   });
-
   it('binds each voice declaration to its character image when final image references are known', () => {
     const adapter = descriptor({ prompt: { type: 'string', title: '提示词' } });
     const voice = {
@@ -237,14 +224,12 @@ describe('production audio binding prompts', () => {
       characterName: '林澈',
       versionId: 'voice-one',
     } as import('./index.js').CharacterVoiceReferenceInfo;
-
     const result = addProductionAudioBindings(
       adapter,
       { prompt: '两人对话' },
       [voice],
       [{ characterDocumentId: 'actor-one', imageReference: '图 2' }],
     );
-
     expect(result.prompt).toContain('图 2中的角色「林澈」仅使用音频1的音色。');
   });
 });

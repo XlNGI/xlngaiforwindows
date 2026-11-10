@@ -1,0 +1,1692 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-11-09T05:24:42.748Z",
+  "scope": "Whole-conversation quality, reliability and efficiency: implementation, automatic regression and isolated built-service validation.",
+  "status": {
+    "sourceImplemented": true,
+    "automaticGatesPassed": true,
+    "isolatedBuiltValidationPassed": true,
+    "realModelQualityAccepted": false,
+    "pairedLatencyTargetsAccepted": false,
+    "runningDesktopUpdated": false,
+    "installed": false,
+    "committed": false,
+    "providerCallsInThisImplementation": 0,
+    "userProjectWritesInThisImplementation": 0
+  },
+  "repository": {
+    "root": "E:/p22/xlngaiforwindowsP22",
+    "head": "5ced12067bddd1e7478c4c5d89a676bebdf90f88",
+    "attribution": "Merged working tree including pre-existing production changes; fingerprints are not an assertion that every changed byte originated in this task.",
+    "initialTrackedDiff": {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-conversation-implementation-20261109/baseline.patch",
+      "bytes": 70869,
+      "sha256": "7f2b3c7f0ed754482580e7f295ef0327562f7d1940c8fb3518cf84121363687d",
+      "modifiedAtUtc": "2026-11-09T04:08:23.196Z"
+    },
+    "preExistingModifiedPaths": [
+      "apps/worker/src/agent-context-manager.test.ts",
+      "apps/worker/src/agent-draft-submission-service.ts",
+      "apps/worker/src/agent-pipeline-remediation.test.ts",
+      "apps/worker/src/agent-provider-loop-service.test.ts",
+      "apps/worker/src/agent-provider-loop-service.ts",
+      "apps/worker/src/agent-task-review.ts",
+      "apps/worker/src/media-review-service.test.ts",
+      "apps/worker/src/production-skill-service.ts",
+      "apps/worker/src/production-skill-validation.test.ts",
+      "apps/worker/src/production-skill-validation.ts",
+      "apps/worker/src/scene-structure-submission-service.ts",
+      "apps/worker/src/shot-prompt-service.ts",
+      "docs/ONE-CLICK-PRODUCTION-IMPLEMENTATION.md",
+      "docs/PROJECT-LIBRARY-RETRIEVAL-IMPLEMENTATION-PLAN.md",
+      "packages/contracts/src/production-skills.test.ts",
+      "packages/contracts/src/production-skills.ts"
+    ],
+    "trackedDiffSha256": "7d88a41ea6109c61e7a6dde6169786d3c8804ded4b54e3da765396eaffacc8b0",
+    "changedFilesExcludingThisRecord": [
+      {
+        "path": "apps/desktop/src-tauri/src/lib.rs",
+        "bytes": 287814,
+        "sha256": "046f4fdf4834ff83d185e5811a63c1ed62410157001140ebbf0ca2fa655416f1",
+        "modifiedAtUtc": "2026-11-09T04:35:49.742Z"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/llm_stream.rs",
+        "bytes": 192524,
+        "sha256": "fdd0c9f6c093bf76fc993f1e84f0676a3ff4a7848e48d5bdf762881d8058b0fa",
+        "modifiedAtUtc": "2026-11-09T04:48:10.373Z"
+      },
+      {
+        "path": "apps/desktop/src/AgentDeliveryFeedback.tsx",
+        "bytes": 3439,
+        "sha256": "719c3e90a4000e2b49a86fc838154abecd65a8e6a4c5eec6c8ef42dc178dd4fe",
+        "modifiedAtUtc": "2026-11-09T05:09:56.802Z"
+      },
+      {
+        "path": "apps/desktop/src/App.tsx",
+        "bytes": 249137,
+        "sha256": "8a31ebdf6847f06dc561c95adc07fb87aaf7ea0271ee5fa58ee3161ff2fe95c1",
+        "modifiedAtUtc": "2026-11-09T05:10:59.239Z"
+      },
+      {
+        "path": "apps/desktop/src/ChatPanel.progress.test.tsx",
+        "bytes": 11212,
+        "sha256": "f00cd9be7f00e87503192294c59f82ba3c81edf76e5da780512f4b08697420ab",
+        "modifiedAtUtc": "2026-11-09T05:10:59.269Z"
+      },
+      {
+        "path": "apps/desktop/src/ChatPanel.tsx",
+        "bytes": 99121,
+        "sha256": "723f0d480c877f520c28cafafbe9eac7411beb5353bcd2b1977212af0b34bb09",
+        "modifiedAtUtc": "2026-11-09T05:09:56.938Z"
+      },
+      {
+        "path": "apps/desktop/src/ProductionPanel.scene-bindings.test.tsx",
+        "bytes": 45879,
+        "sha256": "2a377d966bbf1e2cc05fc5185612a60ff0161d70dc19b480d5e4103ecc99bcbb",
+        "modifiedAtUtc": "2026-11-09T05:16:28.741Z"
+      },
+      {
+        "path": "apps/worker/scripts/validate-conversation-quality.mjs",
+        "bytes": 15586,
+        "sha256": "69acf29a770e40ed3331a80f2c43b4443738ea9e0b9926550da5a8d9f7a17a81",
+        "modifiedAtUtc": "2026-11-09T05:10:59.304Z"
+      },
+      {
+        "path": "apps/worker/src/agent-business-execution.ts",
+        "bytes": 9860,
+        "sha256": "2e778a4e4d663f49db82cef07716c0eb02577ddaedaf1c73a62f9bd175f5c45e",
+        "modifiedAtUtc": "2026-11-09T04:52:16.611Z"
+      },
+      {
+        "path": "apps/worker/src/agent-context-budget.test.ts",
+        "bytes": 74015,
+        "sha256": "b82ab34f06cf76025628abe959c52e709d69022c2f07f3fffa3337626bb59c9c",
+        "modifiedAtUtc": "2026-11-09T04:52:16.742Z"
+      },
+      {
+        "path": "apps/worker/src/agent-context-budget.ts",
+        "bytes": 47277,
+        "sha256": "c5588cc3d30763dd0bfcc4b085ed5c348b9ee870c3dbe40b44d2534f46d080e1",
+        "modifiedAtUtc": "2026-11-09T04:52:16.839Z"
+      },
+      {
+        "path": "apps/worker/src/agent-context-manager.test.ts",
+        "bytes": 58318,
+        "sha256": "3583fd6ad9ac6c29c36d26694bf96ede151b7dceb5f24dad8bd1f35a1d24e607",
+        "modifiedAtUtc": "2026-11-09T04:52:16.920Z"
+      },
+      {
+        "path": "apps/worker/src/agent-context-manager.ts",
+        "bytes": 56864,
+        "sha256": "08f4ff0a080f0319bbc1f8d792b5c93bfbfce872254e13134eb7e9f614610a70",
+        "modifiedAtUtc": "2026-11-09T04:52:17.006Z"
+      },
+      {
+        "path": "apps/worker/src/agent-delivery-capabilities.ts",
+        "bytes": 1721,
+        "sha256": "8651ccd7723d62d4449d18b0cbeef5b594b418b9727e2c2e5517c1e16f9d00ed",
+        "modifiedAtUtc": "2026-11-09T04:52:18.681Z"
+      },
+      {
+        "path": "apps/worker/src/agent-delivery-feedback.ts",
+        "bytes": 3713,
+        "sha256": "f8ca4e954632744363fd57c8b7cef38dd144168f2ce28a547a1eb42b656fbc8c",
+        "modifiedAtUtc": "2026-11-09T05:19:37.104Z"
+      },
+      {
+        "path": "apps/worker/src/agent-draft-submission-service.ts",
+        "bytes": 20182,
+        "sha256": "62d24d07a541b8537a5aeb1d866e3bee1437e98a27e8bb006bb2ee33892e8099",
+        "modifiedAtUtc": "2026-11-09T04:52:17.028Z"
+      },
+      {
+        "path": "apps/worker/src/agent-pipeline-remediation.test.ts",
+        "bytes": 184531,
+        "sha256": "bdf8150d9b9ed61e822dae040ac814e498604c5b7fa026f3a5a5afe8a752b890",
+        "modifiedAtUtc": "2026-11-09T04:57:56.349Z"
+      },
+      {
+        "path": "apps/worker/src/agent-prepared-arguments.test.ts",
+        "bytes": 7404,
+        "sha256": "1fdf992faad9b5f6819155a8ed172dfd83bf7048f0566a52c257c754389cc47c",
+        "modifiedAtUtc": "2026-11-09T04:52:17.280Z"
+      },
+      {
+        "path": "apps/worker/src/agent-prepared-arguments.ts",
+        "bytes": 5318,
+        "sha256": "cc5b28707b9cfd02606c3267b09b20d8e68ebb9e1d2876e3551fc6877af5c744",
+        "modifiedAtUtc": "2026-11-09T04:52:17.290Z"
+      },
+      {
+        "path": "apps/worker/src/agent-provider-loop-service.test.ts",
+        "bytes": 333520,
+        "sha256": "c633acc486b5c8b821dd5d46952f918cd32be8a1d14a66b6985b08f2ee9bee6a",
+        "modifiedAtUtc": "2026-11-09T04:57:56.130Z"
+      },
+      {
+        "path": "apps/worker/src/agent-provider-loop-service.ts",
+        "bytes": 247759,
+        "sha256": "2a4956d1825a8e014907ea0804e4cb1df39916dc7fe76636ff71148f336b6605",
+        "modifiedAtUtc": "2026-11-08T17:23:01.584Z"
+      },
+      {
+        "path": "apps/worker/src/agent-saved-production-receipts.ts",
+        "bytes": 4094,
+        "sha256": "63c8994b153e190227d8e4ae7b0813e3ede5020e8a3b951887345081ae093541",
+        "modifiedAtUtc": "2026-11-09T04:14:19.790Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-artifacts.ts",
+        "bytes": 6392,
+        "sha256": "6bb11da68314852d95a3aab97553843ccac970669d13e4ba8ba115f689fd1937",
+        "modifiedAtUtc": "2026-11-09T04:33:12.223Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-checkpoint-schema.ts",
+        "bytes": 6865,
+        "sha256": "c667555c91e14597f798a08be1fcca29fed7c118a0082bb20df080e72ce319f5",
+        "modifiedAtUtc": "2026-11-09T04:52:17.851Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-checkpoints.ts",
+        "bytes": 18971,
+        "sha256": "b5a4075382c2bba6b718b62a94c4cb1678ad5185cc44dc1fe69541411c8f9e88",
+        "modifiedAtUtc": "2026-11-09T04:22:03.140Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-criteria.ts",
+        "bytes": 12007,
+        "sha256": "7e6e5d23db79a5ce0dc70b9c56c886652903c5df847959ba586601e053aa7e58",
+        "modifiedAtUtc": "2026-11-09T04:52:17.895Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-deliverables.test.ts",
+        "bytes": 54935,
+        "sha256": "cb2316fd83323a28fd5cd9abf7ed73934f654d55bfc4b7087c3466b73e52304f",
+        "modifiedAtUtc": "2026-11-09T04:52:17.954Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-deliverables.ts",
+        "bytes": 54176,
+        "sha256": "25d4365ad61f2876c236400b600e3ae1943f7f7fa191bc7b5bba2b49d7577f82",
+        "modifiedAtUtc": "2026-11-09T04:52:17.999Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-review.ts",
+        "bytes": 29174,
+        "sha256": "56485ee086cdd7de9c2f9053947544312e00b32a83d7a792c360a98032a33734",
+        "modifiedAtUtc": "2026-11-09T04:52:18.024Z"
+      },
+      {
+        "path": "apps/worker/src/agent-tool-definitions.ts",
+        "bytes": 93828,
+        "sha256": "3199f7f747cd150467a1f1a083e827322cd06c7dc9b7cdd83e3bf75f46c30572",
+        "modifiedAtUtc": "2026-11-09T04:52:18.065Z"
+      },
+      {
+        "path": "apps/worker/src/document-workflow-service.ts",
+        "bytes": 123185,
+        "sha256": "2821e1f2499d5fa5f328cff7b06b54e87c39f1eda51fdc1af18b533ecf9f7814",
+        "modifiedAtUtc": "2026-11-09T05:08:36.443Z"
+      },
+      {
+        "path": "apps/worker/src/generation-service.test.ts",
+        "bytes": 63998,
+        "sha256": "cdb64826237d8d09d59fc42b724a783d4bb1f53ccb50434c9192970b2279e62d",
+        "modifiedAtUtc": "2026-11-09T04:52:18.212Z"
+      },
+      {
+        "path": "apps/worker/src/library-search-service.ts",
+        "bytes": 22619,
+        "sha256": "620f1bf458465d3532f87893b236cc3bdaaddfb7860cc773192102ae253eda36",
+        "modifiedAtUtc": "2026-11-09T04:15:12.189Z"
+      },
+      {
+        "path": "apps/worker/src/media-review-service.test.ts",
+        "bytes": 20705,
+        "sha256": "840d923a10a85114d6ceb11eb61380313ad51c980c277ea133159ee4f2667f82",
+        "modifiedAtUtc": "2026-11-08T17:35:45.975Z"
+      },
+      {
+        "path": "apps/worker/src/native-provider-bridge.test.ts",
+        "bytes": 41893,
+        "sha256": "8335fa2c38140d48cd27093e9188de96e6a52708f2a3c134f6b186c23c844898",
+        "modifiedAtUtc": "2026-11-09T04:52:18.307Z"
+      },
+      {
+        "path": "apps/worker/src/native-provider-bridge.ts",
+        "bytes": 45295,
+        "sha256": "15d8c6a40a9e8a25125cf6b4f5279d55ca5ef8b78b3019ccb980a58e31666f6b",
+        "modifiedAtUtc": "2026-11-09T04:52:18.346Z"
+      },
+      {
+        "path": "apps/worker/src/production-authoring-guidance.ts",
+        "bytes": 6312,
+        "sha256": "fe4d944eedca0ec0dce46c080a07743edd8f4c41a24add1d40543c50b07999e8",
+        "modifiedAtUtc": "2026-11-09T04:38:55.162Z"
+      },
+      {
+        "path": "apps/worker/src/production-skill-service.ts",
+        "bytes": 615,
+        "sha256": "bbf3a49562495a8ff80307dfca81b360598d00d3cb3c5d88d85a14f1ead53ea3",
+        "modifiedAtUtc": "2026-11-09T04:35:49.737Z"
+      },
+      {
+        "path": "apps/worker/src/production-skill-validation.test.ts",
+        "bytes": 73609,
+        "sha256": "47658aac74581d2c4b5c789eea1b3eecc730b4283b3735862052cbf695818ca8",
+        "modifiedAtUtc": "2026-11-09T05:04:16.251Z"
+      },
+      {
+        "path": "apps/worker/src/production-skill-validation.ts",
+        "bytes": 36029,
+        "sha256": "64899cb0587090b5922c9beace53db50b1216110adaa93e8661ffcad97515ab5",
+        "modifiedAtUtc": "2026-11-09T04:52:18.451Z"
+      },
+      {
+        "path": "apps/worker/src/provider-request-ledger.ts",
+        "bytes": 9340,
+        "sha256": "92e81148f76bb4058c90ebd75833bacc6d8568183188ca61abb3c37405d835ee",
+        "modifiedAtUtc": "2026-11-09T04:52:18.463Z"
+      },
+      {
+        "path": "apps/worker/src/scene-structure-submission-service.ts",
+        "bytes": 29786,
+        "sha256": "43bd96a1ea51d2f5e0bb208194bebe21a3cbf4c2f4d86594bbf44ef8a03957ab",
+        "modifiedAtUtc": "2026-11-08T17:23:01.565Z"
+      },
+      {
+        "path": "apps/worker/src/shot-prompt-service.ts",
+        "bytes": 8819,
+        "sha256": "046f8cccc1cf65a0d361b578b02c1e3fd9f4a2906336441fc5c8c5b7ce4f3e73",
+        "modifiedAtUtc": "2026-11-08T17:26:53.714Z"
+      },
+      {
+        "path": "apps/worker/src/test-fixtures/conversation-quality-20261109.json",
+        "bytes": 39028,
+        "sha256": "d2d4b489b79a8cb943307fcaab528bbae5c6de7fe7df52e860357ada29b65871",
+        "modifiedAtUtc": "2026-11-09T04:42:17.298Z"
+      },
+      {
+        "path": "docs/AGENT-CONVERSATION-QUALITY-AND-EFFICIENCY-PLAN.md",
+        "bytes": 37280,
+        "sha256": "c2e297ea658dc124f8d0e1207ac7f01324d693dcf5f9a746ef287bd7bcd74f82",
+        "modifiedAtUtc": "2026-11-09T05:23:33.543Z"
+      },
+      {
+        "path": "docs/ONE-CLICK-PRODUCTION-IMPLEMENTATION.md",
+        "bytes": 15366,
+        "sha256": "adc9ba25c595b537bef1ea30eb8c822359bb2032efc0815756a44c000a5bdc46",
+        "modifiedAtUtc": "2026-11-09T05:14:28.595Z"
+      },
+      {
+        "path": "docs/PROJECT-LIBRARY-RETRIEVAL-IMPLEMENTATION-PLAN.md",
+        "bytes": 83553,
+        "sha256": "bd3bf25a8bf84029c36f40e557814c42b0b9b51ff0002abbac5f38f2d20cb30d",
+        "modifiedAtUtc": "2026-11-09T05:01:00.958Z"
+      },
+      {
+        "path": "docs/code-traces/2026-11-09-agent-latency-reliability-audit.md",
+        "bytes": 30967,
+        "sha256": "09849d34e0556f8b3ebc24a2720b56061032e28bf5105a25f06136febdb44d1e",
+        "modifiedAtUtc": "2026-11-09T05:01:00.957Z"
+      },
+      {
+        "path": "docs/code-traces/2026-11-09-agent-latency-reliability-evidence.json",
+        "bytes": 237100,
+        "sha256": "7fe872863831e6ffaa0874cf4dcedb08030467cb9524c0f168e57f4696a66fc6",
+        "modifiedAtUtc": "2026-11-09T02:56:02.148Z"
+      },
+      {
+        "path": "docs/code-traces/2026-11-09-conversation-optimization-delivery.md",
+        "bytes": 14237,
+        "sha256": "e2c96970386ba3a4c0901ace901dd16b9c92296083953c7f64cc4eeb3799be79",
+        "modifiedAtUtc": "2026-11-09T05:24:41.305Z"
+      },
+      {
+        "path": "docs/code-traces/2026-11-09-conversation-prompt-quality-audit.md",
+        "bytes": 12314,
+        "sha256": "c22dfa6ed57326195d5e2e88249a9d52c58598a62a426307fabf8dc978e41675",
+        "modifiedAtUtc": "2026-11-09T05:01:00.957Z"
+      },
+      {
+        "path": "docs/code-traces/2026-11-09-conversation-prompt-quality-evidence.json",
+        "bytes": 36366,
+        "sha256": "b43d037cb6f58909f7965effd9fb515d85db63739e4915e784ddebd454830500",
+        "modifiedAtUtc": "2026-11-09T05:14:28.837Z"
+      },
+      {
+        "path": "packages/contracts/src/index.ts",
+        "bytes": 134310,
+        "sha256": "07417a9364877d165bef720538e131ca5ecbbff02ab7badc28b8ef385b1df6b8",
+        "modifiedAtUtc": "2026-11-09T05:08:36.434Z"
+      },
+      {
+        "path": "packages/contracts/src/production-skills.test.ts",
+        "bytes": 1766,
+        "sha256": "661704ce286ebf0b4189ebd218fb35a672ebfabcb53178eb5d6e73059d82a0e4",
+        "modifiedAtUtc": "2026-11-08T17:01:20.943Z"
+      },
+      {
+        "path": "packages/contracts/src/production-skills.ts",
+        "bytes": 13147,
+        "sha256": "16118208b9408c8cfcab131503b2e978f2efd4c7dda7ba3ee3f6e6afc2cfee59",
+        "modifiedAtUtc": "2026-11-09T04:20:00.164Z"
+      },
+      {
+        "path": "packages/persistence/src/agent-context-store.ts",
+        "bytes": 22979,
+        "sha256": "52783a906c4634400b08d770893f2189eb1d53e4c75a374e67431a9a03d8949c",
+        "modifiedAtUtc": "2026-11-09T04:52:18.675Z"
+      }
+    ],
+    "changedFilesManifestSha256": "ebe7e3e570f9ba66237b1032652b34d5b5c5639d51d23b1578cecb3487bf1f5f"
+  },
+  "testResults": {
+    "finalWorkspace": {
+      "passed": 2626,
+      "failed": 0,
+      "groups": [
+        {
+          "name": "context",
+          "passed": 8
+        },
+        {
+          "name": "contracts",
+          "passed": 48
+        },
+        {
+          "name": "llm",
+          "passed": 32
+        },
+        {
+          "name": "desktop",
+          "passed": 806
+        },
+        {
+          "name": "generation-adapters",
+          "passed": 80
+        },
+        {
+          "name": "persistence",
+          "passed": 101
+        },
+        {
+          "name": "worker",
+          "passed": 1551
+        }
+      ],
+      "domain": "No test files; not counted as passed tests."
+    },
+    "native": {
+      "passed": 205,
+      "failed": 0,
+      "ignored": 6
+    },
+    "countsOverlap": "Focused, built-service, sidecar and Native checks are reported separately and are not added to the workspace test total.",
+    "isolatedBuiltServices": {
+      "kind": "built-conversation-mechanism-check",
+      "providerCalls": 0,
+      "semanticQualityEvaluation": false,
+      "results": [
+        {
+          "protocol": "openai-responses",
+          "singleDraftAtomicSaveAndReplay": true,
+          "failedSaveRolledBack": true,
+          "frozenScenes": 4,
+          "frozenShots": 12,
+          "durationConflicts": 2,
+          "emptyApprovalRejected": true,
+          "timingOnlyProofRejected": true,
+          "readOnlyProjectionWrites": 0,
+          "qualityFeedbackTargetsAndRequirements": true,
+          "reopenedIssuePreservesIdentity": true,
+          "productionReadMatchesSavedPrompt": true,
+          "sqliteReopenPreservesUnverifiedState": true
+        },
+        {
+          "protocol": "openai-chat-completions",
+          "singleDraftAtomicSaveAndReplay": true,
+          "failedSaveRolledBack": true,
+          "frozenScenes": 4,
+          "frozenShots": 12,
+          "durationConflicts": 2,
+          "emptyApprovalRejected": true,
+          "timingOnlyProofRejected": true,
+          "readOnlyProjectionWrites": 0,
+          "qualityFeedbackTargetsAndRequirements": true,
+          "reopenedIssuePreservesIdentity": true,
+          "productionReadMatchesSavedPrompt": true,
+          "sqliteReopenPreservesUnverifiedState": true
+        }
+      ]
+    }
+  },
+  "commands": [
+    {
+      "command": "pnpm test",
+      "exitCode": 0,
+      "note": "Final complete workspace run: 2626 passed; no skipped tests in these seven suites.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-all-tests-acceptance.log",
+        "bytes": 161989,
+        "sha256": "f1c3e6eeb306f3835c88719e5c856a7d152c6f1538d885cbd187f0c207964288",
+        "modifiedAtUtc": "2026-11-09T05:24:07.698Z"
+      }
+    },
+    {
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-typecheck-acceptance.log",
+        "bytes": 812,
+        "sha256": "29d4c2d00fd537f36c8f4e6077a5dbfa1db2960425697b238a3be5318c5cf565",
+        "modifiedAtUtc": "2026-11-09T05:20:15.031Z"
+      }
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-lint-acceptance.log",
+        "bytes": 12,
+        "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc",
+        "modifiedAtUtc": "2026-11-09T05:20:00.796Z"
+      }
+    },
+    {
+      "command": "pnpm format:check",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-format-acceptance.log",
+        "bytes": 90,
+        "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15",
+        "modifiedAtUtc": "2026-11-09T05:24:20.770Z"
+      }
+    },
+    {
+      "command": "pnpm build",
+      "exitCode": 0,
+      "note": "Worker and frontend built; frontend large chunk warning retained.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-build-feedback.log",
+        "bytes": 1351,
+        "sha256": "fd68887d85ef2d1e826cdf23e84d7040368bec51291d3de70ac64a95880bbec6",
+        "modifiedAtUtc": "2026-11-09T05:12:04.055Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker build",
+      "exitCode": 0,
+      "note": "Final Worker build after metadata-only feedback projection optimization; no later frontend changes.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-worker-feedback-final-build.log",
+        "bytes": 24,
+        "sha256": "f876ec7553e281fa587d8701697920d525b114d9d39b68dbbc592bcfec6b09ce",
+        "modifiedAtUtc": "2026-11-09T05:20:00.814Z"
+      }
+    },
+    {
+      "command": "cargo fmt --check",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-cargo-format-final.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "modifiedAtUtc": "2026-11-09T05:15:34.997Z"
+      }
+    },
+    {
+      "command": "cargo check",
+      "exitCode": 0,
+      "note": "3 unused/dead-code warnings retained.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-cargo-check.log",
+        "bytes": 1267,
+        "sha256": "6f826048104c39f0576d0c783c0df3e3d2da42c5657c4be1f81fce43fd98fe30",
+        "modifiedAtUtc": "2026-11-09T04:48:14.480Z"
+      }
+    },
+    {
+      "command": "cargo test",
+      "exitCode": 0,
+      "note": "205 passed, 6 ignored; ignored tests excluded from pass count. Test executables built; no new desktop application binary installed.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-cargo-all.log",
+        "bytes": 23305,
+        "sha256": "7af2e3f631d3cb936dc6280c840649ed0b8180395894c17db806825e9e710145",
+        "modifiedAtUtc": "2026-11-09T04:49:01.006Z"
+      }
+    },
+    {
+      "command": "pnpm worker:sidecar",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-sidecar-metadata-final-build.log",
+        "bytes": 931,
+        "sha256": "e5a1cf9dafb583997078d3d98284fd9244393c68a1177f3c80eaac5f233a8fed",
+        "modifiedAtUtc": "2026-11-09T05:21:44.794Z"
+      }
+    },
+    {
+      "command": "node apps/worker/scripts/validate-worker-restart.mjs",
+      "exitCode": 0,
+      "note": "New sidecar; real temporary project and restart, no Provider.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-sidecar-metadata-final-check.log",
+        "bytes": 249,
+        "sha256": "f82f7c923c8729ff3e3e3cd710eb2796d685ecfd77b5a1b95e93d1d373e19fde",
+        "modifiedAtUtc": "2026-11-09T05:22:32.699Z"
+      }
+    },
+    {
+      "command": "node apps/worker/scripts/validate-conversation-quality.mjs",
+      "exitCode": 0,
+      "note": "Built dist, real migrated temporary projects, both protocol configurations, no Provider or semantic generation.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-built-metadata-final.log",
+        "bytes": 1222,
+        "sha256": "3b5819605a70e923519b20020d17e65f6a998e1e11049c0239c817c5f81db642",
+        "modifiedAtUtc": "2026-11-09T05:20:54.074Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/desktop exec vitest run src/ChatPanel.progress.test.tsx",
+      "exitCode": 0,
+      "note": "9 passed, included in final full run.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-feedback-ui.log",
+        "bytes": 491,
+        "sha256": "2b01f1e3cea903addc27afc74a7c5992836f70a2d61d6e6be928734fe692b216",
+        "modifiedAtUtc": "2026-11-09T05:11:16.279Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/desktop exec vitest run src/ProductionPanel.scene-bindings.test.tsx",
+      "exitCode": 0,
+      "note": "23 passed after waiting for actual form readiness; included in final full run.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-scene-bindings-final.log",
+        "bytes": 506,
+        "sha256": "9957e28188f4a494307e0d492a1a8b6478244a211cc8d57f1ab2db6476252040",
+        "modifiedAtUtc": "2026-11-09T05:16:33.167Z"
+      }
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-diff-acceptance.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "modifiedAtUtc": "2026-11-09T05:24:10.914Z"
+      }
+    },
+    {
+      "command": "pnpm exec prettier --check --ignore-path .gitignore <explicit changed documents and evidence>",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-docs-acceptance.log",
+        "bytes": 68,
+        "sha256": "f20510a9da4717c51c4cffee6d0dd88d6c9a723d0a83711d01216f5b48961283",
+        "modifiedAtUtc": "2026-11-09T05:24:12.164Z"
+      }
+    }
+  ],
+  "retainedFailureAndCorrectionHistory": [
+    {
+      "command": "Initial pnpm test",
+      "exitCode": 1,
+      "note": "Worker 1546 passed / 5 failed; other suites passed. Old provenance, review evidence and chapter slot assertions updated without loosening authorization.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-all-tests.log",
+        "bytes": 329323,
+        "sha256": "2cea95cb7c1cf05f60449bac18e4e081bce15cf019f579da7d74bce08af1c0e8",
+        "modifiedAtUtc": "2026-11-09T04:55:58.892Z"
+      }
+    },
+    {
+      "command": "Focused correction regression",
+      "exitCode": 0,
+      "note": "5 passed / 286 skipped by name filtering; skipped tests are not passed tests.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-final-fixes.log",
+        "bytes": 1065,
+        "sha256": "694045cf50cd989f9d3358c9aa492421c2237d0db38df72069ac4b88c4c36ef1",
+        "modifiedAtUtc": "2026-11-09T04:57:38.331Z"
+      }
+    },
+    {
+      "command": "Full run before final feedback UI",
+      "exitCode": 0,
+      "note": "2625 passed; superseded by final 2626-test run.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-all-tests-final.log",
+        "bytes": 162587,
+        "sha256": "f7fcc2d2ce7c74c98040f6f7462f93c8a93a297db00bb5841880f8d2952a3599",
+        "modifiedAtUtc": "2026-11-09T05:05:22.182Z"
+      }
+    },
+    {
+      "command": "Full run after feedback UI",
+      "exitCode": 1,
+      "note": "Desktop 805 passed / 1 failed; initial-form subscription race in existing scene-bindings test. Later packages not claimed executed.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-all-tests-delivery-final.log",
+        "bytes": 65079,
+        "sha256": "a17e79bd0b2872d3d32520f6c66e812e0e303daccaa74072fb50e11d647758b3",
+        "modifiedAtUtc": "2026-11-09T05:13:36.299Z"
+      }
+    },
+    {
+      "command": "Single scene-bindings reproduction",
+      "exitCode": 0,
+      "note": "1 passed / 22 skipped before synchronization correction.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-scene-bindings-retest.log",
+        "bytes": 531,
+        "sha256": "73e24df27f9e371dcf450f051308b1dfbb354802d00b6a67c34c599d299c50d9",
+        "modifiedAtUtc": "2026-11-09T05:14:30.456Z"
+      }
+    },
+    {
+      "command": "First synchronization correction",
+      "exitCode": 1,
+      "note": "21 passed / 2 failed: incorrect exact display-value query (Lexical editor and user seed override), plus transient voice restoration test failure. Corrected to wait for actual visible binding and refill readiness.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-scene-bindings-settled-final.log",
+        "bytes": 57945,
+        "sha256": "30efb9a8372774b4d443a7ca470e8d779239444a59bcba49f859c6885bb786a6",
+        "modifiedAtUtc": "2026-11-09T05:15:40.635Z"
+      }
+    },
+    {
+      "command": "Intermediate full run",
+      "exitCode": 1,
+      "note": "Desktop 805 passed / 1 failed on the superseded display-value assertion; not a successful final gate.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-all-tests-verified.log",
+        "bytes": 63585,
+        "sha256": "d456110f5be2b246e318885d5797034b928c5455bdeac969e909ac934514719a",
+        "modifiedAtUtc": "2026-11-09T05:16:09.416Z"
+      }
+    },
+    {
+      "command": "Initial final format check",
+      "exitCode": 1,
+      "note": "One modified test file required formatting; corrected.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-quality-format-final.log",
+        "bytes": 238,
+        "sha256": "0ef125fc78fffef2ad6d5ea636fef11a14adca14233f49848f7c7d29677f8836",
+        "modifiedAtUtc": "2026-11-09T05:01:35.647Z"
+      }
+    }
+  ],
+  "fingerprints": {
+    "workerRuntimeJs": {
+      "directory": "apps/worker/dist",
+      "fileCount": 114,
+      "manifestSha256": "e301e574706dc70e28d7f0f32ead3e5864ab2dbd5f2202836e2db18289f98f75",
+      "files": [
+        {
+          "path": "apps/worker/dist/adapter-service.js",
+          "bytes": 5116,
+          "sha256": "e78fbd0ded9d7c0b6b8cc68515cc3c3153ffd9aaaeed690518abe1e9852826b0",
+          "modifiedAtUtc": "2026-11-09T05:21:42.472Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-business-execution.js",
+          "bytes": 9506,
+          "sha256": "1ff6ae6bf3b4bea900e6f81131fa33dbc10b099f610bdb6d7f324fb37a8846cd",
+          "modifiedAtUtc": "2026-11-09T05:21:42.537Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-context-budget.js",
+          "bytes": 49141,
+          "sha256": "06b01d4b6b1bf58febf83e038590d4ac16d4faf32dae93a3651c846fefb28344",
+          "modifiedAtUtc": "2026-11-09T05:21:42.556Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-context-manager.js",
+          "bytes": 58193,
+          "sha256": "cabd5b03c012907abc3f0871c29bfd03e0279fe44c07bd4240b4959fef747fb8",
+          "modifiedAtUtc": "2026-11-09T05:21:42.706Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-context-results.js",
+          "bytes": 9159,
+          "sha256": "7f7d40a3e7de78366a7816d78b665cbb43526935d537e03305520726ea9ee010",
+          "modifiedAtUtc": "2026-11-09T05:21:42.670Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-context-working-set.js",
+          "bytes": 931,
+          "sha256": "9e54bb9b40ecbb5587177eff361f1f343bf815783e10b61534e2132718cc0670",
+          "modifiedAtUtc": "2026-11-09T05:21:42.678Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-delivery-capabilities.js",
+          "bytes": 1683,
+          "sha256": "91fa6ba4f7e8a5ba130f5462f72729bb0687fafec999ccef7e904c8f5f590ea8",
+          "modifiedAtUtc": "2026-11-09T05:21:42.476Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-delivery-feedback.js",
+          "bytes": 3273,
+          "sha256": "6fb108a4358a4e1f103a6ca4d66058af2fe840f77c443f1da97a894ba39413ef",
+          "modifiedAtUtc": "2026-11-09T05:21:42.625Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-draft-submission-service.js",
+          "bytes": 19451,
+          "sha256": "ee0e5d6b7fa6a4a8da2b371832f65aba67388f9fba379f4ddaf8cfa15d047f00",
+          "modifiedAtUtc": "2026-11-09T05:21:42.741Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-generation-preparation.js",
+          "bytes": 1286,
+          "sha256": "549d2030f45558abbd90db1642ebff2ead216d7db7b3dc724b10e6efd90a9e11",
+          "modifiedAtUtc": "2026-11-09T05:21:43.046Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-input-service.js",
+          "bytes": 9766,
+          "sha256": "ba9211e5f47c66938c76bbd3068ddfcf3826a1c180ee8e5fd27ff2e01dcfb302",
+          "modifiedAtUtc": "2026-11-09T05:21:42.622Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-orchestration-service.js",
+          "bytes": 23000,
+          "sha256": "39c4f217e6271da5eb607b0d30a683ad3c64a662d21600fac3f4638668bdc235",
+          "modifiedAtUtc": "2026-11-09T05:21:42.733Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-pending-writes.js",
+          "bytes": 4921,
+          "sha256": "b6e4a385a23b242781c654a66256d7d501fdc0613e2aa7257fb9f02a2a32e0f8",
+          "modifiedAtUtc": "2026-11-05T13:07:30.130Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-policy-instructions.js",
+          "bytes": 18791,
+          "sha256": "19cea47ea723b5f0d84b1096d6713cc45dfc82de734ee5ecfeb67c6f7cfb0843",
+          "modifiedAtUtc": "2026-11-09T05:21:42.598Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-preparation-evidence.js",
+          "bytes": 1822,
+          "sha256": "5838ce91b7be3743be7ac7d8f99d87b18bebb32b6e1f55500f7222f03128d33d",
+          "modifiedAtUtc": "2026-11-09T05:21:42.540Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-prepared-arguments.js",
+          "bytes": 5009,
+          "sha256": "f3f4ba09dd67fa21853c4bb6f3a8e75674ab843fa22cc5aff2979387f349f8ef",
+          "modifiedAtUtc": "2026-11-09T05:21:42.531Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-production-query-service.js",
+          "bytes": 10932,
+          "sha256": "df4d4b232b80d9cf8c771c26f8611e9dbd2e0cc53b46f2110c706df415436518",
+          "modifiedAtUtc": "2026-11-09T05:21:42.914Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-provider-loop-service.js",
+          "bytes": 222447,
+          "sha256": "b2887dfd1f020fb307580662e2b490df3590c4acf1d30c1dd20c81e6980316d4",
+          "modifiedAtUtc": "2026-11-09T05:21:43.046Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-provider-tool-gateway.js",
+          "bytes": 27540,
+          "sha256": "87c6c6a1e386cf491e9ceb5ff720e2e7243907696a74d01fb8e377a98a8bdb2b",
+          "modifiedAtUtc": "2026-11-09T05:21:42.677Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-research-citations.js",
+          "bytes": 2600,
+          "sha256": "c628ecbc3f9d1d9d31747d211c5980bed82a1214c20af58769d0e4f137487098",
+          "modifiedAtUtc": "2026-11-09T05:21:42.734Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-saved-production-receipts.js",
+          "bytes": 3800,
+          "sha256": "de6a083877d708c95f7f0ad294b8e37d48742e810cc56587076615af9d18226b",
+          "modifiedAtUtc": "2026-11-09T05:21:42.481Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-system-tool-service.js",
+          "bytes": 65585,
+          "sha256": "6832711ce0f3b4eccc8243f679ee954e03d16452e729e32c0f98b767dcab715e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.909Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-artifacts.js",
+          "bytes": 5558,
+          "sha256": "ff7d46a785fc40567d6417c0bb4feb8b5aee91d5f8a06f9e1a8a4b8b03e88a32",
+          "modifiedAtUtc": "2026-11-09T05:21:42.480Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-checkpoint-schema.js",
+          "bytes": 7162,
+          "sha256": "ad80e15bb113f062da3e6cb82fa1562036f2e64ee6b97aaaa0886e1fad1f4e6c",
+          "modifiedAtUtc": "2026-11-09T05:21:42.475Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-checkpoints.js",
+          "bytes": 18851,
+          "sha256": "4021e845f7c71a2f69ecc274dced60bf362ab608a8fb66c3e02bb809ce9a9bb5",
+          "modifiedAtUtc": "2026-11-09T05:21:42.728Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-context.js",
+          "bytes": 19813,
+          "sha256": "f4b2fe7ca9bfc6264d0602e7ab39fef9fd590a1102d26f785a99ae67d2a25c47",
+          "modifiedAtUtc": "2026-11-05T13:07:30.135Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-criteria.js",
+          "bytes": 12416,
+          "sha256": "8dfd72794c62fc3371cb9a98e45d1009c0125d32706082ed5296c9b2fdef2913",
+          "modifiedAtUtc": "2026-11-09T05:21:42.504Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-deliverables.js",
+          "bytes": 54180,
+          "sha256": "9c9b100521f823fe990e0bd9b8eecd0abe770a24f050ef2d4bacfdff773795e5",
+          "modifiedAtUtc": "2026-11-09T05:21:42.516Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-task-review.js",
+          "bytes": 26746,
+          "sha256": "6c3a5d7833814ae8e512f50bedf030b78b8620b5bb38a7b64573405a87b2411e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.490Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-tool-definitions.js",
+          "bytes": 101951,
+          "sha256": "a8ba74dd593ca3d0f81d0db5e4d8a6d9c61c2f1d5d433b4b816094c14684bb2e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.529Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-tool-registry.js",
+          "bytes": 11751,
+          "sha256": "a7d064ad4af5c3b2666af19e86f3dd842414a488d34826ab8e66d03266282d8d",
+          "modifiedAtUtc": "2026-11-09T05:21:42.534Z"
+        },
+        {
+          "path": "apps/worker/dist/agent-workflow-guidance.js",
+          "bytes": 5233,
+          "sha256": "22f349036f13047eeb48cbd1acbc11450225657ca52411523712c6144be32d19",
+          "modifiedAtUtc": "2026-11-09T05:21:42.670Z"
+        },
+        {
+          "path": "apps/worker/dist/app-settings-service.js",
+          "bytes": 58571,
+          "sha256": "5a102b0e8d8254daaaf9a59b2182ca83a18d78fec26d150611b423f2ff3a3eb4",
+          "modifiedAtUtc": "2026-11-09T05:21:42.619Z"
+        },
+        {
+          "path": "apps/worker/dist/change-set-service.js",
+          "bytes": 35769,
+          "sha256": "c1b620f3cb08888301f0c5e8bda099b82186adcd0c5380af89a8c1467edf2190",
+          "modifiedAtUtc": "2026-11-09T05:21:42.748Z"
+        },
+        {
+          "path": "apps/worker/dist/content-service.js",
+          "bytes": 57554,
+          "sha256": "212279dead134b692a560b2aaacd494f479bda85b9a0521842c4cb2b3729fb04",
+          "modifiedAtUtc": "2026-11-09T05:21:42.659Z"
+        },
+        {
+          "path": "apps/worker/dist/context-service.js",
+          "bytes": 10551,
+          "sha256": "e127f95686b753c212a410561234b2bf469512333027a83e4fdcff189b84fd14",
+          "modifiedAtUtc": "2026-11-09T05:21:42.596Z"
+        },
+        {
+          "path": "apps/worker/dist/conversation-request.js",
+          "bytes": 684,
+          "sha256": "030bed3fecb3f050a547c6a78f8b694431c2a85c08701fdecd5d15077b6e9bc4",
+          "modifiedAtUtc": "2026-11-09T05:21:42.593Z"
+        },
+        {
+          "path": "apps/worker/dist/conversation-runtime.js",
+          "bytes": 59,
+          "sha256": "872bae6aaad9d85bef40569e83beb470fb0d3d6474a7e69c24bcae5ca075b2d0",
+          "modifiedAtUtc": "2026-11-09T05:21:42.933Z"
+        },
+        {
+          "path": "apps/worker/dist/dev-http-security.js",
+          "bytes": 2723,
+          "sha256": "cf72dadfddfbfd54a38dd21201463a42d4e54d9e7922147780d8345afb406c3b",
+          "modifiedAtUtc": "2026-11-09T05:21:43.234Z"
+        },
+        {
+          "path": "apps/worker/dist/document-kind.js",
+          "bytes": 2216,
+          "sha256": "c7d57c38b5d2ed94050fce106d9fa59a87d30b1ef23a3a8b656f9671e8892bfc",
+          "modifiedAtUtc": "2026-11-09T05:21:42.964Z"
+        },
+        {
+          "path": "apps/worker/dist/document-workflow-service.js",
+          "bytes": 109505,
+          "sha256": "d18f5e82e54127534775e4b6550c0a51034ae5a6c1fcf41e868da51b6fe5d8c6",
+          "modifiedAtUtc": "2026-11-09T05:21:42.646Z"
+        },
+        {
+          "path": "apps/worker/dist/domain-tool-gateway.js",
+          "bytes": 17750,
+          "sha256": "9c942378141e51de8a10360eb4edbc16e60adc5af9f90baf02037891f256bdd8",
+          "modifiedAtUtc": "2026-11-09T05:21:42.968Z"
+        },
+        {
+          "path": "apps/worker/dist/dubbing-service.js",
+          "bytes": 104640,
+          "sha256": "2f6ffc780fc5d93b36d57ddfb3803157fa01493910e885e6c6ad18c7e02cc152",
+          "modifiedAtUtc": "2026-11-09T05:21:42.879Z"
+        },
+        {
+          "path": "apps/worker/dist/episode-structure.js",
+          "bytes": 7372,
+          "sha256": "e456d30d2f7e0c3f39113832c72fcd82c11dc300c4097a6261bf1c4f4c852ae1",
+          "modifiedAtUtc": "2026-11-09T05:21:42.750Z"
+        },
+        {
+          "path": "apps/worker/dist/execution-pool.js",
+          "bytes": 3765,
+          "sha256": "d3364386b7db4e07ad0d90c9ca68fd2d89a3edde1d822c7c25c6709ea2434d66",
+          "modifiedAtUtc": "2026-11-09T05:21:42.769Z"
+        },
+        {
+          "path": "apps/worker/dist/experiments/pi-runtime-spike-entry.js",
+          "bytes": 428,
+          "sha256": "d0fe3d91c13952182ae79ead62f139a9320c3e22346846eca90b82eab1b13394",
+          "modifiedAtUtc": "2026-11-09T05:21:43.599Z"
+        },
+        {
+          "path": "apps/worker/dist/experiments/pi-runtime-spike.js",
+          "bytes": 16279,
+          "sha256": "60862a901e774f60756b7a04775ad8d42b48572beb4cbda86cc25110c51aaa6f",
+          "modifiedAtUtc": "2026-11-09T05:21:43.599Z"
+        },
+        {
+          "path": "apps/worker/dist/ffmpeg-runtime.js",
+          "bytes": 35781,
+          "sha256": "a5d2036ed9978a57dbb7b627e46191b588b9316b779ad325c240b8b6818d93b3",
+          "modifiedAtUtc": "2026-11-09T05:21:42.854Z"
+        },
+        {
+          "path": "apps/worker/dist/file-task-service.js",
+          "bytes": 7203,
+          "sha256": "2263ce5aa877722ab99ee5f215d2eab49ac13f12d0775a26cb45d014ebdc1983",
+          "modifiedAtUtc": "2026-11-09T05:21:43.272Z"
+        },
+        {
+          "path": "apps/worker/dist/fixtures/project-open-contender.js",
+          "bytes": 1246,
+          "sha256": "4205aac219aaabb4992504458c28f42e89a313a566ecc52075f37e7487421062",
+          "modifiedAtUtc": "2026-11-09T05:21:43.601Z"
+        },
+        {
+          "path": "apps/worker/dist/generation-service.js",
+          "bytes": 77532,
+          "sha256": "09a4e51bfa8d1990cbc7eb41f9911afc80389ad99c7303c1292ccde0a6ede93c",
+          "modifiedAtUtc": "2026-11-09T05:21:42.723Z"
+        },
+        {
+          "path": "apps/worker/dist/handler.js",
+          "bytes": 129635,
+          "sha256": "1ebc3c3adc3c329363d03b873a8ee983c01d500e1113ae8fcf57de3fb626ecd8",
+          "modifiedAtUtc": "2026-11-09T05:21:43.345Z"
+        },
+        {
+          "path": "apps/worker/dist/image-generation-service.js",
+          "bytes": 71879,
+          "sha256": "d59c0ea74c0f7c3dbac1008ef563d10ab5943ce998b3439c99443cd8feafb60a",
+          "modifiedAtUtc": "2026-11-09T05:21:42.788Z"
+        },
+        {
+          "path": "apps/worker/dist/image-thumbnail-service.js",
+          "bytes": 3675,
+          "sha256": "e1c9a42fc25009764b911ff6b994eb10be368652849b82d93aaf07c5fee19d99",
+          "modifiedAtUtc": "2026-11-09T05:21:43.297Z"
+        },
+        {
+          "path": "apps/worker/dist/index.js",
+          "bytes": 13008,
+          "sha256": "efa916cae96cbebc96b1ca99263a7249ef95a15ef70adbd035d535554567a46d",
+          "modifiedAtUtc": "2026-11-09T05:21:43.373Z"
+        },
+        {
+          "path": "apps/worker/dist/library-search-service.js",
+          "bytes": 21509,
+          "sha256": "2bd01db12155427b16798ae71ff17bb10d55bb51d55cbe63f5f7d4129b735547",
+          "modifiedAtUtc": "2026-11-09T05:21:43.000Z"
+        },
+        {
+          "path": "apps/worker/dist/maintenance-service.js",
+          "bytes": 19621,
+          "sha256": "433c02868f9ceb691d8c666c7ce4c96370ec6df65151034d8ff4069f0a514160",
+          "modifiedAtUtc": "2026-11-09T05:21:43.310Z"
+        },
+        {
+          "path": "apps/worker/dist/markdown-export-service.js",
+          "bytes": 31285,
+          "sha256": "2edd20a5e292071edeb1a5c92570e2e68751923f6aa9ca3654ee741ce27d1921",
+          "modifiedAtUtc": "2026-11-09T05:21:43.278Z"
+        },
+        {
+          "path": "apps/worker/dist/media-orchestration-service.js",
+          "bytes": 33756,
+          "sha256": "ea159504a63db0649c133b2f5ba153f37b5f5a7b0029dd3e62303c9c7c738eb1",
+          "modifiedAtUtc": "2026-11-09T05:21:42.846Z"
+        },
+        {
+          "path": "apps/worker/dist/media-preparation-service.js",
+          "bytes": 48024,
+          "sha256": "a2501e3ec71777cc0e3c34f744ce022e14c83ff1aec5c9d3e68160b18ae5911a",
+          "modifiedAtUtc": "2026-11-09T05:21:42.822Z"
+        },
+        {
+          "path": "apps/worker/dist/media-review-service.js",
+          "bytes": 25963,
+          "sha256": "7eafd7606a35251e3e92e04ddd1a05d0f50621cc71e52f99db1af3d33c9e5b6c",
+          "modifiedAtUtc": "2026-11-09T05:21:42.886Z"
+        },
+        {
+          "path": "apps/worker/dist/model-context-policy.js",
+          "bytes": 2178,
+          "sha256": "b3172bc4c77051912eacffd5ec748414c050f9fa3b114da30ea40d55ba4a0f52",
+          "modifiedAtUtc": "2026-11-09T05:21:42.541Z"
+        },
+        {
+          "path": "apps/worker/dist/model-contract-registry.js",
+          "bytes": 22400,
+          "sha256": "f58e145d37da5d15840d052b8a8cf9fa32229b20a44d00db2e541a4ac4716814",
+          "modifiedAtUtc": "2026-11-09T05:21:42.602Z"
+        },
+        {
+          "path": "apps/worker/dist/native-provider-bridge.js",
+          "bytes": 46225,
+          "sha256": "14ca7c263341d4fb9cba305d68d5d95fd561bbdce6355ea2b78625259681ab46",
+          "modifiedAtUtc": "2026-11-09T05:21:42.832Z"
+        },
+        {
+          "path": "apps/worker/dist/network-transfer.js",
+          "bytes": 2989,
+          "sha256": "08f2895874281ecd355a8c80c6aa21a231973e8f67a64f20cc9e10fc733ef328",
+          "modifiedAtUtc": "2026-11-09T05:21:42.767Z"
+        },
+        {
+          "path": "apps/worker/dist/novel-batch-service.js",
+          "bytes": 19207,
+          "sha256": "18a3c9879c53234e8143c91c193bbd5750a18c004df16b4c0b040a540764d422",
+          "modifiedAtUtc": "2026-11-09T05:21:42.765Z"
+        },
+        {
+          "path": "apps/worker/dist/novel-context-service.js",
+          "bytes": 23289,
+          "sha256": "025d391e076be580b52ad7dc6ee7ddec2363f7927a0de074aa963c538599cc98",
+          "modifiedAtUtc": "2026-11-09T05:21:42.664Z"
+        },
+        {
+          "path": "apps/worker/dist/novel-service.js",
+          "bytes": 27302,
+          "sha256": "eb72f07941d2b22b40c18fc68f7349cb0bfe47789f617d1ace4b313de72f7c89",
+          "modifiedAtUtc": "2026-11-09T05:21:42.588Z"
+        },
+        {
+          "path": "apps/worker/dist/official-video-inputs.js",
+          "bytes": 15595,
+          "sha256": "bd07f627ec7cc8102622a45a3c76c2a1431aa26b8dd5629b396d9eb1659f2bde",
+          "modifiedAtUtc": "2026-11-09T05:21:42.808Z"
+        },
+        {
+          "path": "apps/worker/dist/open-export-directory.js",
+          "bytes": 906,
+          "sha256": "cc489a2c7a804f5522a87d0e37e93d90b18b7262b56c2ae10769949002b7a12c",
+          "modifiedAtUtc": "2026-11-09T05:21:43.299Z"
+        },
+        {
+          "path": "apps/worker/dist/partial-artifact-service.js",
+          "bytes": 14227,
+          "sha256": "ed211ca22c7ea0c8ab7477450b529bba1d0199e24a94c188d30c35b2f924654b",
+          "modifiedAtUtc": "2026-11-09T05:21:42.988Z"
+        },
+        {
+          "path": "apps/worker/dist/pi-conversation-runtime.js",
+          "bytes": 57462,
+          "sha256": "f1a22522249bdf8a435f51721c00cdec62e8f6f19e225c7f2118c97eb237fd5e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.981Z"
+        },
+        {
+          "path": "apps/worker/dist/production-authoring-guidance.js",
+          "bytes": 6369,
+          "sha256": "e04633a17f48821ab527a9d895a5cd239f28361b09510a5ca88ba61dfb2f527e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.472Z"
+        },
+        {
+          "path": "apps/worker/dist/production-ir-bindings.js",
+          "bytes": 6147,
+          "sha256": "fd0eeb31dba9fc2858d711932f6a6922d457c3c64b95442f58e2034470249374",
+          "modifiedAtUtc": "2026-11-09T05:21:42.458Z"
+        },
+        {
+          "path": "apps/worker/dist/production-media-view.js",
+          "bytes": 9973,
+          "sha256": "1fc6ef40f4f71d15a1ef840903d93101b274f19c976738969734049656ce0b06",
+          "modifiedAtUtc": "2026-11-09T05:21:42.682Z"
+        },
+        {
+          "path": "apps/worker/dist/production-service.js",
+          "bytes": 35569,
+          "sha256": "9411b627a7af6eaa65bc5f6163ccd2db3be87fcb935ee8a5471bb6f681256c91",
+          "modifiedAtUtc": "2026-11-09T05:21:42.691Z"
+        },
+        {
+          "path": "apps/worker/dist/production-skill-service.js",
+          "bytes": 618,
+          "sha256": "ed5a212bace97a80853bdab8b815b498cf25151c4d91637194ef1bda8ad35414",
+          "modifiedAtUtc": "2026-11-09T05:21:42.766Z"
+        },
+        {
+          "path": "apps/worker/dist/production-skill-validation.js",
+          "bytes": 35373,
+          "sha256": "77209b703ebe977accae524a20c8675874b35d0d69ddf9577eba9f1ea75c154c",
+          "modifiedAtUtc": "2026-11-09T05:21:42.499Z"
+        },
+        {
+          "path": "apps/worker/dist/project-export.js",
+          "bytes": 12027,
+          "sha256": "6ffdafc6558a774ba7d038c7be62c3327109e2816ee4c558dac3e049f3bc28e1",
+          "modifiedAtUtc": "2026-11-09T05:21:42.451Z"
+        },
+        {
+          "path": "apps/worker/dist/project-ir-validation.js",
+          "bytes": 1524,
+          "sha256": "9e622ee4df6fcff3f2b1d87d7a25c40931b30fdef7b4d799a62de55b94fb7305",
+          "modifiedAtUtc": "2026-11-09T05:21:42.455Z"
+        },
+        {
+          "path": "apps/worker/dist/project-resource-map.js",
+          "bytes": 16612,
+          "sha256": "af9030b584ec8b77dc53d37dc110d4868d89491b5356d783a17c0f1209ea1fc6",
+          "modifiedAtUtc": "2026-11-09T05:21:42.737Z"
+        },
+        {
+          "path": "apps/worker/dist/project-runtime-registry.js",
+          "bytes": 12655,
+          "sha256": "052f2f70fa8d2ae0078695d5c80239f44f7e9b088afdfb2f0da2e8550c773f6d",
+          "modifiedAtUtc": "2026-11-09T05:21:43.324Z"
+        },
+        {
+          "path": "apps/worker/dist/project-service.js",
+          "bytes": 17871,
+          "sha256": "f468fbb5eaa965f1d0489d51bece135ed83399fb8c8a0aaf1b9d2a4800864353",
+          "modifiedAtUtc": "2026-11-09T05:21:42.467Z"
+        },
+        {
+          "path": "apps/worker/dist/project-task-runtime.js",
+          "bytes": 17798,
+          "sha256": "231a723913e7d8326e1e7ba56534c27ffe9372fe528afa59e57027b7582383b5",
+          "modifiedAtUtc": "2026-11-09T05:21:43.318Z"
+        },
+        {
+          "path": "apps/worker/dist/provider-registry.js",
+          "bytes": 11454,
+          "sha256": "ca320190315a6c4b4eeecbdd7c363444ec706573340df9f7a3792bc9e936293e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.605Z"
+        },
+        {
+          "path": "apps/worker/dist/provider-request-ledger.js",
+          "bytes": 8608,
+          "sha256": "c57ff7f125183a8566865298a33dc67ea1265e4e0ae81fecadb4e8408a3579b5",
+          "modifiedAtUtc": "2026-11-09T05:21:42.667Z"
+        },
+        {
+          "path": "apps/worker/dist/repeated-read-results.js",
+          "bytes": 3980,
+          "sha256": "37aa998d64f262235168e5fd25b0f9b824cb7f39e9337fb66ff5467005bf3be3",
+          "modifiedAtUtc": "2026-11-09T05:21:42.539Z"
+        },
+        {
+          "path": "apps/worker/dist/request-scheduler.js",
+          "bytes": 5026,
+          "sha256": "b68e0a0495110fcef56ac49fd45226cb3675570e6db0e16b6f51b8b4c804f117",
+          "modifiedAtUtc": "2026-11-09T05:21:43.369Z"
+        },
+        {
+          "path": "apps/worker/dist/request-validation.js",
+          "bytes": 119831,
+          "sha256": "2503bd3fc3feece6bf3b51891539bd046b606aee2783df6da3c5c99b3136d8a9",
+          "modifiedAtUtc": "2026-11-09T05:21:42.952Z"
+        },
+        {
+          "path": "apps/worker/dist/research-cache.js",
+          "bytes": 6976,
+          "sha256": "ca5fae4a312f2fa5f2b07a6f774f6f190135e828bb651a64f2db47cf7a6bcc6e",
+          "modifiedAtUtc": "2026-11-09T05:21:43.003Z"
+        },
+        {
+          "path": "apps/worker/dist/research-service.js",
+          "bytes": 26788,
+          "sha256": "3f8a2c3324aec28750afdd088a7c598b40dd8147b5f4de3d3c84585728007aef",
+          "modifiedAtUtc": "2026-11-09T05:21:42.995Z"
+        },
+        {
+          "path": "apps/worker/dist/rough-cut-episodes.js",
+          "bytes": 1481,
+          "sha256": "c5c6b67320999bf9006289cd3a352451cce12a4280540f83e036f031cc7f7580",
+          "modifiedAtUtc": "2026-11-09T05:21:43.298Z"
+        },
+        {
+          "path": "apps/worker/dist/rough-cut-service.js",
+          "bytes": 28021,
+          "sha256": "60ed613c1a74da0eee7fbdc1ac190ad5c50cf69e84a67b79079fa0f3e520171a",
+          "modifiedAtUtc": "2026-11-09T05:21:43.306Z"
+        },
+        {
+          "path": "apps/worker/dist/sample-project-service.js",
+          "bytes": 4959,
+          "sha256": "e2cb7e4f129c71fab8160d596c416323fbbd914ff3e4b4e2b5670cea84160ee3",
+          "modifiedAtUtc": "2026-11-09T05:21:43.312Z"
+        },
+        {
+          "path": "apps/worker/dist/scene-cast-binding.js",
+          "bytes": 4207,
+          "sha256": "661b6f93ceeadd70054ee6b0beb641147e96c6963e308e104199dbb6f4b99de7",
+          "modifiedAtUtc": "2026-11-09T05:21:42.454Z"
+        },
+        {
+          "path": "apps/worker/dist/scene-document-binding.js",
+          "bytes": 689,
+          "sha256": "d76830373c3c36232aa328c2ac6ec251f25e301a22af7c84b4283cc3c80cc4c5",
+          "modifiedAtUtc": "2026-11-09T05:21:42.647Z"
+        },
+        {
+          "path": "apps/worker/dist/scene-media-service.js",
+          "bytes": 3895,
+          "sha256": "9e6d0fffd5ac13bc714c35e5c91fad04a3626ccb04b3181d8d59ed950b025aa4",
+          "modifiedAtUtc": "2026-11-09T05:21:42.679Z"
+        },
+        {
+          "path": "apps/worker/dist/scene-structure-submission-service.js",
+          "bytes": 30426,
+          "sha256": "f80ada908be0636f595a9ee1b95743fa4db308d18ee537031740ab66e095d7fc",
+          "modifiedAtUtc": "2026-11-09T05:21:42.756Z"
+        },
+        {
+          "path": "apps/worker/dist/shot-continuity-service.js",
+          "bytes": 44394,
+          "sha256": "4ef96de2cb76269cd672c156e9b4bf92944a70b6ceaac1c3323351d5b13aa5d1",
+          "modifiedAtUtc": "2026-11-09T05:21:42.896Z"
+        },
+        {
+          "path": "apps/worker/dist/shot-prompt-service.js",
+          "bytes": 9591,
+          "sha256": "908c6b930de6d81ad3c1abdef4c31e9f0e8e10bbde254fac0bd34758031c2632",
+          "modifiedAtUtc": "2026-11-09T05:21:42.761Z"
+        },
+        {
+          "path": "apps/worker/dist/shot-timing-service.js",
+          "bytes": 6215,
+          "sha256": "5263a869028d69fd68fb2c8553c4435ac683255434d75ffc571109dbc9d52d7e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.758Z"
+        },
+        {
+          "path": "apps/worker/dist/storage-capacity.js",
+          "bytes": 782,
+          "sha256": "7dea613a35bc4c8ed488f40ab6a30a59b8d5061d134babe3a3c03cd2c9bc1240",
+          "modifiedAtUtc": "2026-11-09T05:21:42.438Z"
+        },
+        {
+          "path": "apps/worker/dist/structure-compiler.js",
+          "bytes": 17575,
+          "sha256": "2602f870db910677743b8c216604a67950a99968987b935b86cf88e554952686",
+          "modifiedAtUtc": "2026-11-09T05:21:42.592Z"
+        },
+        {
+          "path": "apps/worker/dist/task-admission.js",
+          "bytes": 1170,
+          "sha256": "fb567f4a667ee97f896fcac6f0bc93c16051393624ff5563095bd455abf76dea",
+          "modifiedAtUtc": "2026-11-09T05:21:42.665Z"
+        },
+        {
+          "path": "apps/worker/dist/task-capacity.js",
+          "bytes": 1489,
+          "sha256": "63dc646c315bd0b90975b1c50a58bda4748cefd8be5b1e2fb42912583e524fbc",
+          "modifiedAtUtc": "2026-11-09T05:21:42.834Z"
+        },
+        {
+          "path": "apps/worker/dist/task-plan-service.js",
+          "bytes": 57015,
+          "sha256": "bf0a6f4208650f5827c319c802db1c1e8651121821d9750567458850f0a02c6e",
+          "modifiedAtUtc": "2026-11-09T05:21:42.963Z"
+        },
+        {
+          "path": "apps/worker/dist/task-schedule-service.js",
+          "bytes": 19118,
+          "sha256": "c53ebafcbc646d2b2e8021f0d51e47efb5bb725acd3560aa9b6ac9628502f92a",
+          "modifiedAtUtc": "2026-11-09T05:21:42.838Z"
+        },
+        {
+          "path": "apps/worker/dist/test-fixtures/native-request-text.js",
+          "bytes": 324,
+          "sha256": "0ea6560c748fee1563ff15b9cc3346a02b2aa776b9cc26d0f7c8d8c83b8994c1",
+          "modifiedAtUtc": "2026-11-09T05:21:43.057Z"
+        },
+        {
+          "path": "apps/worker/dist/test-fixtures/production-context.js",
+          "bytes": 4720,
+          "sha256": "23a03976cff4e2447dcf01923b0b32488c2fb8f6d578a65ce69c08efbba07151",
+          "modifiedAtUtc": "2026-11-09T05:21:42.559Z"
+        },
+        {
+          "path": "apps/worker/dist/usage-cost.js",
+          "bytes": 4178,
+          "sha256": "00d0d69cfa4ee25d1f4d82dac105020de2d3cdc924c3e89f748056d7e99393bd",
+          "modifiedAtUtc": "2026-11-09T05:21:42.606Z"
+        },
+        {
+          "path": "apps/worker/dist/usage-service.js",
+          "bytes": 5250,
+          "sha256": "4f74f1a40e0ed4bb2765848846af42147eec55dd98f0c70f257b49300d184ab5",
+          "modifiedAtUtc": "2026-11-09T05:21:43.313Z"
+        },
+        {
+          "path": "apps/worker/dist/video-generation-service.js",
+          "bytes": 59768,
+          "sha256": "17c553f59536ec3a118f4abf9adfecb04c74c7e2c836413bb05c3721e7842d38",
+          "modifiedAtUtc": "2026-11-09T05:21:42.801Z"
+        },
+        {
+          "path": "apps/worker/dist/worker-commands.js",
+          "bytes": 12229,
+          "sha256": "5c596c1f7472554f798d2ef0f062cea22e15a4e3919c1c675d30f5584a17b57d",
+          "modifiedAtUtc": "2026-11-09T05:21:43.321Z"
+        },
+        {
+          "path": "apps/worker/dist/worker-response-writer.js",
+          "bytes": 919,
+          "sha256": "62f038e268cad9ad5ec3c8d75195114400461d1fdf0bde7f519f58e9dba4194b",
+          "modifiedAtUtc": "2026-11-09T05:21:43.370Z"
+        }
+      ]
+    },
+    "changedWorkerRuntimeModules": [
+      {
+        "path": "apps/worker/dist/agent-business-execution.js",
+        "bytes": 9506,
+        "sha256": "1ff6ae6bf3b4bea900e6f81131fa33dbc10b099f610bdb6d7f324fb37a8846cd",
+        "modifiedAtUtc": "2026-11-09T05:21:42.537Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-context-budget.js",
+        "bytes": 49141,
+        "sha256": "06b01d4b6b1bf58febf83e038590d4ac16d4faf32dae93a3651c846fefb28344",
+        "modifiedAtUtc": "2026-11-09T05:21:42.556Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-context-manager.js",
+        "bytes": 58193,
+        "sha256": "cabd5b03c012907abc3f0871c29bfd03e0279fe44c07bd4240b4959fef747fb8",
+        "modifiedAtUtc": "2026-11-09T05:21:42.706Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-delivery-capabilities.js",
+        "bytes": 1683,
+        "sha256": "91fa6ba4f7e8a5ba130f5462f72729bb0687fafec999ccef7e904c8f5f590ea8",
+        "modifiedAtUtc": "2026-11-09T05:21:42.476Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-delivery-feedback.js",
+        "bytes": 3273,
+        "sha256": "6fb108a4358a4e1f103a6ca4d66058af2fe840f77c443f1da97a894ba39413ef",
+        "modifiedAtUtc": "2026-11-09T05:21:42.625Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-draft-submission-service.js",
+        "bytes": 19451,
+        "sha256": "ee0e5d6b7fa6a4a8da2b371832f65aba67388f9fba379f4ddaf8cfa15d047f00",
+        "modifiedAtUtc": "2026-11-09T05:21:42.741Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-prepared-arguments.js",
+        "bytes": 5009,
+        "sha256": "f3f4ba09dd67fa21853c4bb6f3a8e75674ab843fa22cc5aff2979387f349f8ef",
+        "modifiedAtUtc": "2026-11-09T05:21:42.531Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-provider-loop-service.js",
+        "bytes": 222447,
+        "sha256": "b2887dfd1f020fb307580662e2b490df3590c4acf1d30c1dd20c81e6980316d4",
+        "modifiedAtUtc": "2026-11-09T05:21:43.046Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-saved-production-receipts.js",
+        "bytes": 3800,
+        "sha256": "de6a083877d708c95f7f0ad294b8e37d48742e810cc56587076615af9d18226b",
+        "modifiedAtUtc": "2026-11-09T05:21:42.481Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-artifacts.js",
+        "bytes": 5558,
+        "sha256": "ff7d46a785fc40567d6417c0bb4feb8b5aee91d5f8a06f9e1a8a4b8b03e88a32",
+        "modifiedAtUtc": "2026-11-09T05:21:42.480Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-checkpoint-schema.js",
+        "bytes": 7162,
+        "sha256": "ad80e15bb113f062da3e6cb82fa1562036f2e64ee6b97aaaa0886e1fad1f4e6c",
+        "modifiedAtUtc": "2026-11-09T05:21:42.475Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-checkpoints.js",
+        "bytes": 18851,
+        "sha256": "4021e845f7c71a2f69ecc274dced60bf362ab608a8fb66c3e02bb809ce9a9bb5",
+        "modifiedAtUtc": "2026-11-09T05:21:42.728Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-criteria.js",
+        "bytes": 12416,
+        "sha256": "8dfd72794c62fc3371cb9a98e45d1009c0125d32706082ed5296c9b2fdef2913",
+        "modifiedAtUtc": "2026-11-09T05:21:42.504Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-deliverables.js",
+        "bytes": 54180,
+        "sha256": "9c9b100521f823fe990e0bd9b8eecd0abe770a24f050ef2d4bacfdff773795e5",
+        "modifiedAtUtc": "2026-11-09T05:21:42.516Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-review.js",
+        "bytes": 26746,
+        "sha256": "6c3a5d7833814ae8e512f50bedf030b78b8620b5bb38a7b64573405a87b2411e",
+        "modifiedAtUtc": "2026-11-09T05:21:42.490Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-tool-definitions.js",
+        "bytes": 101951,
+        "sha256": "a8ba74dd593ca3d0f81d0db5e4d8a6d9c61c2f1d5d433b4b816094c14684bb2e",
+        "modifiedAtUtc": "2026-11-09T05:21:42.529Z"
+      },
+      {
+        "path": "apps/worker/dist/document-workflow-service.js",
+        "bytes": 109505,
+        "sha256": "d18f5e82e54127534775e4b6550c0a51034ae5a6c1fcf41e868da51b6fe5d8c6",
+        "modifiedAtUtc": "2026-11-09T05:21:42.646Z"
+      },
+      {
+        "path": "apps/worker/dist/library-search-service.js",
+        "bytes": 21509,
+        "sha256": "2bd01db12155427b16798ae71ff17bb10d55bb51d55cbe63f5f7d4129b735547",
+        "modifiedAtUtc": "2026-11-09T05:21:43.000Z"
+      },
+      {
+        "path": "apps/worker/dist/native-provider-bridge.js",
+        "bytes": 46225,
+        "sha256": "14ca7c263341d4fb9cba305d68d5d95fd561bbdce6355ea2b78625259681ab46",
+        "modifiedAtUtc": "2026-11-09T05:21:42.832Z"
+      },
+      {
+        "path": "apps/worker/dist/production-authoring-guidance.js",
+        "bytes": 6369,
+        "sha256": "e04633a17f48821ab527a9d895a5cd239f28361b09510a5ca88ba61dfb2f527e",
+        "modifiedAtUtc": "2026-11-09T05:21:42.472Z"
+      },
+      {
+        "path": "apps/worker/dist/production-skill-service.js",
+        "bytes": 618,
+        "sha256": "ed5a212bace97a80853bdab8b815b498cf25151c4d91637194ef1bda8ad35414",
+        "modifiedAtUtc": "2026-11-09T05:21:42.766Z"
+      },
+      {
+        "path": "apps/worker/dist/production-skill-validation.js",
+        "bytes": 35373,
+        "sha256": "77209b703ebe977accae524a20c8675874b35d0d69ddf9577eba9f1ea75c154c",
+        "modifiedAtUtc": "2026-11-09T05:21:42.499Z"
+      },
+      {
+        "path": "apps/worker/dist/provider-request-ledger.js",
+        "bytes": 8608,
+        "sha256": "c57ff7f125183a8566865298a33dc67ea1265e4e0ae81fecadb4e8408a3579b5",
+        "modifiedAtUtc": "2026-11-09T05:21:42.667Z"
+      },
+      {
+        "path": "apps/worker/dist/scene-structure-submission-service.js",
+        "bytes": 30426,
+        "sha256": "f80ada908be0636f595a9ee1b95743fa4db308d18ee537031740ab66e095d7fc",
+        "modifiedAtUtc": "2026-11-09T05:21:42.756Z"
+      },
+      {
+        "path": "apps/worker/dist/shot-prompt-service.js",
+        "bytes": 9591,
+        "sha256": "908c6b930de6d81ad3c1abdef4c31e9f0e8e10bbde254fac0bd34758031c2632",
+        "modifiedAtUtc": "2026-11-09T05:21:42.761Z"
+      }
+    ],
+    "contracts": {
+      "path": "packages/contracts/dist/index.js",
+      "bytes": 6682,
+      "sha256": "4befa1c88ad69e4f5a9cfb97ae5bc7b8bb3a57df5b45a9e939aef9d811bacb2d",
+      "modifiedAtUtc": "2026-11-09T05:21:27.470Z"
+    },
+    "frontend": {
+      "directory": "apps/desktop/dist",
+      "fileCount": 5,
+      "manifestSha256": "bac4b5947168a2eb8b2cc4b099ce2bb15a79596b002fec2823072bbdf767c8c2",
+      "files": [
+        {
+          "path": "apps/desktop/dist/assets/brand-logo-Ba9QyOTc.png",
+          "bytes": 9297,
+          "sha256": "e201db8424ad81c375d77a1b0275b7e5e9875cd07c338791d6b5da45f9ca5245",
+          "modifiedAtUtc": "2026-11-09T05:12:04.022Z"
+        },
+        {
+          "path": "apps/desktop/dist/assets/index-CqGcZlAD.css",
+          "bytes": 224164,
+          "sha256": "809bf420e6e2095e324ac9616bd0e993fc4424f6b3f52f6398cb8d2b30104f35",
+          "modifiedAtUtc": "2026-11-09T05:12:04.022Z"
+        },
+        {
+          "path": "apps/desktop/dist/assets/index-D7YHADsn.js",
+          "bytes": 1336497,
+          "sha256": "f9490ebeb04ebf280819457bd2a4e6e2ec6b922cb76db19ff4618abd5fcac2e4",
+          "modifiedAtUtc": "2026-11-09T05:12:04.022Z"
+        },
+        {
+          "path": "apps/desktop/dist/assets/sync-CDcpEsQg.png",
+          "bytes": 13441,
+          "sha256": "5b58d00d12a953e352b4c0b5971016373e348d42f0a1eb4218c5dd9c854ca1fb",
+          "modifiedAtUtc": "2026-11-09T05:12:04.022Z"
+        },
+        {
+          "path": "apps/desktop/dist/index.html",
+          "bytes": 445,
+          "sha256": "42b5cbd5938a51fde34f064620cbf5a99d455f872c1f9d0b288af731c5be7529",
+          "modifiedAtUtc": "2026-11-09T05:12:04.022Z"
+        }
+      ]
+    },
+    "sidecar": {
+      "path": "apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+      "bytes": 77094262,
+      "sha256": "cb1b81d3e1540e4ae96f3ba2e750a981da4bcf2a0aff9934ebc839db898ff9a2",
+      "modifiedAtUtc": "2026-11-09T05:21:48.149Z"
+    },
+    "nativeTestExecutables": [
+      {
+        "path": "apps/desktop/src-tauri/target/debug/deps/ai_video_desktop_lib-4934211f29a99cb7.exe",
+        "bytes": 22313472,
+        "sha256": "e0b4dd278cf9bbf7bb15edf130a2df86f22d806e5537ed482b6a57da039cf54e",
+        "modifiedAtUtc": "2026-11-09T04:48:27.311Z"
+      },
+      {
+        "path": "apps/desktop/src-tauri/target/debug/deps/ai_video_desktop-e51e1e4f6c9942ab.exe",
+        "bytes": 774656,
+        "sha256": "eca90f86636c4a684437df8eaf07300de47bc05c31c6e78812fea38ae6796fb1",
+        "modifiedAtUtc": "2026-11-09T04:48:21.942Z"
+      }
+    ],
+    "nativeSources": [
+      {
+        "path": "apps/desktop/src-tauri/src/lib.rs",
+        "bytes": 287814,
+        "sha256": "046f4fdf4834ff83d185e5811a63c1ed62410157001140ebbf0ca2fa655416f1",
+        "modifiedAtUtc": "2026-11-09T04:35:49.742Z"
+      },
+      {
+        "path": "apps/desktop/src-tauri/src/llm_stream.rs",
+        "bytes": 192524,
+        "sha256": "fdd0c9f6c093bf76fc993f1e84f0676a3ff4a7848e48d5bdf762881d8058b0fa",
+        "modifiedAtUtc": "2026-11-09T04:48:10.373Z"
+      }
+    ],
+    "nativeLimitation": "cargo check/test verified sources and test executables only. No desktop executable build/install or running instance activation is claimed."
+  },
+  "evidencePreservation": {
+    "historicalJsonLimitation": "Original 11:37:25 quality evidence JSON bytes were not separately retained during the earlier terminal-snapshot refresh. Historical Markdown observations remain. Current JSON is the 12:08:23 read-only terminal snapshot.",
+    "formatting": {
+      "dataUnchanged": true,
+      "before": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-conversation-implementation-20261109/prompt-quality-evidence-before-format.json",
+        "bytes": 36390,
+        "sha256": "af5d20f298ead25e4e73f55acb7f04c7da524b3e6175a3f6c7e98ac8e604168e",
+        "modifiedAtUtc": "2026-11-09T04:13:29.731Z"
+      },
+      "after": {
+        "path": "docs/code-traces/2026-11-09-conversation-prompt-quality-evidence.json",
+        "bytes": 36366,
+        "sha256": "b43d037cb6f58909f7965effd9fb515d85db63739e4915e784ddebd454830500",
+        "modifiedAtUtc": "2026-11-09T05:14:28.837Z"
+      }
+    },
+    "frozenFixture": {
+      "path": "apps/worker/src/test-fixtures/conversation-quality-20261109.json",
+      "bytes": 39028,
+      "sha256": "d2d4b489b79a8cb943307fcaab528bbae5c6de7fe7df52e860357ada29b65871",
+      "modifiedAtUtc": "2026-11-09T04:42:17.298Z"
+    },
+    "failedTask": {
+      "taskId": "fc6c70d8-6f99-4f18-b3c4-8f8555a52557",
+      "generationId": "f2b4c997-201d-4ddb-82f9-6d3c92018cd3",
+      "status": "failed",
+      "completedAtLocal": "2026-11-09 11:40:59.914 UTC+08",
+      "errorCode": "AGENT_TASK_CONTINUATION_STALLED",
+      "providerRequests": 92,
+      "rejectedReviews": 4,
+      "acceptedReviews": 0
+    },
+    "initialPersistentConfigContainsCompleteConstraints": true,
+    "exactProviderWireProven": false
+  },
+  "remainingAcceptance": [
+    "Independent real-model reauthoring and semantic acceptance from full original user requirements; no claim of general semantic correctness from evidence envelopes.",
+    "At least three comparable outline/chapter1/chapter2 chains and sufficient save-to-UI latency samples; no measured speedup or P95 achievement claimed.",
+    "Actual production form, final user edits, Provider submission snapshots and image/video outcomes.",
+    "Build/install/restart or verify activation of current running desktop, Native and Worker without rewriting historical revision-5 task configuration."
+  ]
+}

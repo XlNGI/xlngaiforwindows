@@ -796,6 +796,7 @@ pub(crate) enum DubbingHttpTarget<'a> {
     },
     OfficialStorage(&'a PublicHttpsUrl),
     Speech,
+    VoiceDesign,
     SyncSubmit,
     SyncModels,
     SyncPoll(&'a str),
@@ -877,6 +878,12 @@ pub(crate) fn request_dubbing_file(
             (url.host.as_str(), url.path.clone(), "POST", "storage")
         }
         DubbingHttpTarget::Speech => ("api.minimax.cn", "/v1/t2a_v2".into(), "POST", "Bearer"),
+        DubbingHttpTarget::VoiceDesign => (
+            "api.minimax.cn",
+            "/v1/voice_design".into(),
+            "POST",
+            "Bearer",
+        ),
         DubbingHttpTarget::SyncSubmit => {
             ("api.sync.so", "/v2/generate".into(), "POST", "x-api-key")
         }
@@ -1111,7 +1118,7 @@ fn validate_dubbing_request(
                     .starts_with("multipart/form-data; boundary=")
                     && body.size <= 150 * 1024 * 1024
             }
-            DubbingHttpTarget::Speech => {
+            DubbingHttpTarget::Speech | DubbingHttpTarget::VoiceDesign => {
                 body.content_type == "application/json" && body.size <= 64 * 1024
             }
             DubbingHttpTarget::SyncSubmit => {

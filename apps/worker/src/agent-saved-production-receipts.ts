@@ -1,12 +1,9 @@
 import type Database from 'better-sqlite3';
 import type { AgentSavedProductionReceiptPage } from '@ai-video/contracts';
+import { CREATION_DELIVERY_TOOLS } from './agent-delivery-capabilities.js';
 
 /** Shared execution capability: editing tools never receive creation identities. */
-export const CREATION_BINDING_TOOLS: readonly string[] = [
-  'document.submit_draft',
-  'scene.submit_structure',
-  'scene.structure.stage',
-];
+export const CREATION_BINDING_TOOLS: readonly string[] = CREATION_DELIVERY_TOOLS;
 
 /** Transport size selects an entry point, never an independent business output. */
 export function compatibleCreationTools(tool: string): readonly string[] {
@@ -30,6 +27,7 @@ const TOOLS = [
   'novel.episode.submit_structure',
   'scene.structure.stage',
   'shot.continuity.save',
+  'production.bundle',
 ];
 const FIELDS = [
   'executionId',
@@ -48,6 +46,13 @@ const FIELDS = [
   'minimumRemainingWrites',
   'savedSceneThisCall',
   'complete',
+  'bundleId',
+  'revision',
+  'mappingResultId',
+  'objectCount',
+  'counts',
+  'businessSaved',
+  'readbackVerified',
 ];
 
 /** Successful Worker audit only. Never derives persistence from assistant prose. */
@@ -66,7 +71,8 @@ export function savedProductionReceipts(
     FROM agent_tool_calls WHERE project_id=? AND ${column}=? AND generation_id IS NOT NULL AND status='succeeded'
     AND tool_name IN (${TOOLS.map(() => '?').join(',')})
     AND CASE WHEN json_valid(result_summary_json) THEN
-      (substr(json_extract(result_summary_json,'$.status'),-6)='_saved' OR json_extract(result_summary_json,'$.savedSceneThisCall')=1)
+      (substr(json_extract(result_summary_json,'$.status'),-6)='_saved' OR json_extract(result_summary_json,'$.savedSceneThisCall')=1
+        OR (tool_name='production.bundle' AND json_extract(result_summary_json,'$.status')='bundle_committed'))
       ELSE 0 END
     ORDER BY created_at,id LIMIT ? OFFSET ?`,
     )
@@ -84,7 +90,9 @@ export function savedProductionReceipts(
       const result = JSON.parse(row.result_summary_json ?? '{}') as Record<string, unknown>;
       if (
         typeof result.status !== 'string' ||
-        (!result.status.endsWith('_saved') && result.savedSceneThisCall !== true)
+        (!result.status.endsWith('_saved') &&
+          result.savedSceneThisCall !== true &&
+          !(row.tool_name === 'production.bundle' && result.status === 'bundle_committed'))
       ) {
         consumed++;
         continue;

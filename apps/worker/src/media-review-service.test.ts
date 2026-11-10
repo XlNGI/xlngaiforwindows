@@ -18,7 +18,6 @@ import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { validateSessionRequestParams } from './request-validation.js';
 import type { MediaPrepareArguments, MediaSelectionContext } from './media-preparation-service.js';
 import type { MediaGenerationKind } from '@ai-video/contracts';
-
 const cleanups: Array<() => void> = [];
 afterEach(() =>
   cleanups
@@ -134,7 +133,6 @@ function fixture() {
     addAsset,
   };
 }
-
 describe('production skills and persistent media reviews', () => {
   it('isolates one scene intent per task and allows versioned updates of that intent', () => {
     const f = fixture();
@@ -215,12 +213,11 @@ describe('production skills and persistent media reviews', () => {
     const script = readProductionSkill({ skillId: 'chapters-to-script' });
     expect(script.instructions).toContain('不创建角色、场景、道具、场次、镜头');
     const production = readProductionSkill({ skillId: 'script-to-media' });
-    expect(production.instructions).toContain('scene.submit_structure');
-    expect(production.instructions).toContain('authoringIR.data.continuityPlan');
-    expect(production.instructions).toContain('authoringIR.data.audioPlan');
-    expect(production.instructions).toContain('直接生成可编辑的角色、场景、道具、场次、镜头');
-    expect(production.instructions).toContain('不得创建媒体审核表单');
-    expect(production.instructions).toContain('不要调用任何 media.* 工具');
+    expect(production.instructions).toContain('production.bundle.submit');
+    expect(production.instructions).toContain('每项完整普通文本都放prompt');
+    expect(production.instructions).toContain('bindings');
+    expect(production.instructions).toContain('可编辑草稿');
+    expect(production.instructions).toContain('不发布、不生成媒体、不建媒体表单');
     expect(production.instructions).not.toContain('media.review.prepare');
     expect(() => readProductionSkill({ skillId: 'other' })).toThrow();
     expect(unifiedAgentToolRegistry.require('production.skill.read').riskLevel).toBe('R0');
@@ -278,14 +275,15 @@ describe('production skills and persistent media reviews', () => {
     const shot = f.content.saveShot({
       sceneId: scene.id,
       title: '顾清影破阵',
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '顾清影破阵',
-        references: {
-          characterDocumentIds: [character.id],
-          sceneDocumentIds: [sceneDocument.id],
-          propDocumentIds: [propDocument.id],
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{
+            characterDocumentIds: [character.id],
+            sceneDocumentIds: [sceneDocument.id],
+            propDocumentIds: [propDocument.id],
+          },
         },
       },
     });
@@ -296,7 +294,6 @@ describe('production skills and persistent media reviews', () => {
         sceneBindings: [{ sourceDocumentId: sceneDocument.id, assetId: 'bound-scene' }],
       },
     });
-
     const form = f.service.prepare(
       {
         key: 'bound-shot-video',
@@ -307,7 +304,6 @@ describe('production skills and persistent media reviews', () => {
       },
       f.owner,
     );
-
     expect(form.draft.inputReferences).toEqual([
       { assetId: 'bound-character' },
       { assetId: 'bound-scene' },

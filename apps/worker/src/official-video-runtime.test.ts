@@ -26,7 +26,6 @@ import { ProjectTaskRuntime } from './project-task-runtime.js';
 import { listProviderDefinitions, emptyModelCapabilities } from './provider-registry.js';
 import type { AppSettingsService } from './app-settings-service.js';
 import type { NativeProviderBridge } from './native-provider-bridge.js';
-
 const resources = resolve('../desktop/src-tauri/resources/ffmpeg');
 const roots: string[] = [];
 const projects: ProjectService[] = [];
@@ -70,7 +69,6 @@ afterEach(async () => {
 afterAll(async () => {
   await rm(mediaRoot, { recursive: true, force: true });
 });
-
 async function fixture(
   provider: string,
   contract: string,
@@ -232,7 +230,6 @@ async function fixture(
     imageId,
   };
 }
-
 describe('official audio reference video pipeline with actual local media', () => {
   it.each([
     ['wan-video', 'cn.qwen.wan3-0-video', 3, 'wan3.0-video'],
@@ -250,12 +247,13 @@ describe('official audio reference video pipeline with actual local media', () =
         sceneId: f.scene.id,
         title: f.scene.title,
         expectedRowVersion: f.scene.rowVersion,
-        authoringIR: {
-          schemaVersion: 1,
-          kind: 'scene',
+        ...{
           prompt: '主角在雨中说你好',
-          references: { characterDocumentIds: [f.character.id] },
-          timing: { estimatedDurationSeconds: 5, rationale: '一句对白' },
+          bindings: {
+            schemaVersion: 1 as const,
+            ...{ characterDocumentIds: [f.character.id] },
+          },
+          timing: { estimatedDurationSeconds: 5 },
         },
       });
       production.saveDefaults({
@@ -290,7 +288,9 @@ describe('official audio reference video pipeline with actual local media', () =
       );
       const row = f.ps.access(false, (db) =>
         db.prepare('SELECT task_snapshot_json FROM generation_jobs WHERE id=?').get(draft.draftId),
-      ) as { task_snapshot_json: string };
+      ) as {
+        task_snapshot_json: string;
+      };
       const snapshot = JSON.parse(row.task_snapshot_json) as {
         productionSource: import('@ai-video/contracts').ProductionSource;
         inputs: Array<{
@@ -333,9 +333,15 @@ describe('official audio reference video pipeline with actual local media', () =
             (
               db
                 .prepare('SELECT task_snapshot_json AS snapshot FROM generation_jobs WHERE id=?')
-                .get(pending.id) as { snapshot: string }
+                .get(pending.id) as {
+                snapshot: string;
+              }
             ).snapshot,
-          ) as { sceneBindings: { characters: unknown[] } },
+          ) as {
+            sceneBindings: {
+              characters: unknown[];
+            };
+          },
       );
       expect(snapshot.sceneBindings.characters).toEqual(f.scene.characterBindings);
       new ContentService(f.ps).saveScene({
@@ -351,9 +357,15 @@ describe('official audio reference video pipeline with actual local media', () =
             (
               db
                 .prepare('SELECT task_snapshot_json AS snapshot FROM generation_jobs WHERE id=?')
-                .get(pending.id) as { snapshot: string }
+                .get(pending.id) as {
+                snapshot: string;
+              }
             ).snapshot,
-          ) as { sceneBindings: { characters: unknown[] } },
+          ) as {
+            sceneBindings: {
+              characters: unknown[];
+            };
+          },
       );
       expect(frozen.sceneBindings.characters).toEqual(f.scene.characterBindings);
       const review = f.orchestration.requestSubmission({ jobId: pending.id });
@@ -373,11 +385,17 @@ describe('official audio reference video pipeline with actual local media', () =
         expect(sent).not.toContain('character-voice://');
       } else expect(sent).toContain(f.character.id);
       if (provider === 'wan-video') {
-        const request = f.request.mock.calls[0]?.[1] as { parameters: AdapterParameters };
+        const request = f.request.mock.calls[0]?.[1] as {
+          parameters: AdapterParameters;
+        };
         expect(request.parameters.prompt).toBe(f.parameters.prompt);
       }
       if (provider === 'wan-video') expect(sent).toContain(f.profile.baseUrl);
-      const taskId = (submitted.job as { providerTaskId?: string }).providerTaskId;
+      const taskId = (
+        submitted.job as {
+          providerTaskId?: string;
+        }
+      ).providerTaskId;
       expect(taskId).toBe(`task-${provider}`);
       expect(
         f.ps.access(false, (db) =>

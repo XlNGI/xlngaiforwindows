@@ -1,18 +1,24 @@
 import type Database from 'better-sqlite3';
-import type { ProductionShotAuthoringIR } from '@ai-video/contracts';
-
+import type { PromptRecord } from '@ai-video/contracts';
 /** Typed checks on saved business facts, independent of model quality assessments. */
 export type TaskCriterion =
-  | { kind: 'total_duration'; seconds: number; toleranceSeconds: number }
-  | { kind: 'shot_field'; path: string; inPrompt: boolean }
-  | { kind: 'shot_prompt_projection' };
-
+  | {
+      kind: 'total_duration';
+      seconds: number;
+      toleranceSeconds: number;
+    }
+  | {
+      kind: 'shot_prompt_projection';
+    }
+  | {
+      kind: 'scene_prompt_projection';
+    };
 export const TASK_CRITERIA_SCHEMA = {
   type: 'array',
   minItems: 1,
   maxItems: 30,
   description:
-    'Program checks on current saved objects. Use total_duration for numeric duration (never requiredTexts); shot_field for a structured IR data fact and optionally its presence in the prompt; shot_prompt_projection for a full prompt document derived verbatim from the actual shots in dependsOn. These checks do not replace semantic review. Ordinary independent drafts need no projection check.',
+    'Program checks on current saved objects. Use total_duration for numeric duration (never requiredTexts); shot_prompt_projection for a full prompt document derived verbatim from the actual shots in dependsOn; scene_prompt_projection on scene structure outputs when the user requests whole-scene prompt containing all ordered full shot text. These checks do not replace semantic review. Ordinary independent drafts need no projection check.',
   items: {
     anyOf: [
       {
@@ -28,27 +34,12 @@ export const TASK_CRITERIA_SCHEMA = {
       {
         type: 'object',
         additionalProperties: false,
-        required: ['kind', 'path', 'inPrompt'],
-        properties: {
-          kind: { const: 'shot_field' },
-          path: {
-            type: 'string',
-            pattern: '^data\\.[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$',
-            maxLength: 128,
-          },
-          inPrompt: { type: 'boolean' },
-        },
-      },
-      {
-        type: 'object',
-        additionalProperties: false,
         required: ['kind'],
-        properties: { kind: { const: 'shot_prompt_projection' } },
+        properties: { kind: { enum: ['shot_prompt_projection', 'scene_prompt_projection'] } },
       },
     ],
   },
 };
-
 export function validateTaskCriteria(
   value: unknown,
   document: boolean,
@@ -74,27 +65,15 @@ export function validateTaskCriteria(
         throw new Error(
           'total_duration requires shot/scene targets, positive seconds and a smaller nonnegative toleranceSeconds.',
         );
-    } else if (criterion.kind === 'shot_field') {
-      keys = ['kind', 'path', 'inPrompt'];
-      if (
-        document ||
-        typeof criterion.path !== 'string' ||
-        criterion.path.length > 128 ||
-        !/^data\.[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$/.test(criterion.path) ||
-        criterion.path
-          .split('.')
-          .some((key) => ['__proto__', 'constructor', 'prototype'].includes(key)) ||
-        typeof criterion.inPrompt !== 'boolean'
-      )
-        throw new Error(
-          'shot_field requires shot/scene targets, a safe data.field path and boolean inPrompt.',
-        );
     } else if (criterion.kind === 'shot_prompt_projection') {
       keys = ['kind'];
       if (!document || !dependsOn?.length)
         throw new Error(
           'shot_prompt_projection requires document targets and dependsOn shot/scene deliverable keys.',
         );
+    } else if (criterion.kind === 'scene_prompt_projection') {
+      keys = ['kind'];
+      if (document) throw new Error('scene_prompt_projection requires scene structure targets.');
     } else throw new Error('Unknown task criterion kind.');
     if (Object.keys(criterion).some((key) => !keys.includes(key)))
       throw new Error('Unknown task criterion field.');
@@ -105,28 +84,42 @@ export function validateTaskCriteria(
     seen.add(identity);
   }
 }
-
-type TargetGroup = { key: string; toolName: string; dependsOn?: string[] };
+type TargetGroup = {
+  key: string;
+  toolName: string;
+  dependsOn?: string[];
+};
 export function checkTaskCriteria(
   db: Database.Database,
   projectId: string,
-  item: TargetGroup & { criteria?: TaskCriterion[] },
+  item: TargetGroup & {
+    criteria?: TaskCriterion[];
+  },
   groups: TargetGroup[],
   outputs: Map<string, string[]>,
   isStructure: (tool: string) => boolean,
 ) {
   const failures: Array<Record<string, unknown>> = [];
   const shotsFor = (group: TargetGroup) => {
-    const shots = new Map<string, ProductionShotAuthoringIR | undefined>();
+    const shots = new Map<string, PromptRecord | undefined>();
     for (const id of outputs.get(group.key) ?? []) {
       const rows = db
         .prepare(
-          `SELECT s.id,s.authoring_ir_json FROM shots s JOIN scenes c ON c.id=s.scene_id WHERE ${isStructure(group.toolName) ? 'c.id' : 's.id'}=? AND c.project_id=? AND c.archived_at IS NULL AND s.archived_at IS NULL`,
+          `SELECT s.id,s.prompt,s.timing_json FROM shots s JOIN scenes c ON c.id=s.scene_id WHERE ${isStructure(group.toolName) ? 'c.id' : 's.id'}=? AND c.project_id=? AND c.archived_at IS NULL AND s.archived_at IS NULL`,
         )
-        .all(id, projectId) as Array<{ id: string; authoring_ir_json: string }>;
+        .all(id, projectId) as Array<{
+        id: string;
+        prompt: string;
+        timing_json: string;
+      }>;
       for (const row of rows) {
         try {
-          shots.set(row.id, JSON.parse(row.authoring_ir_json) as ProductionShotAuthoringIR);
+          shots.set(row.id, {
+            prompt: row.prompt,
+            timing: row.timing_json
+              ? (JSON.parse(row.timing_json) as PromptRecord['timing'])
+              : undefined,
+          });
         } catch {
           shots.set(row.id, undefined);
         }
@@ -135,8 +128,51 @@ export function checkTaskCriteria(
     return shots;
   };
   for (const criterion of item.criteria ?? []) {
+    if (criterion.kind === 'scene_prompt_projection') {
+      if (!isStructure(item.toolName)) {
+        failures.push({ criterion, reason: 'scene structure targets required' });
+        continue;
+      }
+      for (const sceneId of outputs.get(item.key) ?? []) {
+        const scene = db
+          .prepare(
+            'SELECT video_prompt AS prompt FROM scenes WHERE id=? AND project_id=? AND archived_at IS NULL',
+          )
+          .get(sceneId, projectId) as
+          | {
+              prompt: string | null;
+            }
+          | undefined;
+        const body = scene?.prompt ?? '';
+        const children = db
+          .prepare(
+            'SELECT id,prompt FROM shots WHERE scene_id=? AND archived_at IS NULL ORDER BY position,id',
+          )
+          .all(sceneId) as Array<{
+          id: string;
+          prompt: string;
+        }>;
+        let cursor = 0;
+        const missingShotIds: string[] = [];
+        for (const child of children) {
+          const prompt = child.prompt ?? '';
+          const index = prompt.trim() ? body.indexOf(prompt, cursor) : -1;
+          if (index < 0) missingShotIds.push(child.id);
+          else cursor = index + prompt.length;
+        }
+        if (!children.length || missingShotIds.length)
+          failures.push({
+            criterion,
+            sceneId,
+            missingShotIds,
+            instruction:
+              'Author the requested full ordered shot text in this existing scene prompt using current CAS. A summary cannot replace the explicit full-text projection. Child edits invalidate this check; never programmatically rewrite either prompt.',
+          });
+      }
+      continue;
+    }
     if (criterion.kind === 'shot_prompt_projection') {
-      const sources = new Map<string, ProductionShotAuthoringIR | undefined>();
+      const sources = new Map<string, PromptRecord | undefined>();
       const visited = new Set<string>();
       const visit = (key: string) => {
         if (visited.has(key)) return;
@@ -153,7 +189,11 @@ export function checkTaskCriteria(
           .prepare(
             "SELECT v.content_markdown FROM documents d JOIN document_versions v ON v.id=d.current_version_id AND v.document_id=d.id WHERE d.id=? AND d.project_id=? AND d.lifecycle_status='active'",
           )
-          .get(id, projectId) as { content_markdown: string } | undefined;
+          .get(id, projectId) as
+          | {
+              content_markdown: string;
+            }
+          | undefined;
         return row ? [row.content_markdown.replace(/\r\n/g, '\n')] : [];
       });
       // Each source shot needs its own occurrence, including identical prompts.
@@ -211,23 +251,6 @@ export function checkTaskCriteria(
         Math.abs(actualSeconds - criterion.seconds) > criterion.toleranceSeconds + 1e-6
       )
         failures.push({ criterion, actualSeconds, invalidShotIds });
-    } else {
-      const missingShotIds = [...shots]
-        .filter(([, ir]) => {
-          let value: unknown = ir;
-          for (const key of criterion.path.split('.'))
-            value =
-              value && typeof value === 'object' && Object.hasOwn(value, key)
-                ? (value as Record<string, unknown>)[key]
-                : undefined;
-          return (
-            typeof value !== 'string' ||
-            !value.trim() ||
-            (criterion.inPrompt && (typeof ir?.prompt !== 'string' || !ir.prompt.includes(value)))
-          );
-        })
-        .map(([id]) => id);
-      if (!shots.size || missingShotIds.length) failures.push({ criterion, missingShotIds });
     }
   }
   return failures;

@@ -1,203 +1,126 @@
 import type Database from 'better-sqlite3';
 import {
-  validateProductionAuthoringIR,
-  type ProductionSceneAuthoringIR,
-  type ProductionShotAuthoringIR,
+  validatePromptBindings,
+  validateProductionTiming,
+  type PromptBindingIR,
+  type ProductionTiming,
 } from '@ai-video/contracts';
-import { requireProductionSceneDocument } from './scene-document-binding.js';
-import { requireProductionCharacters } from './scene-cast-binding.js';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 
 export interface EpisodeStructure {
   episodeTitle: string;
   scenes: Array<{
     title: string;
-    sceneDocumentId?: string | null;
     sceneId?: string;
     expectedRowVersion?: number;
-    /** Prompt projection populated from authoringIR or an existing scene during a binding edit. */
-    videoPrompt?: string;
-    characterDocumentIds?: string[];
-    authoringIR?: ProductionSceneAuthoringIR;
+    prompt?: string;
+    bindings?: PromptBindingIR;
+    timing?: ProductionTiming;
     shots: Array<{
       title: string;
       prompt: string;
-      authoringIR: ProductionShotAuthoringIR;
+      bindings?: PromptBindingIR;
+      timing?: ProductionTiming;
     }>;
   }>;
 }
-
+function record(value: unknown, fields: string[], label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`${label} must be an object.`);
+  const result = value as Record<string, unknown>;
+  const extra = Object.keys(result).find((key) => !fields.includes(key));
+  if (extra) throw new Error(`${label} has unsupported field: ${extra}.`);
+  return result;
+}
+function title(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 200)
+    throw new Error('Agent document title is invalid.');
+  return value.normalize('NFC').trim();
+}
+function content(value: unknown, required: boolean): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== 'string' || !value.trim() || value.length > 20000)
+    throw new Error('prompt requires 1–20000 characters.');
+  return value;
+}
 export function parseEpisodeStructureArguments(value: string): EpisodeStructure {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error('Episode structure arguments are not valid JSON.');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Episode structure arguments must be an object.');
-  }
-  const record = parsed as Record<string, unknown>;
-  const unknown = Object.keys(record).find((key) => !['episodeTitle', 'scenes'].includes(key));
-  if (unknown) throw new Error(`Episode structure has unsupported field: ${unknown}.`);
-  const episodeTitle = normalizeTitle(
-    typeof record.episodeTitle === 'string' ? record.episodeTitle : '',
-  );
-  if (!Array.isArray(record.scenes) || record.scenes.length < 1 || record.scenes.length > 20) {
+  const input = record(JSON.parse(value), ['episodeTitle', 'scenes'], 'Episode structure');
+  if (!Array.isArray(input.scenes) || !input.scenes.length || input.scenes.length > 20)
     throw new Error('Episode structure scenes must contain between one and 20 items.');
-  }
-
-  const scenes: EpisodeStructure['scenes'] = [];
-  for (const [sceneIndex, rawScene] of record.scenes.entries()) {
-    if (!rawScene || typeof rawScene !== 'object' || Array.isArray(rawScene)) {
-      throw new Error(`Episode scene ${sceneIndex} must be an object.`);
-    }
-    const scene = rawScene as Record<string, unknown>;
-    const sceneUnknown = Object.keys(scene).find(
-      (key) =>
-        ![
-          'title',
-          'sceneDocumentId',
-          'shots',
-          'sceneId',
-          'expectedRowVersion',
-          'characterDocumentIds',
-          'authoringIR',
-        ].includes(key),
+  const scenes: EpisodeStructure['scenes'] = input.scenes.map((raw, index) => {
+    const scene = record(
+      raw,
+      ['title', 'sceneId', 'expectedRowVersion', 'prompt', 'bindings', 'timing', 'shots'],
+      `Episode scene ${index}`,
     );
-    if (sceneUnknown)
-      throw new Error(`Episode scene ${sceneIndex} has unsupported field: ${sceneUnknown}.`);
-    const sceneTitle = normalizeTitle(typeof scene.title === 'string' ? scene.title : '');
-    const sceneAuthoringIR =
-      scene.authoringIR === undefined
-        ? undefined
-        : (validateProductionAuthoringIR(scene.authoringIR, 'scene') as ProductionSceneAuthoringIR);
-    if (scene.sceneId === undefined && !sceneAuthoringIR)
-      throw new Error(`scenes[${sceneIndex}] requires authoringIR when creating a scene.`);
-
-    if (
-      scene.sceneDocumentId !== undefined &&
-      scene.sceneDocumentId !== null &&
-      (typeof scene.sceneDocumentId !== 'string' ||
-        !scene.sceneDocumentId.trim() ||
-        scene.sceneDocumentId.length > 200)
-    )
-      throw new Error('Invalid sceneDocumentId.');
     if (
       scene.sceneId !== undefined &&
       (typeof scene.sceneId !== 'string' ||
         !scene.sceneId.trim() ||
         scene.sceneId.length > 200 ||
         !Number.isSafeInteger(scene.expectedRowVersion) ||
-        (scene.expectedRowVersion as number) < 0)
+        Number(scene.expectedRowVersion) < 0)
     )
       throw new Error('Scene updates require sceneId and expectedRowVersion.');
     if (scene.sceneId === undefined && scene.expectedRowVersion !== undefined)
       throw new Error('New scenes cannot include expectedRowVersion.');
     if (
-      scene.characterDocumentIds !== undefined &&
-      (!Array.isArray(scene.characterDocumentIds) ||
-        scene.characterDocumentIds.length > 30 ||
-        new Set(scene.characterDocumentIds).size !== scene.characterDocumentIds.length ||
-        scene.characterDocumentIds.some(
-          (id) => typeof id !== 'string' || !id.trim() || id.length > 200,
-        ))
-    )
-      throw new Error('Invalid scene characterDocumentIds.');
-
-    if (
       !Array.isArray(scene.shots) ||
-      scene.shots.length < (scene.sceneId ? 0 : 1) ||
       scene.shots.length > 30 ||
-      (scene.sceneId && scene.shots.length > 0)
-    ) {
+      (scene.sceneId ? scene.shots.length !== 0 : scene.shots.length < 1)
+    )
       throw new Error(
         scene.sceneId
-          ? `Existing scene ${sceneIndex} must use shots: []; revise existing shots with scene.update_shot_prompts or scene.update_shot_timings.`
-          : `Episode scene ${sceneIndex} shots must contain between one and 30 items.`,
+          ? 'Existing scenes must use shots: []; update existing shots using their IDs and CAS.'
+          : 'New scenes require between one and 30 shots.',
       );
-    }
-
-    const shots: EpisodeStructure['scenes'][number]['shots'] = [];
-    for (const [shotIndex, rawShot] of scene.shots.entries()) {
-      if (!rawShot || typeof rawShot !== 'object' || Array.isArray(rawShot)) {
-        throw new Error(`Episode shot ${sceneIndex}:${shotIndex} must be an object.`);
-      }
-      const shot = rawShot as Record<string, unknown>;
-      const shotUnknown = Object.keys(shot).find((key) => !['title', 'authoringIR'].includes(key));
-      if (shotUnknown)
-        throw new Error(
-          `Episode shot ${sceneIndex}:${shotIndex} has unsupported field: ${shotUnknown}.`,
-        );
-      const shotTitle = normalizeTitle(typeof shot.title === 'string' ? shot.title : '');
-      const authoringIR = validateProductionAuthoringIR(
-        shot.authoringIR,
-        'shot',
-      ) as ProductionShotAuthoringIR;
-      shots.push({ title: shotTitle, prompt: authoringIR.prompt, authoringIR });
-    }
-
-    scenes.push({
-      title: sceneTitle,
-      shots,
-      ...(sceneAuthoringIR
-        ? { authoringIR: sceneAuthoringIR, videoPrompt: sceneAuthoringIR.prompt }
-        : {}),
-      ...(scene.sceneDocumentId !== undefined ? { sceneDocumentId: scene.sceneDocumentId } : {}),
+    const prompt = content(scene.prompt, false);
+    return {
+      title: title(scene.title),
       ...(scene.sceneId
-        ? {
-            sceneId: scene.sceneId,
-            expectedRowVersion: scene.expectedRowVersion as number,
-          }
+        ? { sceneId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion as number }
         : {}),
-      ...(scene.characterDocumentIds !== undefined
-        ? { characterDocumentIds: scene.characterDocumentIds as string[] }
-        : {}),
-    });
-  }
-  if (scenes.reduce((total, scene) => total + 1 + scene.shots.length, 0) > 100)
-    throw new Error(
-      'scenes exceeds the proposal limit of 100 scene + shot items; split into multiple proposals.',
-    );
-  return { episodeTitle, scenes };
+      ...(prompt !== undefined ? { prompt } : {}),
+      ...(scene.bindings !== undefined ? { bindings: validatePromptBindings(scene.bindings) } : {}),
+      ...(scene.timing !== undefined ? { timing: validateProductionTiming(scene.timing) } : {}),
+      shots: scene.shots.map((rawShot, shotIndex) => {
+        const shot = record(
+          rawShot,
+          ['title', 'prompt', 'bindings', 'timing'],
+          `Episode shot ${index}:${shotIndex}`,
+        );
+        return {
+          title: title(shot.title),
+          prompt: content(shot.prompt, true)!,
+          ...(shot.bindings !== undefined
+            ? { bindings: validatePromptBindings(shot.bindings) }
+            : {}),
+          ...(shot.timing !== undefined ? { timing: validateProductionTiming(shot.timing) } : {}),
+        };
+      }),
+    };
+  });
+  if (scenes.reduce((sum, scene) => sum + 1 + scene.shots.length, 0) > 100)
+    throw new Error('Split proposals exceeding 100 scene + shot items.');
+  return { episodeTitle: title(input.episodeTitle), scenes };
 }
-
 export function validateEpisodeReferences(
   database: Database.Database,
   projectId: string,
   structure: EpisodeStructure,
 ): void {
   for (const scene of structure.scenes) {
-    if (scene.sceneId && !scene.authoringIR) {
+    if (scene.sceneId) {
       const current = database
         .prepare(
-          'SELECT video_prompt,authoring_ir_json,row_version FROM scenes WHERE id=? AND project_id=?',
+          'SELECT row_version FROM scenes WHERE id=? AND project_id=? AND archived_at IS NULL',
         )
-        .get(scene.sceneId, projectId) as
-        | { video_prompt: string | null; authoring_ir_json: string | null; row_version: number }
-        | undefined;
+        .get(scene.sceneId, projectId) as { row_version: number } | undefined;
       if (!current || current.row_version !== scene.expectedRowVersion)
         throw new Error('SCENE_ROW_VERSION_CONFLICT');
-      if (current.authoring_ir_json) {
-        scene.authoringIR = validateProductionAuthoringIR(
-          JSON.parse(current.authoring_ir_json),
-          'scene',
-        ) as ProductionSceneAuthoringIR;
-        scene.videoPrompt = scene.authoringIR.prompt;
-      } else if (current.video_prompt !== null) {
-        scene.videoPrompt = current.video_prompt;
-      }
     }
-    if (scene.sceneId === undefined && !scene.authoringIR)
-      throw new Error('New scenes require authoringIR.');
-    if (scene.sceneDocumentId)
-      requireProductionSceneDocument(database, projectId, scene.sceneDocumentId);
-    if (scene.characterDocumentIds !== undefined)
-      requireProductionCharacters(database, projectId, scene.characterDocumentIds);
+    if (scene.bindings) validatePromptBindingReferences(database, projectId, scene.bindings);
+    for (const shot of scene.shots)
+      if (shot.bindings) validatePromptBindingReferences(database, projectId, shot.bindings);
   }
-}
-
-function normalizeTitle(value: string): string {
-  const title = value.normalize('NFC').trim();
-  if (!title || title.length > 200) throw new Error('Agent document title is invalid.');
-  return title;
 }

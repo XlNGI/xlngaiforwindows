@@ -1,8 +1,10 @@
 import type Database from 'better-sqlite3';
+import { isBundleTask } from './production-bundle-state.js';
+import { bundleCheckPage, type checkBundle } from './production-bundle-validation.js';
 import { AgentContextStore } from '@ai-video/persistence';
-import { AGENT_TOOL_RESULT_LIMITS } from '@ai-video/contracts';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
 import { modelResultReceipt } from './agent-context-results.js';
+import { AgentToolPolicyError, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { savedProductionReceipts } from './agent-saved-production-receipts.js';
 import { isTaskHandoffEvidence, taskEvidenceKey } from './agent-preparation-evidence.js';
 import { scriptToMediaCompletionPending } from './production-skill-validation.js';
@@ -17,9 +19,19 @@ export const TASK_CHECKPOINT_TOOL = 'conversation.task.checkpoint';
 
 /** Current control facts stay separate from paged historical evidence. */
 function pendingActions(pending: unknown[]): Array<Record<string, unknown>> {
-  return pending.flatMap((item) => {
+  return pending.flatMap<Record<string, unknown>>((item) => {
     if (!item || typeof item !== 'object') return [];
     const value = item as Record<string, unknown>;
+    if (value.key === 'production-bundle' && Array.isArray(value.candidates))
+      return [
+        {
+          key: value.key,
+          ...(value.pageOffset === 0 && value.pageSize === 20
+            ? value
+            : bundleCheckPage(value as unknown as ReturnType<typeof checkBundle>)),
+          nextAction: value.nextAction,
+        },
+      ];
     const review = value.semanticReview as Record<string, unknown> | undefined;
     return [
       {
@@ -39,6 +51,7 @@ function pendingActions(pending: unknown[]): Array<Record<string, unknown>> {
             'repairOutputs',
             'criteriaFailures',
             'duplicateDialogue',
+            'blockedByPhase',
           ]
             .filter((key) => value[key] !== undefined)
             .map((key) => [key, value[key]]),
@@ -48,6 +61,10 @@ function pendingActions(pending: unknown[]): Array<Record<string, unknown>> {
               semanticReview: {
                 reviewId: review.reviewId,
                 ready: review.ready,
+                readyTargetIds: review.readyTargetIds,
+                requirementIds: review.requirementIds,
+                evidenceContract: review.evidenceContract,
+                snapshotRead: { operation: 'result', resultId: review.reviewId },
                 previousConclusion: review.previousConclusion,
                 reviewScope: review.reviewScope,
                 issues: review.issues,
@@ -96,6 +113,7 @@ export function taskCheckpoint(
           'summary',
           'issues',
           'resolutions',
+          'requirementAssessments',
         ].includes(key),
     )
   )
@@ -112,21 +130,36 @@ export function taskCheckpoint(
     .get(identity.taskId, projectId, identity.conversationId) as { id: string } | undefined;
   if (!current) throw new Error('Checkpoint task is no longer active in this conversation.');
   if (args.operation === 'review') {
-    const pending = scriptToMediaCompletionPending(
-      db,
-      projectId,
-      current.id,
-      identity.taskId,
-      true,
-    );
+    if (isBundleTask(db, identity.taskId))
+      throw new Error('BUNDLE_REVIEW_UNSUPPORTED: This workflow uses structural validation only.');
+    const pending = scriptToMediaCompletionPending(db, projectId, current.id, identity.taskId);
     try {
-      return submitTaskReview(
+      const event = submitTaskReview(
         db,
         projectId,
         identity.taskId,
         args,
         pending?.[0]?.semanticReview as TaskReviewState | undefined,
       );
+      // The complete event is the review authority. Persist it in the same tool
+      // transaction before projecting a bounded transport receipt. Runtime uses
+      // the provider call ID to find this result and must not replace it with
+      // the smaller receipt (which intentionally omits assessment bodies).
+      const call = db
+        .prepare(
+          'SELECT provider_call_id FROM agent_tool_calls WHERE id=? AND project_id=? AND task_id=?',
+        )
+        .get(identity.toolCallId, projectId, identity.taskId) as
+        { provider_call_id: string } | undefined;
+      const result = new AgentContextStore(db).putResult(
+        projectId,
+        identity.taskId,
+        call?.provider_call_id ?? identity.toolCallId,
+        TASK_CHECKPOINT_TOOL,
+        JSON.stringify(event),
+        args,
+      );
+      return JSON.parse(modelResultReceipt(result)) as Record<string, unknown>;
     } catch (error) {
       const actions = pendingActions(pending ?? []).map((action) => {
         const review = action.semanticReview as TaskReviewState | undefined;
@@ -141,9 +174,9 @@ export function taskCheckpoint(
           },
         };
       });
-      throw new Error(
-        `${(error as Error).message} Current Worker actions: ${JSON.stringify(actions)}`,
-      );
+      const failure = error instanceof Error ? error : new Error(String(error));
+      failure.message += ` Current Worker actions: ${JSON.stringify(actions)}`;
+      throw failure;
     }
   }
   if (args.operation === 'decision') {
@@ -216,6 +249,7 @@ export function taskCheckpoint(
           ? assessTaskCompletion(db, projectId, current.id, target.task_id)
           : undefined;
       const pending = progress?.pending ?? state?.pendingSteps ?? [];
+      const actions = pendingActions(pending);
       const evidence = store.evidence(projectId, target.task_id, true);
       const records = [
         ...(state?.userRequirements ?? []).map((value) => ({ kind: 'userRequirement', ...value })),
@@ -224,7 +258,7 @@ export function taskCheckpoint(
           kind: 'constraint',
           reference: value,
         })),
-        ...pending.map((value) => ({ kind: 'pending', value })),
+        ...actions.map((value) => ({ kind: 'pending', value })),
         ...store
           .resultRefs(projectId, target.task_id)
           .map((value) => ({ kind: 'result', ...value })),
@@ -239,13 +273,22 @@ export function taskCheckpoint(
         taskGoal: state?.taskGoal,
         executionStatus: state?.executionStatus,
         checkpoint: state?.checkpoint,
-        pendingActions: pendingActions(pending),
+        pendingActions: actions,
         records: records.slice(offset, offset + 20),
         totalRecords: records.length,
         nextOffset: offset + 20 < records.length ? offset + 20 : null,
       };
+      try {
+        unifiedAgentToolRegistry.assertResultValue(page);
+        return page;
+      } catch (error) {
+        if (
+          !(error instanceof AgentToolPolicyError) ||
+          error.code !== 'AGENT_TOOL_RESULT_TOO_LARGE'
+        )
+          throw error;
+      }
       const content = JSON.stringify(page);
-      if (Buffer.byteLength(content, 'utf8') <= AGENT_TOOL_RESULT_LIMITS.maxJsonBytes) return page;
       // State is durable working data too. Persist the complete immutable page before
       // returning its read contract; never truncate requirements to fit a tool response.
       const snapshot = store.putResult(
@@ -256,7 +299,7 @@ export function taskCheckpoint(
         content,
         args,
       );
-      const receipt = JSON.parse(modelResultReceipt(snapshot)) as Record<string, unknown>;
+      const receipt = JSON.parse(modelResultReceipt(snapshot, 0)) as Record<string, unknown>;
       if (generationId !== current.id)
         receipt.read = {
           ...(receipt.read as Record<string, unknown>),
@@ -265,15 +308,30 @@ export function taskCheckpoint(
       return receipt;
     }
     if (typeof args.resultId !== 'string') throw new Error('resultId is required.');
-    return new AgentContextStore(db).readResult(
-      projectId,
-      target.task_id,
-      args.resultId,
-      args.resultOffset as number | undefined,
-      args.resultLimit as number | undefined,
-      args.expectedHash as string | undefined,
-      args.resultView as 'content' | 'arguments' | undefined,
-    );
+    const store = new AgentContextStore(db),
+      resultId = args.resultId;
+    const read = (limit: number | undefined) =>
+      store.readResult(
+        projectId,
+        target.task_id,
+        resultId,
+        args.resultOffset as number | undefined,
+        limit,
+        args.expectedHash as string | undefined,
+        args.resultView as 'content' | 'arguments' | undefined,
+      );
+    let page = read(args.resultLimit as number | undefined);
+    if (Buffer.byteLength(JSON.stringify(page)) > 48 * 1024) {
+      let low = 1,
+        high = page.endOffset - page.offset;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (Buffer.byteLength(JSON.stringify(read(mid))) <= 48 * 1024) low = mid;
+        else high = mid - 1;
+      }
+      page = read(low);
+    }
+    return page;
   }
   if (args.operation === 'plan' || args.operation === 'partial') {
     if (

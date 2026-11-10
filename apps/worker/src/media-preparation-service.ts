@@ -50,14 +50,11 @@ import { assertStorageCapacity } from './storage-capacity.js';
 import type { VideoGenerationService } from './video-generation-service.js';
 import { isOfficialVideoAdapter, materializeOfficialVideoInputs } from './official-video-inputs.js';
 import { ProductionService } from './production-service.js';
-
 const MAX_MEDIA_CANDIDATES = 50;
 const MAX_MEDIA_PARAMETERS = 40;
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROLLED_IMAGE_BYTES = 25 * 1024 * 1024;
-
 type ProductionSceneInputs = NonNullable<ProductionCompileResult['sceneInputs']>;
-
 function productionSceneVoiceInputs(sceneInputs: ProductionSceneInputs) {
   return sceneInputs.scene.dialogueAudioId
     ? []
@@ -75,7 +72,6 @@ function productionSceneVoiceInputs(sceneInputs: ProductionSceneInputs) {
         return voice ? [voice] : [];
       });
 }
-
 function productionSceneImageBindings(
   sceneInputs: ProductionSceneInputs,
 ): SceneMaterialBindingInfo[] {
@@ -103,7 +99,6 @@ function productionSceneImageBindings(
     }),
   ];
 }
-
 function bindProductionSceneVoices(
   adapter: AdapterDescriptor,
   parameters: AdapterParameters,
@@ -119,7 +114,6 @@ function bindProductionSceneVoices(
     productionSceneImageBindings(sceneInputs),
   );
 }
-
 export interface MediaPrepareArguments {
   prompt: string;
   inputAssetIds: string[];
@@ -129,7 +123,6 @@ export interface MediaPrepareArguments {
   sourceDocumentId?: string;
   assetKind?: ImageAssetKind | VideoAssetKind;
 }
-
 export interface MediaSelectionContext {
   kind: MediaGenerationKind;
   arguments: MediaPrepareArguments;
@@ -137,20 +130,16 @@ export interface MediaSelectionContext {
   inputAttachments: MediaAttachmentSnapshot[];
   candidates: MediaModelCandidate[];
 }
-
 interface MediaAttachmentSnapshot {
   contentType: 'image/png' | 'image/jpeg' | 'image/webp';
   sha256: string;
 }
-
 interface MaterializedMediaInputs {
   references: MediaInputReferenceV1[];
   paths: string[];
   parameters: AdapterParameters;
 }
-
 type MediaIdentity = LlmGenerationIdentity;
-
 /** Worker-owned media catalog, selection validation, and local draft boundary. */
 export class MediaPreparationService {
   constructor(
@@ -163,7 +152,6 @@ export class MediaPreparationService {
       identity: MediaIdentity,
     ) => LlmInputAttachment[] = () => [],
   ) {}
-
   // Form submission uses the edited adapter parameters. Production compilation
   // belongs to explicit fill or Agent selection, never to this submit path.
   prepareImage(params: ImageGenerationPrepareParams): ImageGenerationJobInfo {
@@ -179,7 +167,6 @@ export class MediaPreparationService {
       throw error;
     }
   }
-
   prepareVideo(params: VideoGenerationPrepareParams): VideoGenerationJobInfo {
     if (isOfficialVideoAdapter(params.adapterKey)) {
       const profile = params.providerProfileId
@@ -241,7 +228,6 @@ export class MediaPreparationService {
       throw error;
     }
   }
-
   selectionContext(
     kind: MediaGenerationKind,
     rawArguments: unknown,
@@ -257,7 +243,11 @@ export class MediaPreparationService {
             .prepare(
               "SELECT kind FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
             )
-            .get(args.sourceDocumentId, project.id) as { kind: string } | undefined;
+            .get(args.sourceDocumentId, project.id) as
+            | {
+                kind: string;
+              }
+            | undefined;
           if (
             !doc ||
             (['character', 'scene', 'prop'].includes(args.assetKind ?? '') &&
@@ -298,7 +288,6 @@ export class MediaPreparationService {
       ),
     };
   }
-
   selectionRequest(
     context: MediaSelectionContext,
     selectionToken: string,
@@ -315,7 +304,6 @@ export class MediaPreparationService {
       expiresAt,
     };
   }
-
   /** Only call after the desktop's one-use model/review token has been verified.
    * Local files chosen in that form become this decision's frozen inputs. Agent
    * tool arguments still pass through the original attachment allowlist.
@@ -335,7 +323,6 @@ export class MediaPreparationService {
       : context.inputAttachments;
     return this.prepareSelected({ ...context, inputAttachments }, selection, identity);
   }
-
   prepareSelected(
     context: MediaSelectionContext,
     selection: MediaModelSelectionDecision,
@@ -384,7 +371,6 @@ export class MediaPreparationService {
         true,
       );
     }
-
     const reviewedImages = hasReviewedImageParameters(adapter, selection.parameters)
       ? productionImagesFromParameters(adapter, selection.parameters)
       : undefined;
@@ -435,7 +421,6 @@ export class MediaPreparationService {
         true,
       );
     }
-
     const snapshot = this.snapshot(candidate, adapter);
     const common = {
       ...(production?.source ? { productionSource: production.source } : {}),
@@ -484,7 +469,6 @@ export class MediaPreparationService {
       costNotice: candidate.costNotice,
     };
   }
-
   getTask(taskId: string): MediaTaskSummary {
     const normalizedTaskId = requireText(taskId, 'taskId', 200);
     return this.projects.access(false, (database, project) => {
@@ -524,7 +508,6 @@ export class MediaPreparationService {
       };
     });
   }
-
   private listCandidates(
     kind: MediaGenerationKind,
     inputCount: number,
@@ -569,7 +552,6 @@ export class MediaPreparationService {
     }
     return candidates;
   }
-
   private snapshot(
     candidate: Pick<
       MediaModelCandidate,
@@ -616,7 +598,6 @@ export class MediaPreparationService {
         : {}),
     };
   }
-
   private normalizeParameters(
     context: MediaSelectionContext,
     adapter: AdapterDescriptor,
@@ -673,7 +654,6 @@ export class MediaPreparationService {
     }
     return normalized;
   }
-
   private materializeInputs(
     inputAssetIds: string[],
     parameters: AdapterParameters,
@@ -793,7 +773,6 @@ export class MediaPreparationService {
       throw error;
     }
   }
-
   private assertIdentity(identity: MediaIdentity): void {
     const current = this.projects.current();
     if (
@@ -818,7 +797,6 @@ export class MediaPreparationService {
       );
     }
   }
-
   private assertInputAssets(assetIds: string[]): void {
     this.projects.access(false, (database, project) => {
       const repositories = createRepositories(database);
@@ -839,7 +817,6 @@ export class MediaPreparationService {
     });
   }
 }
-
 export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
   | {
       providerType: MediaProviderType;
@@ -930,7 +907,6 @@ export function resolveMediaProviderRoute(profile: ProviderProfileInfo):
   }
   return undefined;
 }
-
 export function parseMediaPrepareArguments(
   kind: MediaGenerationKind,
   value: unknown,
@@ -960,9 +936,9 @@ export function parseMediaPrepareArguments(
       true,
     );
   }
-  // Keep the Agent media handoff aligned with ProductionAuthoringIR. Provider
+  // Keep the Agent media handoff aligned with PromptRecord. Provider
   // adapters still enforce their own prompt limits during parameter validation.
-  const prompt = requireText(record.prompt, 'prompt', 20_000);
+  const prompt = requireText(record.prompt, 'prompt', 20000);
   const inputAssetIds = Array.isArray(record.inputAssetIds)
     ? record.inputAssetIds.map((item) => requireText(item, 'inputAssetIds', 200))
     : [];
@@ -995,7 +971,6 @@ export function parseMediaPrepareArguments(
     ...(sourceDocumentId ? { sourceDocumentId } : {}),
   };
 }
-
 function parseAssetKind(
   kind: MediaGenerationKind,
   value: unknown,
@@ -1024,7 +999,6 @@ function parseAssetKind(
   }
   return value as ImageAssetKind | VideoAssetKind;
 }
-
 function adapterSupportsInputs(
   adapter: AdapterDescriptor,
   kind: MediaGenerationKind,
@@ -1051,13 +1025,11 @@ function adapterSupportsInputs(
     inputCount <= support.maxImages
   );
 }
-
 function modelSupportsKind(model: ProviderModelInfo, kind: MediaGenerationKind): boolean {
   return kind === 'image'
     ? model.capabilities.imageGeneration || model.capabilities.imageEditing === true
     : model.capabilities.videoGeneration;
 }
-
 export function modelSupportsMediaAdapter(
   model: ProviderModelInfo,
   adapter: AdapterDescriptor,
@@ -1069,7 +1041,6 @@ export function modelSupportsMediaAdapter(
   if (adapter.capability.endsWith('TO_VIDEO')) return model.capabilities.videoGeneration;
   return false;
 }
-
 function costNotice(pricing: ModelPricingInfo[], model: ProviderModelInfo) {
   const configured = pricing.find((item) => item.modelId === model.id);
   const detail = configured?.creditPrice
@@ -1077,7 +1048,6 @@ function costNotice(pricing: ModelPricingInfo[], model: ProviderModelInfo) {
     : 'The exact amount depends on the selected parameters and Provider response.';
   return { required: true as const, summary: `Provider submission may incur charges. ${detail}` };
 }
-
 function normalizeTaskState(
   kind: MediaGenerationKind,
   status: string,
@@ -1092,21 +1062,23 @@ function normalizeTaskState(
   if (kind === 'image' && status === 'running') return 'draft';
   return 'draft';
 }
-
 function readJobError(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
-    const parsed = JSON.parse(value) as { message?: unknown };
+    const parsed = JSON.parse(value) as {
+      message?: unknown;
+    };
     return typeof parsed.message === 'string' ? parsed.message.slice(0, 500) : undefined;
   } catch {
     return undefined;
   }
 }
-
 function readSnapshotKind(value: string | undefined): MediaGenerationKind | undefined {
   if (!value) return undefined;
   try {
-    const parsed = JSON.parse(value) as { capability?: unknown };
+    const parsed = JSON.parse(value) as {
+      capability?: unknown;
+    };
     return parsed.capability === 'image' || parsed.capability === 'video'
       ? parsed.capability
       : undefined;
@@ -1114,7 +1086,6 @@ function readSnapshotKind(value: string | undefined): MediaGenerationKind | unde
     return undefined;
   }
 }
-
 function requireParameters(value: unknown): AdapterParameters {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AgentToolPolicyError(
@@ -1125,7 +1096,6 @@ function requireParameters(value: unknown): AdapterParameters {
   }
   return value as AdapterParameters;
 }
-
 function validateParameterRecord(
   parameters: AdapterParameters,
   allowInlineImages: boolean,
@@ -1208,13 +1178,12 @@ function validateParameterRecord(
           );
         }
         remainingAttachments.set(attachmentKey, remaining - 1);
-      } else if (item.length > 10_000 || looksLikeLongBase64(item)) {
+      } else if (item.length > 10000 || looksLikeLongBase64(item)) {
         throw invalidParameter(key);
       }
     }
   }
 }
-
 function invalidParameter(key: string): AgentToolPolicyError {
   return new AgentToolPolicyError(
     'AGENT_TOOL_ARGUMENTS_INVALID',
@@ -1222,10 +1191,10 @@ function invalidParameter(key: string): AgentToolPolicyError {
     true,
   );
 }
-
-function parseCanonicalImageDataUrl(
-  value: string,
-): MediaAttachmentSnapshot & { bytes: Buffer; extension: 'png' | 'jpg' | 'webp' } {
+function parseCanonicalImageDataUrl(value: string): MediaAttachmentSnapshot & {
+  bytes: Buffer;
+  extension: 'png' | 'jpg' | 'webp';
+} {
   const match = /^data:image\/(png|jpeg|jpg|webp);base64,([A-Za-z0-9+/]+={0,2})$/iu.exec(value);
   if (!match) throw invalidParameter('images');
   const encoded = match[2]!;
@@ -1243,7 +1212,6 @@ function parseCanonicalImageDataUrl(
     extension: contentType === 'image/png' ? 'png' : contentType === 'image/jpeg' ? 'jpg' : 'webp',
   };
 }
-
 function parseStoredImage(bytes: Buffer): {
   bytes: Buffer;
   contentType: MediaAttachmentSnapshot['contentType'];
@@ -1262,11 +1230,9 @@ function parseStoredImage(bytes: Buffer): {
   }
   throw invalidParameter('images');
 }
-
 function cleanupMaterializedPaths(paths: string[]): void {
   for (const path of paths) rmSync(path, { force: true });
 }
-
 function normalizeImageContentType(
   value: string,
 ): MediaAttachmentSnapshot['contentType'] | undefined {
@@ -1275,7 +1241,6 @@ function normalizeImageContentType(
   if (normalized === 'image/png' || normalized === 'image/webp') return normalized;
   return undefined;
 }
-
 function hasImageSignature(
   bytes: Buffer,
   contentType: MediaAttachmentSnapshot['contentType'],
@@ -1295,15 +1260,12 @@ function hasImageSignature(
     bytes.subarray(8, 12).toString('ascii') === 'WEBP'
   );
 }
-
 function looksLikeAbsolutePath(value: string): boolean {
   return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\') || value.startsWith('/');
 }
-
 function looksLikeLongBase64(value: string): boolean {
   return value.length >= 512 && /^[A-Za-z0-9+/]+={0,2}$/u.test(value);
 }
-
 function redactInlineMedia(parameters: AdapterParameters): AdapterParameters {
   return Object.fromEntries(
     Object.entries(parameters).map(([key, value]) => [
@@ -1320,7 +1282,6 @@ function redactInlineMedia(parameters: AdapterParameters): AdapterParameters {
     ]),
   );
 }
-
 function hasReviewedImageParameters(
   adapter: AdapterDescriptor,
   parameters: AdapterParameters,
@@ -1330,7 +1291,6 @@ function hasReviewedImageParameters(
       Object.hasOwn(adapter.parameterSchema.properties, field) && Object.hasOwn(parameters, field),
   );
 }
-
 function cloneParameters(parameters: AdapterParameters): AdapterParameters {
   return Object.fromEntries(
     Object.entries(parameters).map(([key, value]) => [
@@ -1339,7 +1299,6 @@ function cloneParameters(parameters: AdapterParameters): AdapterParameters {
     ]),
   );
 }
-
 function requireText(value: unknown, name: string, maximum: number): string {
   if (typeof value !== 'string') {
     throw new AgentToolPolicyError(

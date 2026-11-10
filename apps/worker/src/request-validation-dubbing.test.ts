@@ -32,6 +32,14 @@ const referencePrepare = {
   },
 };
 const referenceConfirm = { confirmationToken: 'confirmation-token', approved: true };
+const designPrepare = {
+  characterDocumentId: 'character',
+  voiceDocumentId: 'voice-source',
+  expectedVoiceDocumentVersionId: 'source-version',
+  expectedCharacterRowVersion: 1,
+  providerProfileId: 'speech',
+  modelId: 'speech-2.8-hd',
+};
 const submit = {
   sceneId: 'scene',
   sourceVideoAssetId: 'video',
@@ -51,6 +59,8 @@ const voice = {
 };
 const valid: Array<[WorkerMethod, Record<string, unknown>]> = [
   ['characterVoice.list', {}],
+  ['characterVoiceDesign.prepare', designPrepare],
+  ['characterVoiceDesign.confirm', referenceConfirm],
   ['characterVoiceReference.prepare', referencePrepare],
   ['characterVoiceReference.confirm', referenceConfirm],
   ['characterVoiceReference.generate', referenceGeneration],
@@ -89,6 +99,27 @@ const valid: Array<[WorkerMethod, Record<string, unknown>]> = [
   ['dubbing.output.adopt', { jobId: 'job', expectedRowVersion: 1 }],
 ];
 describe('dubbing RPC boundary validation', () => {
+  it('accepts only versioned voice design sources and supported future speech models', () => {
+    for (const change of [
+      { prompt: 'forged' },
+      { voiceId: 'fixed-voice' },
+      { expectedCharacterRowVersion: -1 },
+      { voiceDocumentId: '' },
+      { modelId: 'speech-01-hd' },
+    ])
+      expect(() =>
+        validateSessionRequestParams('characterVoiceDesign.prepare', {
+          ...designPrepare,
+          ...change,
+        }),
+      ).toThrow(RequestValidationError);
+    expect(() =>
+      validateSessionRequestParams('characterVoiceDesign.confirm', {
+        ...referenceConfirm,
+        approved: 'true',
+      }),
+    ).toThrow(RequestValidationError);
+  });
   it.each(valid)('accepts the bounded public %s contract', (method, input) => {
     expect(validateSessionRequestParams(method, input)).toBe(input);
   });

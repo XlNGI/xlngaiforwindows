@@ -9,15 +9,12 @@ import { ProjectService } from './project-service.js';
 import { createRepositories } from '@ai-video/persistence';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { NovelService } from './novel-service.js';
-
 const directories: string[] = [];
 const services: ProjectService[] = [];
-
 afterEach(async () => {
   for (const service of services.splice(0)) service.close();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
-
 async function setup() {
   const directory = await mkdtemp(join(tmpdir(), 'ai-video-document-workflow-'));
   directories.push(directory);
@@ -41,7 +38,6 @@ async function setup() {
   });
   return { projects, content, workflow, contexts, conversation, user, assistant };
 }
-
 function expectWorkflowError(operation: () => unknown, code: DocumentWorkflowError['code']): void {
   let error: unknown;
   try {
@@ -52,7 +48,6 @@ function expectWorkflowError(operation: () => unknown, code: DocumentWorkflowErr
   expect(error).toBeInstanceOf(DocumentWorkflowError);
   expect(error).toMatchObject({ code });
 }
-
 describe('DocumentWorkflowService', () => {
   it('merges repeated library evidence while preserving versions, status, structure and read provenance', async () => {
     const { projects, workflow, assistant } = await setup();
@@ -124,57 +119,48 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toEqual({ count: entries.length });
   });
-
-  it('stores open prop IR with immutable versions, restores it, and clears it when prose is edited alone', async () => {
+  it('versions and restores bindings independently and preserves them on prose-only edits', async () => {
     const { workflow } = await setup();
     const originalIR = {
       schemaVersion: 1 as const,
-      kind: 'prop' as const,
-      data: { material: '旧铁', shape: '断刃', history: ['祖传', '缺口'] },
     };
     const created = workflow.saveDraft({
       kind: 'prop',
       title: '断剑',
       contentMarkdown: '# 断剑\n刃口有缺损。',
-      contentIR: originalIR,
+      bindings: originalIR,
     });
     expect(created.kind).toBe('prop');
-    expect(created.currentVersion?.contentIR).toEqual(originalIR);
-
+    expect(created.currentVersion?.bindings).toEqual(originalIR);
     const revised = workflow.saveDraft({
       documentId: created.id,
       title: created.title,
       contentMarkdown: '# 断剑\n剑格刻有旧纹。',
-      contentIR: { schemaVersion: 1, kind: 'prop', data: { mark: '旧纹' } },
+      bindings: { schemaVersion: 1 as const },
       expectedDocumentRowVersion: created.rowVersion,
     });
-    expect(revised.currentVersion?.contentIR).toEqual({
-      schemaVersion: 1,
-      kind: 'prop',
-      data: { mark: '旧纹' },
+    expect(revised.currentVersion?.bindings).toEqual({
+      schemaVersion: 1 as const,
     });
-
     const restored = workflow.restoreDocument({
       documentId: revised.id,
       versionId: created.currentVersion!.id,
     });
-    expect(restored.currentVersion?.contentIR).toEqual(originalIR);
-
+    expect(restored.currentVersion?.bindings).toEqual(originalIR);
     const proseOnlyEdit = workflow.saveDraft({
       documentId: restored.id,
       title: restored.title,
       contentMarkdown: '# 断剑\n新增文字但未更新结构化资料。',
       expectedDocumentRowVersion: restored.rowVersion,
     });
-    expect(proseOnlyEdit.currentVersion?.contentIR).toBeUndefined();
-    expect(workflow.listVersions(created.id).map((version) => version.contentIR)).toEqual([
-      undefined,
+    expect(proseOnlyEdit.currentVersion?.bindings).toEqual(originalIR);
+    expect(workflow.listVersions(created.id).map((version) => version.bindings)).toEqual([
       originalIR,
-      { schemaVersion: 1, kind: 'prop', data: { mark: '旧纹' } },
+      originalIR,
+      { schemaVersion: 1 as const },
       originalIR,
     ]);
   });
-
   it('keeps saved chapter documents out of the general document list', async () => {
     const { projects, workflow, conversation } = await setup();
     const orchestration = new AgentOrchestrationService(projects);
@@ -200,16 +186,13 @@ describe('DocumentWorkflowService', () => {
       '小说章节正文',
     );
   });
-
   it('archives and restores project documents with row-version checks and lifecycle audits', async () => {
     const { projects, workflow } = await setup();
     const created = workflow.saveDraft({ title: '临时大纲', contentMarkdown: '# 临时大纲' });
-
     const archived = workflow.archiveDocument({
       documentId: created.id,
       expectedDocumentRowVersion: created.rowVersion,
     });
-
     expect(archived.lifecycleStatus).toBe('archived');
     expect(archived.rowVersion).toBe(created.rowVersion + 1);
     expect(workflow.listDocuments().some((item) => item.id === created.id)).toBe(false);
@@ -225,7 +208,6 @@ describe('DocumentWorkflowService', () => {
       'CONFLICT',
     );
     expect(workflow.listArchivedDocuments()).toHaveLength(1);
-
     const restored = workflow.unarchiveDocument({
       documentId: archived.id,
       expectedDocumentRowVersion: archived.rowVersion,
@@ -243,7 +225,6 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toEqual(['document_unarchived', 'document_archived', 'draft_saved']);
   });
-
   it('rejects general document archiving for novel chapters', async () => {
     const { projects, workflow, conversation } = await setup();
     const orchestration = new AgentOrchestrationService(projects);
@@ -260,7 +241,6 @@ describe('DocumentWorkflowService', () => {
       contentMarkdown: '章节正文',
       expectedDocumentRowVersion: 0,
     });
-
     expectWorkflowError(
       () =>
         workflow.archiveDocument({
@@ -271,7 +251,6 @@ describe('DocumentWorkflowService', () => {
     );
     expect(workflow.getDocument(document.id).lifecycleStatus).toBe('active');
   });
-
   it('archives and restores novel reference drafts while preserving their binding and body', async () => {
     const { projects, workflow } = await setup();
     const novel = new NovelService(projects);
@@ -321,7 +300,6 @@ describe('DocumentWorkflowService', () => {
       expect.objectContaining({ id: target.id, domainScope: 'novel' }),
     ]);
   });
-
   it('reports and filters media submission states and classifies Vidu images by capability', async () => {
     const { projects, workflow } = await setup();
     projects.access(true, (database, project) => {
@@ -365,14 +343,12 @@ describe('DocumentWorkflowService', () => {
       expect.objectContaining({ sourceId: 'vidu-video', status: 'polling' }),
     ]);
   });
-
   it('lists an agent draft in catalog and marks it published without injecting the body', async () => {
     const { projects, content, workflow, contexts, conversation, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
       idempotencyKey: 'draft-request-1',
     });
-
     expect(created.document.currentVersion?.state).toBe('draft');
     expect(created.document.publishedVersionId).toBeUndefined();
     expect(created.task.status).toBe('waiting_review');
@@ -419,7 +395,6 @@ describe('DocumentWorkflowService', () => {
       expectedDocumentRowVersion: reviewed.rowVersion,
       expectedPublishedVersionId: reviewed.publishedVersionId,
     });
-
     expect(published.document.publishedVersionId).toBe(published.document.currentVersion?.id);
     const publishedContext = contexts.compile(conversation.id);
     expect(publishedContext.sources.some((source) => source.id === created.document.id)).toBe(
@@ -443,7 +418,6 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toEqual(['published', 'review_submitted', 'draft_saved']);
   });
-
   it('self-publishes a draft atomically and rolls back review creation on conflict', async () => {
     const { projects, workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
@@ -464,7 +438,6 @@ describe('DocumentWorkflowService', () => {
           .get(created.document.id),
       ),
     ).toMatchObject({ status: 'approved' });
-
     expectWorkflowError(
       () =>
         workflow.createDocumentDraftFromMessage({
@@ -475,14 +448,12 @@ describe('DocumentWorkflowService', () => {
         }),
       'DOCUMENT_PUBLISHED_READ_ONLY',
     );
-
     const unpublished = workflow.unpublish({
       documentId: published.document.id,
       expectedDocumentRowVersion: published.document.rowVersion,
     });
     expect(unpublished.publishedVersionId).toBeUndefined();
     expect(unpublished.currentVersion?.state).toBe('draft');
-
     const second = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
       targetDocumentId: created.document.id,
@@ -506,7 +477,9 @@ describe('DocumentWorkflowService', () => {
               .prepare(
                 'SELECT COUNT(*) AS count FROM document_reviews WHERE document_version_id = ?',
               )
-              .get(second.document.currentVersionId) as { count: number }
+              .get(second.document.currentVersionId) as {
+              count: number;
+            }
           ).count,
       ),
     ).toBe(0);
@@ -518,7 +491,6 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toMatchObject({ count: 1 });
   });
-
   it('keeps published documents immutable even for direct SQL writes', async () => {
     const { projects, workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
@@ -530,7 +502,6 @@ describe('DocumentWorkflowService', () => {
       expectedDocumentRowVersion: created.document.rowVersion,
       expectedPublishedVersionId: undefined,
     });
-
     expect(() =>
       projects.access(true, (database) =>
         database
@@ -540,7 +511,6 @@ describe('DocumentWorkflowService', () => {
     ).toThrow('published document is read-only');
     expect(workflow.getDocument(published.document.id).title).toBe(published.document.title);
   });
-
   it('keeps publication history immutable and rejects review writes after publication', async () => {
     const { projects, workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
@@ -552,7 +522,6 @@ describe('DocumentWorkflowService', () => {
       expectedDocumentRowVersion: created.document.rowVersion,
       expectedPublishedVersionId: undefined,
     });
-
     expectWorkflowError(
       () =>
         workflow.submitReview({
@@ -562,7 +531,6 @@ describe('DocumentWorkflowService', () => {
         }),
       'DOCUMENT_PUBLISHED_READ_ONLY',
     );
-
     expect(() =>
       projects.access(true, (database) =>
         database
@@ -584,7 +552,9 @@ describe('DocumentWorkflowService', () => {
             .prepare(
               'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM document_audit_events WHERE project_id = ?',
             )
-            .get(created.document.projectId) as { value: number }
+            .get(created.document.projectId) as {
+            value: number;
+          }
         ).value;
         database
           .prepare(
@@ -610,7 +580,6 @@ describe('DocumentWorkflowService', () => {
           .get(published.publication.id),
       ),
     ).toEqual({ publication_no: 1 });
-
     const draft = workflow.unpublish({
       documentId: published.document.id,
       expectedDocumentRowVersion: published.document.rowVersion,
@@ -626,19 +595,16 @@ describe('DocumentWorkflowService', () => {
       ),
     ).toThrow();
   });
-
   it('replays task events with a sequence cursor and bounded pages', async () => {
     const { workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
       idempotencyKey: 'event-replay',
     });
-
     const first = workflow.getTaskEvents({ taskId: created.task.id, limit: 2 });
     expect(first.events.map((event) => event.sequence)).toEqual([0, 1]);
     expect(first.hasMore).toBe(true);
     expect(first.nextSequence).toBe(1);
-
     const second = workflow.getTaskEvents({
       taskId: created.task.id,
       afterSequence: first.nextSequence,
@@ -651,7 +617,6 @@ describe('DocumentWorkflowService', () => {
     expect(second.hasMore).toBe(false);
     expect(second.nextSequence).toBe(3);
   });
-
   it('does not replay task events across project boundaries', async () => {
     const { workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
@@ -666,12 +631,10 @@ describe('DocumentWorkflowService', () => {
     services.push(isolatedProjects);
     isolatedProjects.create(join(directory, 'project'), 'Isolated Project');
     const isolatedWorkflow = new DocumentWorkflowService(isolatedProjects);
-
     expect(() => isolatedWorkflow.getTaskEvents({ taskId: created.task.id })).toThrow(
       'Agent task was not found.',
     );
   });
-
   it('reuses an idempotent task and rejects a stale editor', async () => {
     const { workflow, assistant } = await setup();
     const first = workflow.createDocumentDraftFromMessage({
@@ -686,7 +649,6 @@ describe('DocumentWorkflowService', () => {
     });
     expect(repeated.task.id).toBe(first.task.id);
     expect(repeated.document.id).toBe(first.document.id);
-
     expect(() =>
       workflow.saveDraft({
         documentId: first.document.id,
@@ -696,28 +658,24 @@ describe('DocumentWorkflowService', () => {
       }),
     ).toThrow(DocumentWorkflowError);
   });
-
   it('does not allow user messages to become agent document artifacts', async () => {
     const { workflow, user } = await setup();
     expect(() => workflow.createDocumentDraftFromMessage({ messageId: user.id })).toThrow(
       'Only completed assistant messages',
     );
   });
-
   it('keeps the task provenance when a user revises an agent draft', async () => {
     const { workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
       messageId: assistant.id,
       idempotencyKey: 'revision-request',
     });
-
     const revised = workflow.saveDraft({
       documentId: created.document.id,
       title: 'User revised draft',
       contentMarkdown: '# User revision',
       expectedDocumentRowVersion: created.document.rowVersion,
     });
-
     expect(revised.currentVersion?.sourceTaskId).toBe(created.task.id);
     expect(workflow.getTask({ taskId: created.task.id }).documents.at(-1)).toMatchObject({
       documentVersionId: revised.currentVersion?.id,
@@ -726,7 +684,6 @@ describe('DocumentWorkflowService', () => {
     expect(
       workflow.listTaskLog({ limit: 20 }).items.filter((item) => item.sourceId === created.task.id),
     ).toHaveLength(1);
-
     const review = workflow.submitReview({
       documentId: revised.id,
       expectedDocumentRowVersion: revised.rowVersion,
@@ -743,7 +700,6 @@ describe('DocumentWorkflowService', () => {
       outcome: 'published',
     });
   });
-
   it('returns an in-review draft for changes without completing its Agent task', async () => {
     const { workflow, assistant } = await setup();
     const created = workflow.createDocumentDraftFromMessage({
@@ -755,18 +711,15 @@ describe('DocumentWorkflowService', () => {
       expectedDocumentRowVersion: created.document.rowVersion,
     });
     const reviewed = workflow.getDocument(created.document.id);
-
     const review = workflow.requestChanges({
       documentId: reviewed.id,
       expectedDocumentRowVersion: reviewed.rowVersion,
       comment: '补充人物动机。',
     });
-
     expect(review).toMatchObject({ status: 'changes_requested', comment: '补充人物动机。' });
     const returned = workflow.getDocument(created.document.id);
     expect(returned.currentVersion?.state).toBe('changes_requested');
     expect(workflow.getTask({ taskId: created.task.id }).task.status).toBe('waiting_review');
-
     const revised = workflow.saveDraft({
       documentId: returned.id,
       title: returned.title,
@@ -775,7 +728,6 @@ describe('DocumentWorkflowService', () => {
     });
     expect(revised.currentVersion).toMatchObject({ state: 'draft', sourceTaskId: created.task.id });
   });
-
   it('audits manual saves, restores, review decisions, and rejection separately from task events', async () => {
     const { projects, workflow } = await setup();
     const first = workflow.saveDraft({
@@ -813,7 +765,6 @@ describe('DocumentWorkflowService', () => {
       expectedDocumentRowVersion: secondReview.rowVersion,
       comment: 'Not ready',
     });
-
     expect(submitted.status).toBe('pending');
     expect(
       projects.access(false, (database) =>

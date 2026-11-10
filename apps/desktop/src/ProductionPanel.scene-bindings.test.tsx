@@ -250,6 +250,42 @@ function mock(
 }
 
 describe('scene production bindings', () => {
+  it('waits for scene bindings before enabling video submission after form restoration', async () => {
+    mock(scene);
+    const fallback = vi.mocked(callWorker).getMockImplementation()!;
+    let release!: (scenes: SceneInfo[]) => void;
+    const pending = new Promise<SceneInfo[]>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(callWorker).mockImplementation(((method: string, params: Record<string, unknown>) =>
+      method === 'scene.list' ? pending : fallback(method as never, params)) as typeof callWorker);
+    render(
+      <ProductionPanel
+        expanded
+        capability="REFERENCE_TO_VIDEO"
+        projectId="project"
+        sceneId="scene"
+        shotId="shot"
+        seedPrompt="角色回身"
+        seedImages={['https://example.com/actor.png']}
+        writable
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '提交视频任务' })).toHaveAttribute(
+        'title',
+        '正在读取场次绑定，请稍候；完成后即可提交。',
+      ),
+    );
+    const submit = screen.getByRole('button', { name: '提交视频任务' });
+    expect(submit).toBeDisabled();
+    fireEvent.click(submit);
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'video.generate.prepare'),
+    ).toBe(false);
+    release([scene]);
+    await waitFor(() => expect(submit).toBeEnabled());
+  });
   it.each(['cn.bytedance.seedance2-0.video', 'cn.bytedance.seedance2-5.video'])(
     'submits structured public references for UniComp %s and waits for cost approval',
     async (contractId) => {
@@ -774,6 +810,14 @@ describe('scene production bindings', () => {
       />,
     );
     await screen.findByText('已填入制作内容');
+    // The status fallback can render before the initial compile has installed
+    // its source subscription. Wait for the actual filled form before updating it.
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: /提示词/ })).toHaveTextContent('中的角色「林澈」'),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '重新填入制作内容' })).toBeEnabled(),
+    );
     latest = result('new-image', 2);
     window.dispatchEvent(new Event('production-source-updated'));
     expect(await screen.findByText(/制作说明或参考资料已更新/)).toBeVisible();
@@ -1101,7 +1145,19 @@ describe('scene production bindings', () => {
         expect(screen.getByRole('button', { name: '提交视频任务' })).toBeEnabled(),
       );
       await waitFor(() => expect(screen.getByRole('checkbox', { name: /林澈/ })).toBeChecked());
-      if (!enabled) fireEvent.click(screen.getByRole('checkbox', { name: /林澈/ }));
+      await waitFor(() =>
+        expect(screen.getByRole('textbox', { name: /提示词/ })).toHaveTextContent(
+          '【输入音频说明】',
+        ),
+      );
+      if (!enabled) {
+        fireEvent.click(screen.getByRole('checkbox', { name: /林澈/ }));
+        await waitFor(() =>
+          expect(screen.getByRole('textbox', { name: /提示词/ })).not.toHaveTextContent(
+            '【输入音频说明】',
+          ),
+        );
+      }
       fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
       await screen.findByText(/草稿已保存/);
       expect(saved?.prompt).toContain('图 1中的林澈回身');

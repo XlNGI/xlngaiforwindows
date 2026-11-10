@@ -21,14 +21,12 @@ import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { ExecutionPool } from './execution-pool.js';
 import { ProductionService } from './production-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
-
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 async function fileHash(path: string): Promise<string> {
   const digest = createHash('sha256');
   for await (const chunk of createReadStream(path)) digest.update(chunk as Buffer);
   return digest.digest('hex');
 }
-
 /** A local, explicit selection. No candidate is adopted and no Provider is called by extraction. */
 export class ShotContinuityService {
   private readonly controllers = new Set<AbortController>();
@@ -38,11 +36,9 @@ export class ShotContinuityService {
     private readonly ffmpeg = new FfmpegRuntime(),
     private readonly capacity = new ExecutionPool(),
   ) {}
-
   cancelAll(): void {
     for (const controller of this.controllers) controller.abort();
   }
-
   resolveAssets(shotId: string, assetIds: string[]): AssetInfo[] {
     this.get(shotId);
     if (assetIds.length > 12 || new Set(assetIds).size !== assetIds.length)
@@ -52,7 +48,6 @@ export class ShotContinuityService {
       return this.assets.getAssetInfo(id);
     });
   }
-
   get(shotId: string): ShotContinuityContext {
     return this.projects.access(false, (database, project) => {
       const repo = createRepositories(database);
@@ -131,11 +126,11 @@ export class ShotContinuityService {
       const stale = targetStale || sourceStale;
       const currentPrompt = new ContentService(this.projects)
         .listShots(shot.sceneId)
-        .find((item) => item.id === shotId)?.authoringIR?.prompt;
+        .find((item) => item.id === shotId)?.prompt;
       return {
         ...state,
         currentShotRowVersion: shot.rowVersion,
-        ...(binding ? { binding: { ...binding, videoPrompt: currentPrompt } } : {}),
+        ...(binding ? { binding: { ...binding, prompt: currentPrompt } } : {}),
         previousShot,
         videos,
         images,
@@ -144,7 +139,6 @@ export class ShotContinuityService {
       };
     });
   }
-
   private source(shotId: string, videoAssetId: string) {
     const context = this.get(shotId);
     const asset = this.assets.getAssetInfo(videoAssetId);
@@ -182,7 +176,6 @@ export class ShotContinuityService {
       token: hash([shot, asset.id, asset.contentHash, asset.relativePath, asset.sizeBytes]),
     };
   }
-
   async probe(shotId: string, videoAssetId: string) {
     return this.work(async (signal) => {
       const source = this.source(shotId, videoAssetId);
@@ -195,7 +188,6 @@ export class ShotContinuityService {
       return { durationMs: probe.durationMs, fps: probe.fps!, sourceToken: source.token };
     });
   }
-
   private async verifyBindingFiles(context: ShotContinuityContext, signal: AbortSignal) {
     const binding = context.binding!;
     const sessionId = this.projects.currentSessionId();
@@ -219,12 +211,10 @@ export class ShotContinuityService {
     }
     this.assertSession(sessionId, signal);
   }
-
   private assertSession(sessionId: string | undefined, signal?: AbortSignal) {
     if (signal?.aborted || this.projects.currentSessionId() !== sessionId)
       throw new Error('项目运行已结束，请重新打开镜头。');
   }
-
   private async verifySource(
     source: ReturnType<ShotContinuityService['source']>,
     signal: AbortSignal,
@@ -235,7 +225,6 @@ export class ShotContinuityService {
       throw new Error('来源视频或镜头内容已变化，请重新选帧。');
     this.assertSession(source.sessionId, signal);
   }
-
   private async work<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController();
     this.controllers.add(controller);
@@ -245,7 +234,6 @@ export class ShotContinuityService {
       this.controllers.delete(controller);
     }
   }
-
   private async temporary<T>(root: string, run: (directory: string) => Promise<T>): Promise<T> {
     const parent = resolveProjectRelativePath(root, 'cache/shot-continuity');
     await mkdir(parent, { recursive: true });
@@ -256,7 +244,6 @@ export class ShotContinuityService {
       await rm(directory, { recursive: true, force: true });
     }
   }
-
   /** Explicit user import only; never called by Agent retrieval or ordinary attachment handling. */
   async importFiles(shotId: string, sourcePaths: string[]): Promise<AssetInfo[]> {
     this.projects.access(true, () => undefined);
@@ -272,7 +259,10 @@ export class ShotContinuityService {
     return this.work((signal) =>
       this.capacity.run('ffmpeg', project.id, signal, () =>
         this.temporary(project.rootPath, async (directory) => {
-          const staged: Array<{ asset: AssetInfo; path: string }> = [];
+          const staged: Array<{
+            asset: AssetInfo;
+            path: string;
+          }> = [];
           const selected: AssetInfo[] = [];
           const created: string[] = [];
           let committed = false;
@@ -332,7 +322,11 @@ export class ShotContinuityService {
                     `SELECT id FROM assets WHERE project_id=? AND content_hash=? AND deleted_at IS NULL
                   AND (kind LIKE '%video%')=? LIMIT 1`,
                   )
-                  .get(project.id, contentHash, image ? 0 : 1) as { id: string } | undefined;
+                  .get(project.id, contentHash, image ? 0 : 1) as
+                  | {
+                      id: string;
+                    }
+                  | undefined;
                 if (!row) return undefined;
                 try {
                   this.assets.assetMediaSource({ assetId: row.id });
@@ -423,7 +417,6 @@ export class ShotContinuityService {
       ),
     );
   }
-
   async preview(params: ShotContinuityPreviewParams) {
     return this.work(async (signal) => {
       const source = this.source(params.shotId, params.videoAssetId);
@@ -451,7 +444,6 @@ export class ShotContinuityService {
       );
     });
   }
-
   async confirm(params: ShotContinuityConfirmParams): Promise<ShotContinuityContext> {
     if (
       !params.timesMs.length ||
@@ -482,7 +474,6 @@ export class ShotContinuityService {
       params,
     );
   }
-
   async confirmSelection(
     params: ShotContinuitySelectionParams,
     legacy?: ShotContinuityConfirmParams,
@@ -719,7 +710,6 @@ export class ShotContinuityService {
       );
     });
   }
-
   async reconfirm(
     shotId: string,
     expectedRowVersion: number,
@@ -749,7 +739,7 @@ export class ShotContinuityService {
           writeShotContinuity(database, project.id, shotId, expectedRowVersion, {
             ...latest.binding,
             targetRowVersion: expectedTargetRowVersion,
-            videoPrompt: undefined,
+            prompt: undefined,
           });
           createRepositories(database).projects.touch(new Date().toISOString());
         })(),
@@ -757,7 +747,6 @@ export class ShotContinuityService {
       return this.get(shotId);
     });
   }
-
   clear(shotId: string, expectedRowVersion: number) {
     this.projects.access(true, (database, project) => {
       this.get(shotId);
@@ -765,18 +754,15 @@ export class ShotContinuityService {
     });
     return this.get(shotId);
   }
-
   private binding(shotId: string, expectedRowVersion: number): ShotContinuityBinding {
     const context = this.get(shotId);
     if (!context.binding || context.rowVersion !== expectedRowVersion || context.stale)
       throw new Error('请先确认当前镜头的选帧；剧情或衔接设置变化后需要重新确认。');
     return context.binding;
   }
-
   firstFrame(shotId: string, expectedRowVersion: number, assetId: string) {
     return this.reference(shotId, expectedRowVersion, assetId, 'first-frame');
   }
-
   reference(
     shotId: string,
     expectedRowVersion: number,
@@ -810,12 +796,11 @@ export class ShotContinuityService {
             : continuityReferenceImageIds(binding).filter((id) => id !== assetId),
         referenceRole: role,
         firstFrameAssetId: role === 'first-frame' ? assetId : undefined,
-        videoPrompt: undefined,
+        prompt: undefined,
       });
     });
     return this.get(shotId);
   }
-
   references(params: ShotContinuityReferencesParams) {
     if (
       params.assetIds.length > 12 ||
@@ -840,12 +825,11 @@ export class ShotContinuityService {
         referenceAssetId: undefined,
         referenceRole: undefined,
         firstFrameAssetId: params.firstFrameAssetId,
-        videoPrompt: undefined,
+        prompt: undefined,
       });
     });
     return this.get(params.shotId);
   }
-
   saveIntent(shotId: string, expectedRowVersion: number, notes: string) {
     if (notes.length > 4000) throw new Error('参考图生成要求不能超过 4000 字符。');
     this.projects.access(true, (database, project) => {
@@ -854,12 +838,11 @@ export class ShotContinuityService {
         ...binding,
         notes: notes.trim(),
         imagePrompt: notes.trim() === binding.notes ? binding.imagePrompt : undefined,
-        videoPrompt: undefined,
+        prompt: undefined,
       });
     });
     return this.get(shotId);
   }
-
   savePrompt(shotId: string, expectedRowVersion: number, kind: 'image' | 'video', prompt: string) {
     if (kind !== 'image') throw new Error('请在镜头正文中编辑视频提示词；衔接仅准备参考图。');
     if (!prompt.trim() || prompt.length > 20000) throw new Error('提示词需要为 1–20000 字符。');
@@ -868,17 +851,15 @@ export class ShotContinuityService {
       writeShotContinuity(database, project.id, shotId, expectedRowVersion, {
         ...binding,
         imagePrompt: prompt,
-        videoPrompt: undefined,
+        prompt: undefined,
       });
     });
     return this.get(shotId);
   }
-
   /** Compatibility endpoint: prompt authoring now belongs to the unified Agent. */
   preparePrompt(): never {
     throw new Error('请通过会话 Agent 编写参考图提示词，或在镜头页面直接填写。');
   }
-
   readForAgent(shotId: string) {
     const context = this.get(shotId);
     const production = new ProductionService(this.projects);
@@ -893,12 +874,11 @@ export class ShotContinuityService {
         title: context.previousShot.title,
       },
       binding: context.binding,
-      currentShot: production.read({ kind: 'shot', id: shotId }).authoringIR,
+      currentShot: production.read({ kind: 'shot', id: shotId }),
       references: media.inputs.referenceImages,
       visualInputs: this.visualInputs(context, media),
     };
   }
-
   saveForAgent(
     shotId: string,
     expectedRowVersion: number,
@@ -915,7 +895,6 @@ export class ShotContinuityService {
       })(),
     );
   }
-
   private visualInputs(
     context: ShotContinuityContext,
     media = new ProductionService(this.projects).readMediaForAgent({
@@ -923,7 +902,13 @@ export class ShotContinuityService {
       id: context.shotId,
     }),
   ) {
-    const inputs = new Map<string, { assetId: string; label: string }>();
+    const inputs = new Map<
+      string,
+      {
+        assetId: string;
+        label: string;
+      }
+    >();
     const binding = context.binding;
     for (const [index, assetId] of (binding ? continuitySourceImageIds(binding) : []).entries()) {
       const frame = binding?.frames.find((item) => item.assetId === assetId);
@@ -943,7 +928,6 @@ export class ShotContinuityService {
     if (inputs.size > 36) throw new Error('当前参考图片超过 36 张，请先缩小镜头参考范围。');
     return [...inputs.values()];
   }
-
   /** Pixels leave only as transient image content after Worker tool authorization. */
   async imagesForAgent(
     shotId: string,

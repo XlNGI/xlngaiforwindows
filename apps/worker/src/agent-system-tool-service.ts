@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { executeAgentBusiness } from './agent-business-execution.js';
+import { ProductionBundleService } from './production-bundle-service.js';
 import { savedProductionReceipts } from './agent-saved-production-receipts.js';
 import { taskCheckpoint } from './agent-task-checkpoints.js';
+import { inspectAgentTask } from './agent-task-inspection.js';
 import { AgentInputService } from './agent-input-service.js';
 import type Database from 'better-sqlite3';
 import type {
@@ -39,8 +41,7 @@ import { SceneStructureSubmissionService } from './scene-structure-submission-se
 import { splitConversationRequest } from './conversation-request.js';
 import { ProductionService } from './production-service.js';
 import { AgentProductionQueryService } from './agent-production-query-service.js';
-import { ShotTimingService } from './shot-timing-service.js';
-import { ShotPromptService } from './shot-prompt-service.js';
+import { ShotEditService } from './shot-edit-service.js';
 import { describeProductionAsset, readAssetProvenance } from './production-media-view.js';
 import type { ProductionTarget } from '@ai-video/contracts';
 import type { NovelBatchService } from './novel-batch-service.js';
@@ -158,6 +159,12 @@ export class AgentSystemToolService {
   ): Record<string, unknown> {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
+    if (operation === 'production.bundle' || operation === 'production.bundle.submit') {
+      if (!this.documents) throw unavailable('Document workflow');
+      return new ProductionBundleService(this.projects, this.content, this.documents, (value) =>
+        unifiedAgentToolRegistry.serializeResult(value),
+      ).execute(args, identity, operation === 'production.bundle.submit');
+    }
     if (
       identity.taskId &&
       unifiedAgentToolRegistry.require(operation).executionLane !== 'parallel-readonly'
@@ -185,6 +192,9 @@ export class AgentSystemToolService {
     identity: AgentSystemToolIdentity,
   ): Record<string, unknown> {
     switch (operation) {
+      case 'production.bundle':
+      case 'production.bundle.submit':
+        throw new Error('Bundle operations require the dedicated atomic boundary.');
       case 'shot.continuity.read':
         rejectUnknown(args, ['shotId', 'includeImages']);
         if (args.includeImages !== undefined && typeof args.includeImages !== 'boolean')
@@ -325,9 +335,9 @@ export class AgentSystemToolService {
       case 'scene.submit_structure':
         return new SceneStructureSubmissionService(this.projects).submit(args, identity);
       case 'scene.update_shot_timings':
-        return new ShotTimingService(this.projects).update(args, identity);
+        return new ShotEditService(this.projects).updateTimings(args, identity);
       case 'scene.update_shot_prompts':
-        return new ShotPromptService(this.projects).update(args, identity);
+        return new ShotEditService(this.projects).updatePrompts(args, identity);
       case 'scene.structure.stage':
         return new SceneStructureSubmissionService(this.projects).stage(args, identity);
       case 'document.submit_draft':
@@ -612,6 +622,13 @@ export class AgentSystemToolService {
           };
         }
         if (decision === 'inspect') {
+          const receipts = savedProductionReceipts(
+            database,
+            project.id,
+            { generationId: target.id },
+            receiptOffset,
+            receiptLimit,
+          );
           const artifacts = database
             .prepare(
               `SELECT sets.id,sets.title,sets.status FROM agent_change_sets sets
@@ -631,15 +648,15 @@ export class AgentSystemToolService {
             targetGenerationId: target.id,
             targetStatus: target.status,
             targetRequest: splitConversationRequest(target.user_content).request.slice(0, 800),
+            inspectionSummary: inspectAgentTask(database, project.id, target.id),
             artifacts,
             outputs,
-            savedProductionReceipts: savedProductionReceipts(
-              database,
-              project.id,
-              { generationId: target.id },
-              receiptOffset,
-              receiptLimit,
-            ),
+            savedProductionReceipts: receipts,
+            historyPage: {
+              offset: receipts.offset,
+              nextOffset: receipts.nextOffset,
+              complete: receipts.nextOffset === undefined,
+            },
             dependencyEstablished: false,
             rationale,
           };

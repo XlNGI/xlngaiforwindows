@@ -769,12 +769,14 @@ function MediaTaskDetailPanel({
         <div className="task-log-detail-error" role="alert">
           <AlertCircle size={15} />
           <div>
-            <p>{errorFeedback.userMessage}</p>
-            {(failureKind || errorFeedback.technicalDetail) && (
+            <p>{detail.error}</p>
+            {errorFeedback.userMessage !== detail.error?.trim() && (
+              <p>{errorFeedback.userMessage}</p>
+            )}
+            {failureKind && (
               <details>
                 <summary>技术信息</summary>
-                {failureKind && <code>failureKind: {failureKind}</code>}
-                {errorFeedback.technicalDetail && <code>{errorFeedback.technicalDetail}</code>}
+                <code>failureKind: {failureKind}</code>
               </details>
             )}
           </div>

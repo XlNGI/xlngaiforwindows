@@ -1,0 +1,16 @@
+{
+  "at": "2026-11-09T09:14:15.364Z",
+  "executable": "E:/p22/xlngaiforwindowsP22/apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+  "isolatedProject": true,
+  "restartedNewChildOnly": true,
+  "documentCount": 5,
+  "projectIdRetained": true,
+  "documentsUnchanged": true,
+  "integrity": {
+    "ok": true,
+    "messages": ["ok"],
+    "schemaVersion": 76
+  },
+  "providerCalls": 0,
+  "userAppRestarted": false
+}

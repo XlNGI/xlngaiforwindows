@@ -512,13 +512,26 @@ export function isWorkBoundary(entry: HistoryEntry, seenProgress: Set<string>): 
   if (entry.role !== 'toolResult' || entry.isError || typeof entry.content !== 'string')
     return false;
   const result = parseRecord(entry.content);
+  if (entry.toolName === 'production.bundle' && result && !result.error) {
+    const key =
+      result.candidateChanged === true
+        ? `bundle-candidate:${String(result.bundleId)}:${String(result.revision)}`
+        : result.status === 'bundle_committed'
+          ? `bundle-commit:${String(result.bundleId)}`
+          : result.status === 'bundle_readback_verified'
+            ? `bundle-readback:${String(result.fingerprint)}`
+            : undefined;
+    if (!key || seenProgress.has(key)) return false;
+    seenProgress.add(key);
+    return true;
+  }
   if (entry.toolName === 'conversation.task.checkpoint' && result && !result.error) {
     const keys: string[] = [];
     if (result.status === 'task_plan_saved' && typeof result.contractHash === 'string')
       keys.push(`contract:${result.contractHash}`);
     if (
       result.status === 'task_review_recorded' &&
-      [3, 4].includes(Number(result.protocolVersion))
+      [3, 4, 5].includes(Number(result.protocolVersion))
     ) {
       if (Array.isArray(result.coverage))
         for (const raw of result.coverage) {
@@ -625,6 +638,8 @@ export interface ReadLoopSupervision {
   counts?: Array<[string, number]>;
   preparationCounts?: Array<[string, number]>;
   failureCounts?: Array<[string, number]>;
+  /** Hashed related locators keep unrelated reads/saves from forgiving a known blocker. */
+  failureScopes?: Array<[string, string[]]>;
   seenProgress?: string[];
   seenDiscovery?: string[];
   cursor?: number;
@@ -634,9 +649,19 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
   const counts = new Map<string, number>(durable?.counts);
   const preparationCounts = new Map<string, number>(durable?.preparationCounts);
   const failureCounts = new Map<string, number>(durable?.failureCounts);
+  const failureScopes = new Map<string, string[]>(durable?.failureScopes);
   const calls = new Map<string, unknown>();
   const seenProgress = new Set<string>(durable?.seenProgress);
   const seenDiscovery = new Set<string>(durable?.seenDiscovery);
+  const clearFailures = (locators: Set<string>, all = false) => {
+    for (const key of failureCounts.keys()) {
+      const scope = failureScopes.get(key);
+      if (all || !scope || scope.some((id) => locators.has(id))) {
+        failureCounts.delete(key);
+        failureScopes.delete(key);
+      }
+    }
+  };
   for (const message of context.messages) {
     if (message.role === 'assistant')
       for (const call of message.content)
@@ -656,7 +681,17 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
     if (isWorkBoundary(entry, seenProgress)) {
       counts.clear();
       preparationCounts.clear();
-      failureCounts.clear();
+      const result = typeof entry.content === 'string' ? parseRecord(entry.content) : undefined;
+      // A changed contract hash can reflect unrelated prose or targets. Review
+      // arguments also contain rejected targets; only accepted coverage is progress.
+      const locators =
+        entry.toolName === 'conversation.task.checkpoint'
+          ? failureLocators(result?.status === 'task_review_recorded' ? result.coverage : undefined)
+          : failureLocators(
+              calls.get(message.role === 'toolResult' ? message.toolCallId : ''),
+              result,
+            );
+      clearFailures(locators, entry.role === 'user');
       continue;
     }
     if (message.role === 'toolResult') {
@@ -665,19 +700,47 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
         // Keep targets, versions and structural repairs distinct. Rewording checkpoint
         // notes cannot fix the same error; retain only their type/length validity.
         // Diagnostic state contains only hashes and is not a total call limit.
+        const scoped = scopedFailureIdentity(
+          message.toolName,
+          calls.get(message.toolCallId),
+          result?.error ?? entry.content,
+        );
         const key = createHash('sha256')
           .update(
-            JSON.stringify([
-              message.toolName,
-              canonicalFailureArguments(
-                checkpointFailureArguments(message.toolName, calls.get(message.toolCallId)),
-              ),
-              canonicalFailureArguments(result?.error ?? entry.content),
-            ]),
+            JSON.stringify(
+              scoped?.identity ?? [
+                message.toolName,
+                canonicalFailureArguments(
+                  failureRepairIdentity(
+                    message.toolName,
+                    calls.get(message.toolCallId),
+                    result?.error ?? entry.content,
+                  ),
+                ),
+                canonicalFailureArguments(result?.error ?? entry.content),
+              ],
+            ),
           )
           .digest('hex');
         failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1);
+        if (scoped) failureScopes.set(key, scoped.locators);
         continue;
+      }
+      if (
+        message.toolName === 'conversation.task.checkpoint' &&
+        result?.status === 'task_result_read'
+      ) {
+        const args = calls.get(message.toolCallId);
+        const discovery = JSON.stringify([
+          result.resultId,
+          result.contentHash,
+          result.offset,
+          result.endOffset,
+        ]);
+        if (!seenDiscovery.has(discovery)) {
+          seenDiscovery.add(discovery);
+          clearFailures(failureLocators(args, { id: result.resultId }));
+        }
       }
     }
     if (
@@ -691,7 +754,7 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
         if (entry.toolName !== 'tools.load' && !seenDiscovery.has(key)) {
           seenDiscovery.add(key);
           preparationCounts.clear();
-          failureCounts.clear();
+          clearFailures(new Set());
         }
         preparationCounts.set(key, (preparationCounts.get(key) ?? 0) + 1);
       }
@@ -709,7 +772,9 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
     if (!seenDiscovery.has(discoveryKey)) {
       seenDiscovery.add(discoveryKey);
       preparationCounts.clear();
-      failureCounts.clear();
+      clearFailures(
+        failureLocators(calls.get(message.role === 'toolResult' ? message.toolCallId : ''), result),
+      );
     }
     const count = (counts.get(key) ?? 0) + 1;
     counts.set(key, count);
@@ -719,6 +784,7 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
       counts: [...counts],
       preparationCounts: [...preparationCounts],
       failureCounts: [...failureCounts],
+      failureScopes: [...failureScopes],
       seenProgress: [...seenProgress],
       seenDiscovery: [...seenDiscovery],
     });
@@ -734,6 +800,134 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
     throw new Error(
       'AGENT_REPEATED_READ_STALLED: 同一版本、同一范围的资料已重复读取，期间没有新的用户指令或保存进展。已停止无效循环；用户要求和已保存进度完整保留。',
     );
+}
+
+const locatorHash = (id: string) => createHash('sha256').update(id).digest('hex');
+
+function failureLocators(...values: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  const fields = new Set([
+    'id',
+    'key',
+    'targetId',
+    'targetIds',
+    'sourceId',
+    'documentId',
+    'sceneId',
+    'sceneIds',
+    'shotId',
+    'shotIds',
+    'referenceId',
+    'requirementId',
+    'reviewId',
+  ]);
+  const visit = (value: unknown, depth = 0) => {
+    if (depth > 6 || !value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (fields.has(key)) {
+        if (typeof child === 'string') ids.add(locatorHash(child));
+        if (Array.isArray(child))
+          for (const id of child) if (typeof id === 'string') ids.add(locatorHash(id));
+      }
+      if (key !== 'arguments' && key !== 'content') visit(child, depth + 1);
+    }
+  };
+  for (const value of values) visit(value);
+  return ids;
+}
+
+function scopedFailureIdentity(
+  tool: string,
+  args: unknown,
+  error: unknown,
+): { identity: unknown; locators: string[] } | undefined {
+  if (tool !== 'conversation.task.checkpoint' || !isRecord(args)) return undefined;
+  const repair = isRecord(error) && isRecord(error.repair) ? error.repair : undefined;
+  if (repair && ['plan', 'review'].includes(String(repair.kind))) {
+    const related = ['planKey', 'targetId', 'issueId', 'requirementId', 'reviewId'].flatMap(
+      (key) => (typeof repair[key] === 'string' ? [locatorHash(repair[key])] : []),
+    );
+    if (repair.kind === 'plan' && Array.isArray(args.deliverables)) {
+      const item: unknown = args.deliverables.find(
+        (item: unknown) => isRecord(item) && item.key === repair.planKey,
+      );
+      related.push(...failureLocators(item));
+    }
+    return {
+      identity: [
+        tool,
+        repair.kind,
+        repair.code,
+        repair.field,
+        repair.planKey,
+        repair.targetId,
+        repair.issueId,
+        repair.requirementId,
+        repair.reviewId,
+      ],
+      locators: related,
+    };
+  }
+  // Legacy immutable results still need the same supervision after a restart.
+  const message =
+    typeof error === 'string'
+      ? error
+      : isRecord(error) && typeof error.message === 'string'
+        ? error.message
+        : '';
+  const index = /deliverables\[(\d+)\]/.exec(message)?.[1];
+  if (
+    args.operation === 'plan' &&
+    index &&
+    message.includes('confirmed user obligations') &&
+    Array.isArray(args.deliverables)
+  ) {
+    const item: unknown = args.deliverables[Number(index)];
+    if (isRecord(item) && typeof item.key === 'string')
+      return {
+        identity: [tool, 'plan', 'TASK_PLAN_USER_OBLIGATION', item.key],
+        locators: [...failureLocators(item)],
+      };
+  }
+  const code = /TASK_REVIEW_[A-Z_]+/.exec(message)?.[0];
+  if (args.operation === 'review' && code && typeof args.reviewId === 'string')
+    return {
+      identity: [tool, 'review', code, args.reviewId],
+      locators: [locatorHash(args.reviewId)],
+    };
+  return undefined;
+}
+
+/** Group only known argument failures; opaque errors keep the complete fingerprint. */
+function failureRepairIdentity(tool: string, args: unknown, error: unknown): unknown {
+  const message =
+    typeof error === 'string'
+      ? error
+      : isRecord(error) && typeof error.message === 'string'
+        ? error.message
+        : '';
+  if (tool === 'novel.chapter.write_draft' && isRecord(args)) {
+    const field =
+      /field=([\w,]+)/.exec(message)?.[1] ??
+      (message.includes('New chapters cannot specify an existing target or CAS')
+        ? 'create-target-or-CAS'
+        : undefined);
+    if (field)
+      return {
+        action: args.action,
+        resourceId: args.resourceId,
+        chapterId: args.chapterId,
+        field,
+        expectedChapterRowVersion: args.expectedChapterRowVersion,
+        expectedDocumentRowVersion: args.expectedDocumentRowVersion,
+        baseVersionId: args.baseVersionId,
+      };
+  }
+  return checkpointFailureArguments(tool, args);
 }
 
 function checkpointFailureArguments(toolName: string, args: unknown): unknown {

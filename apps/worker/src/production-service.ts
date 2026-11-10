@@ -5,8 +5,7 @@ import {
   productionShotReferenceIds,
   productionFrameInputConflict,
   seedProductionInputs,
-  validateProductionAuthoringIR,
-  type ProductionAuthoringIR,
+  type PromptBindingIR,
   type ProductionCompileParams,
   type ProductionCompileResult,
   type ProductionDefaults,
@@ -18,7 +17,6 @@ import {
   type ProductionTarget,
   type ProductionTimelineEntry,
   type SceneCharacterBindingInfo,
-  type SceneInfo,
   type SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
 import {
@@ -32,10 +30,9 @@ import { continuityReferenceImageIds, continuitySourceImageIds } from '@ai-video
 import { ContentService } from './content-service.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { resolveSceneMedia } from './scene-media-service.js';
-import { resolveIRMaterialBindings } from './production-ir-bindings.js';
-import { validateProductionIRReferences } from './project-ir-validation.js';
+import { resolvePromptMaterialBindings } from './prompt-binding-media.js';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import { productionMediaView } from './production-media-view.js';
-
 const hash = (value: unknown) =>
   createHash('sha256')
     .update(
@@ -46,7 +43,6 @@ const hash = (value: unknown) =>
       ),
     )
     .digest('hex');
-
 export function summarizeProductionReadiness(issues: ProductionIssue[]) {
   return {
     readiness: issues.length ? 'needs_attention' : 'ready',
@@ -59,7 +55,6 @@ export function summarizeProductionReadiness(issues: ProductionIssue[]) {
     })),
   };
 }
-
 export function summarizeProductionNotices(notices: ProductionIssue[]) {
   return notices.length
     ? {
@@ -72,16 +67,19 @@ export function summarizeProductionNotices(notices: ProductionIssue[]) {
       }
     : {};
 }
-
-/** Reads and compiles the single persisted scene/shot authoring IR. */
+/** Reads saved text and explicit bindings, then maps ordinary generation parameters. */
 export class ProductionService {
   constructor(private readonly projects: ProjectService) {}
-
   getDefaults(): ProductionDefaultsInfo {
     return this.projects.access(false, (db, project) => {
       const row = db
         .prepare('SELECT row_version,settings_json FROM production_defaults WHERE project_id=?')
-        .get(project.id) as { row_version: number; settings_json: string } | undefined;
+        .get(project.id) as
+        | {
+            row_version: number;
+            settings_json: string;
+          }
+        | undefined;
       return row
         ? {
             rowVersion: row.row_version,
@@ -90,7 +88,6 @@ export class ProductionService {
         : { rowVersion: 0, settings: {} };
     });
   }
-
   saveDefaults(input: {
     expectedRowVersion: number;
     settings: ProductionDefaults;
@@ -100,7 +97,11 @@ export class ProductionService {
       db.transaction(() => {
         const current = db
           .prepare('SELECT row_version FROM production_defaults WHERE project_id=?')
-          .get(project.id) as { row_version: number } | undefined;
+          .get(project.id) as
+          | {
+              row_version: number;
+            }
+          | undefined;
         const version = current?.row_version ?? 0;
         if (version !== input.expectedRowVersion)
           throw new Error('项目生成设置已变化，请重新读取。');
@@ -112,38 +113,25 @@ export class ProductionService {
       })(),
     );
   }
-
   queryVersion(target: ProductionTarget): string {
-    // Version the data this target actually exposes. A shot read does not
-    // contain sibling bodies; their edits must not expire this shot's pages.
-    // Semantic/continuity review has its own explicit dependency graph.
     const read = this.read(target);
     return this.projects.access(false, (db, project) => {
       const content = new ContentService(this.projects);
-      const scene =
-        target.kind === 'scene'
-          ? content.listScenes().find((item) => item.id === target.id)
-          : target.kind === 'shot'
-            ? content
-                .listScenes()
-                .find((item) => item.id === this.findShot(content, target.id).sceneId)
-            : undefined;
-      const shots = scene
-        ? content
-            .listShots(scene.id)
-            .filter((shot) => target.kind === 'scene' || shot.id === target.id)
-        : [];
+      const shots = target.kind === 'scene' ? content.listShots(target.id) : [];
       const ids = new Set<string>();
-      const collect = (ir?: ProductionAuthoringIR) => {
+      for (const bindings of [read.bindings, ...shots.map((shot) => shot.bindings)]) {
         for (const field of [
           'characterDocumentIds',
           'sceneDocumentIds',
           'propDocumentIds',
         ] as const)
-          for (const id of ir?.references?.[field] ?? []) ids.add(id);
-      };
-      collect(read.authoringIR);
-      if (target.kind === 'scene') for (const shot of shots) collect(shot.authoringIR);
+          for (const id of bindings?.[field] ?? []) ids.add(id);
+        if (bindings?.voiceDocumentId) ids.add(bindings.voiceDocumentId);
+        for (const voice of bindings?.voiceBindings ?? []) {
+          ids.add(voice.voiceDocumentId);
+          if (voice.characterDocumentId) ids.add(voice.characterDocumentId);
+        }
+      }
       const documents = [...ids]
         .sort()
         .map(
@@ -154,97 +142,68 @@ export class ProductionService {
               )
               .get(id, project.id) ?? null,
         );
-      return hash([project.id, read, scene, shots, this.getDefaults(), documents]);
+      const parent =
+        target.kind === 'shot'
+          ? content
+              .listScenes()
+              .find((scene) => scene.id === this.findShot(content, target.id).sceneId)
+          : undefined;
+      return hash([project.id, read, shots, parent, this.getDefaults(), documents]);
     });
   }
-
   readForAgent(target: ProductionTarget) {
-    const result = this.read(target);
-    return this.projects.access(false, () => {
-      const content = new ContentService(this.projects);
-      let currentText = '';
-      let scene: SceneInfo | undefined;
-      let shots: ReturnType<ContentService['listShots']> = [];
-      if (target.kind === 'scene') {
-        scene = content.listScenes().find((item) => item.id === target.id);
-        if (!scene) throw new Error('制作场次不存在。');
-        currentText = scene.authoringIR?.prompt ?? '';
-        shots = content.listShots(scene.id);
-      } else if (target.kind === 'shot') {
-        const shot = this.findShot(content, target.id);
-        currentText = shot.authoringIR?.prompt ?? '';
-        scene = content.listScenes().find((item) => item.id === shot.sceneId);
-        shots = [shot];
-      } else {
-        currentText = content.getDocument(target.id).currentVersion?.contentMarkdown ?? '';
-      }
-      return {
-        target,
-        rowVersion: result.rowVersion,
-        authoringIR: result.authoringIR,
-        contentFormat: result.authoringIR
-          ? 'authoring-ir-v1'
-          : target.kind === 'scene' || target.kind === 'shot'
-            ? 'missing'
-            : 'saved-prompt',
-        currentText,
-        issues: result.issues,
-        ...(result.notices?.length ? { notices: result.notices } : {}),
-        estimatedDurationSeconds: result.estimatedDurationSeconds,
-        scene: scene
-          ? (() => {
-              const { authoringIR, ...metadata } = scene;
-              delete metadata.videoPrompt;
-              return {
-                ...metadata,
-                hasPrompt: Boolean(authoringIR?.prompt),
-                hasAuthoringIR: Boolean(authoringIR),
-              };
-            })()
-          : undefined,
-        shots: shots.map(({ authoringIR, ...shot }) => {
-          delete shot.prompt;
-          return {
-            ...shot,
-            hasPrompt: Boolean(authoringIR?.prompt),
-            hasAuthoringIR: Boolean(authoringIR),
-            contentFormat: authoringIR ? 'authoring-ir-v1' : 'missing',
-            timing: authoringIR?.timing,
-            estimatedDurationSeconds: authoringIR?.timing?.estimatedDurationSeconds,
-          };
-        }),
-      };
-    });
+    const result = this.read(target),
+      content = new ContentService(this.projects);
+    const shot = target.kind === 'shot' ? this.findShot(content, target.id) : undefined;
+    const scene =
+      target.kind === 'scene'
+        ? content.listScenes().find((s) => s.id === target.id)
+        : shot
+          ? content.listScenes().find((s) => s.id === shot.sceneId)
+          : undefined;
+    const metadata = scene
+      ? { ...scene, hasPrompt: Boolean(scene.prompt?.trim()), prompt: undefined }
+      : undefined;
+    return {
+      ...result,
+      contentFormat: 'saved-prompt',
+      currentText: result.prompt ?? result.compiledPrompt,
+      scene: metadata,
+      shots: (scene
+        ? content.listShots(scene.id).filter((s) => !shot || s.id === shot.id)
+        : []
+      ).map(({ prompt, ...info }) => ({
+        ...info,
+        hasPrompt: Boolean(prompt),
+        contentFormat: 'saved-prompt',
+        estimatedDurationSeconds: info.timing?.estimatedDurationSeconds,
+      })),
+    };
   }
-
   read(target: ProductionTarget, shotIds?: string[]): ProductionReadResult {
     this.assertTarget(target);
     return this.projects.access(false, (db, project) => {
-      const content = new ContentService(this.projects);
-      const issues: ProductionIssue[] = [];
-      let rowVersion: number;
-      let authoringIR: ProductionAuthoringIR | undefined;
-      let scene: SceneInfo | undefined;
+      const content = new ContentService(this.projects),
+        issues: ProductionIssue[] = [];
+      let rowVersion: number,
+        prompt: string | undefined,
+        bindings: PromptBindingIR | undefined,
+        timing: import('@ai-video/contracts').ProductionTiming | undefined;
       let shots: ReturnType<ContentService['listShots']> = [];
-      let savedPrompt: string | undefined;
-
       if (target.kind === 'scene') {
-        scene = content.listScenes().find((item) => item.id === target.id);
+        const scene = content.listScenes().find((s) => s.id === target.id);
         if (!scene) throw new Error('制作场次不存在。');
-        rowVersion = scene.rowVersion;
-        authoringIR = scene.authoringIR;
+        ({ rowVersion, prompt, timing } = scene);
+        bindings = scene.bindings ?? undefined;
         shots = content.listShots(scene.id);
       } else if (target.kind === 'shot') {
         const shot = this.findShot(content, target.id);
-        const parent = content.listScenes().find((item) => item.id === shot.sceneId);
-        if (!parent) throw new Error('镜头所属场次不存在。');
-        scene = parent;
-        shots = content.listShots(parent.id);
-        rowVersion = shot.rowVersion;
-        authoringIR = shot.authoringIR;
+        ({ rowVersion, prompt, timing } = shot);
+        bindings = shot.bindings ?? undefined;
+        shots = [shot];
       } else {
-        const document = content.getDocument(target.id);
-        const expectedKind = target.kind === 'character' ? 'character' : 'scene';
+        const document = content.getDocument(target.id),
+          expectedKind = target.kind === 'character' ? 'character' : 'scene';
         if (
           document.kind !== expectedKind ||
           document.lifecycleStatus !== 'active' ||
@@ -254,29 +213,13 @@ export class ProductionService {
             )
             .get(target.id)
         )
-          throw new Error(`制作来源目标不是有效的 ${expectedKind} 文档。`);
+          throw new Error('制作来源文档无效。');
         rowVersion = document.rowVersion;
-        savedPrompt = document.currentVersion?.contentMarkdown;
+        prompt = document.currentVersion?.contentMarkdown;
+        bindings = document.currentVersion?.bindings ?? undefined;
       }
-
-      if (authoringIR) {
-        authoringIR = validateProductionAuthoringIR(
-          authoringIR,
-          target.kind === 'shot' ? 'shot' : 'scene',
-        );
-        try {
-          validateProductionIRReferences(db, project.id, authoringIR);
-        } catch (error) {
-          issues.push({
-            code: 'INVALID_IR_REFERENCE',
-            message: error instanceof Error ? error.message : '制作 IR 引用无效。',
-            target,
-          });
-        }
-      }
-
       if (shotIds) {
-        const first = shots.findIndex((shot) => shot.id === shotIds[0]);
+        const first = shots.findIndex((s) => s.id === shotIds[0]);
         if (
           target.kind !== 'scene' ||
           !shotIds.length ||
@@ -285,84 +228,83 @@ export class ProductionService {
           first < 0 ||
           shots
             .slice(first, first + shotIds.length)
-            .map((shot) => shot.id)
+            .map((s) => s.id)
             .join('|') !== shotIds.join('|')
         )
           throw new Error('制作分段必须引用当前场次按顺序连续的真实镜头。');
       }
-
-      const selectedShots = shotIds ? shots.filter((shot) => shotIds.includes(shot.id)) : shots;
-      if (target.kind === 'scene') {
-        for (const shot of selectedShots) {
-          if (!shot.authoringIR) continue;
-          try {
-            validateProductionIRReferences(db, project.id, shot.authoringIR);
-          } catch (error) {
-            issues.push({
-              code: 'INVALID_IR_REFERENCE',
-              message: error instanceof Error ? error.message : '镜头 IR 引用无效。',
-              target: { kind: 'shot', id: shot.id },
-            });
-          }
+      const selected = shotIds ? shots.filter((s) => shotIds.includes(s.id)) : shots;
+      for (const scope of [
+        { bindings, target },
+        ...(target.kind === 'scene'
+          ? selected.map((s) => ({
+              bindings: s.bindings,
+              target: { kind: 'shot' as const, id: s.id },
+            }))
+          : []),
+      ]) {
+        if (!scope.bindings) continue;
+        try {
+          validatePromptBindingReferences(db, project.id, scope.bindings);
+        } catch (error) {
+          issues.push({
+            code: 'INVALID_BINDING_REFERENCE',
+            message: error instanceof Error ? error.message : '绑定无效。',
+            target: scope.target,
+          });
         }
       }
-      const timeline: ProductionTimelineEntry[] = selectedShots.map((shot) => ({
-        shotId: shot.id,
-        title: shot.title,
-        estimatedDurationSeconds: shot.authoringIR?.timing?.estimatedDurationSeconds,
-        ...(shot.authoringIR?.timing ? { timing: shot.authoringIR.timing } : {}),
-        prompt: shot.authoringIR?.prompt ?? '',
-      }));
       let cursor = 0;
-      for (const entry of timeline) {
-        if (entry.estimatedDurationSeconds === undefined) continue;
-        entry.startSeconds = cursor;
-        cursor += entry.estimatedDurationSeconds;
-        entry.endSeconds = cursor;
-      }
-      const shotDurations = timeline.map((entry) => entry.estimatedDurationSeconds);
-      const completeTiming =
-        shotDurations.length > 0 && shotDurations.every((value) => value !== undefined);
+      const timeline: ProductionTimelineEntry[] = selected.map((s) => {
+        const seconds = s.timing?.estimatedDurationSeconds,
+          startSeconds = seconds === undefined ? undefined : cursor;
+        if (seconds !== undefined) cursor += seconds;
+        return {
+          shotId: s.id,
+          title: s.title,
+          prompt: s.prompt ?? '',
+          timing: s.timing,
+          estimatedDurationSeconds: seconds,
+          startSeconds,
+          endSeconds: seconds === undefined ? undefined : cursor,
+        };
+      });
       const estimatedDurationSeconds =
-        target.kind === 'shot'
-          ? authoringIR?.timing?.estimatedDurationSeconds
-          : ((!shotIds ? authoringIR?.timing?.estimatedDurationSeconds : undefined) ??
-            (completeTiming ? shotDurations.reduce((sum, value) => sum + value, 0) : undefined));
-      // A target's prompt is complete. Ranges consume only their selected shots;
-      // open data is never interpreted as reusable scene text.
-      const prompts =
-        authoringIR && !shotIds
-          ? [authoringIR.prompt]
-          : target.kind === 'scene'
-            ? timeline.flatMap((entry) => (entry.prompt ? [entry.prompt] : []))
-            : [];
+        (!shotIds ? timing?.estimatedDurationSeconds : undefined) ??
+        (timeline.length && timeline.every((e) => e.estimatedDurationSeconds !== undefined)
+          ? cursor
+          : undefined);
       const compiledPrompt =
-        target.kind === 'scene' || target.kind === 'shot'
-          ? prompts.length
-            ? prompts.join('\n\n')
-            : undefined
-          : savedPrompt;
+        target.kind === 'scene' && (shotIds || !prompt?.trim())
+          ? timeline
+              .map((e) => e.prompt)
+              .filter(Boolean)
+              .join('\n\n')
+          : prompt;
+      if (!compiledPrompt?.trim())
+        issues.push({ code: 'MISSING_PROMPT', message: '请先保存制作提示词。', target });
       return {
         target,
         rowVersion,
-        ...(authoringIR ? { authoringIR } : {}),
-        ...(prompts.length ? { promptSource: 'authoring-ir' as const } : {}),
-        ...(target.kind !== 'scene' && target.kind !== 'shot' && savedPrompt
-          ? { promptSource: 'saved-prompt' as const }
-          : {}),
+        prompt,
+        bindings,
+        timing,
         issues,
-        ...(compiledPrompt !== undefined ? { compiledPrompt } : {}),
+        promptSource: 'saved-prompt',
+        compiledPrompt,
         ...(target.kind === 'scene' ? { timeline } : {}),
         ...(estimatedDurationSeconds !== undefined ? { estimatedDurationSeconds } : {}),
       };
     });
   }
-
   /** Shared saved binding projection for compilation and the Agent's on-demand media view. */
   private resolveSceneInputs(target: ProductionTarget, shotIds?: string[]) {
     return this.projects.access(false, (db, project) => {
       const content = new ContentService(this.projects);
-      let materialReferences: Array<{ documentId: string; role: 'scene' | 'prop' }> = [];
+      let materialReferences: Array<{
+        documentId: string;
+        role: 'scene' | 'prop';
+      }> = [];
       let sceneInputs: ProductionCompileResult['sceneInputs'];
       const imageBindings: Array<{
         id: string;
@@ -372,7 +314,6 @@ export class ProductionService {
         source: 'auto' | 'manual';
         sourceDocumentId?: string;
       }> = [];
-
       if (target.kind === 'scene' || target.kind === 'shot') {
         const scene =
           target.kind === 'scene'
@@ -430,18 +371,11 @@ export class ProductionService {
             ...(previous?.voiceDisabled ? { voiceDisabled: true } : {}),
           };
         });
-        const bindingIRs: ProductionAuthoringIR[] = scopedReferences.map(
-          ({ shot, references }) => ({
-            schemaVersion: 1,
-            kind: 'shot',
-            prompt: shot.authoringIR?.prompt ?? shot.prompt ?? '',
-            references: {
-              sceneDocumentIds: references.sceneDocumentIds,
-              propDocumentIds: references.propDocumentIds,
-            },
-          }),
-        );
-        const defaultMaterials = resolveIRMaterialBindings(db, project.id, [], ...bindingIRs);
+        const bindings = scopedReferences.map(({ references }) => ({
+          schemaVersion: 1 as const,
+          ...references,
+        }));
+        const defaultMaterials = resolvePromptMaterialBindings(db, project.id, [], ...bindings);
         const defaultMaterialByDocument = new Map(
           defaultMaterials
             .filter((binding) => binding.sourceDocumentId)
@@ -474,7 +408,11 @@ export class ProductionService {
                 .prepare(
                   "SELECT title FROM documents WHERE id=? AND project_id=? AND kind='scene' AND lifecycle_status='active'",
                 )
-                .get(documentId, project.id) as { title: string } | undefined;
+                .get(documentId, project.id) as
+                | {
+                    title: string;
+                  }
+                | undefined;
               if (document)
                 addMaterial({
                   id: `scene:${documentId}`,
@@ -561,11 +499,9 @@ export class ProductionService {
           characterNames: names,
         };
       }
-
       return { sceneInputs, imageBindings, materialReferences };
     });
   }
-
   readMediaForAgent(target: ProductionTarget) {
     this.assertTarget(target);
     if (target.kind !== 'scene' && target.kind !== 'shot')
@@ -583,7 +519,6 @@ export class ProductionService {
       },
     );
   }
-
   compile(params: ProductionCompileParams): ProductionCompileResult {
     const adapter = getAdapter(params.adapterKey);
     if (!adapter) throw new Error('制作模型不存在。');
@@ -603,7 +538,6 @@ export class ProductionService {
         ...(sceneInputs ? { sceneInputs } : {}),
       };
     }
-
     return this.projects.access(false, (db, project) => {
       const issues = [...read.issues];
       const notices: ProductionIssue[] = [];
@@ -614,12 +548,7 @@ export class ProductionService {
       const continuity = continuityState?.binding;
       const video = adapter.capability.endsWith('_VIDEO');
       const { sceneInputs, imageBindings } = this.resolveSceneInputs(params.target, params.shotIds);
-
-      const ir = read.authoringIR ?? {
-        schemaVersion: 1 as const,
-        kind: 'scene' as const,
-        prompt: read.compiledPrompt ?? '',
-      };
+      const ir = { prompt: read.compiledPrompt ?? '', timing: read.timing };
       const compiled = compileProductionParameters(ir, adapter, {
         prompt:
           !video && continuity?.imagePrompt !== undefined
@@ -630,7 +559,6 @@ export class ProductionService {
       });
       issues.push(...compiled.issues);
       notices.push(...compiled.notices);
-
       const inputs =
         selected.length || params.inputImages !== undefined
           ? selected.map((image) => ({ ...image, url: `project-asset://${image.assetId}` }))
@@ -647,7 +575,12 @@ export class ProductionService {
           .prepare(
             'SELECT kind,relative_path FROM assets WHERE id=? AND project_id=? AND deleted_at IS NULL',
           )
-          .get(image.assetId, project.id) as { kind: string; relative_path: string } | undefined;
+          .get(image.assetId, project.id) as
+          | {
+              kind: string;
+              relative_path: string;
+            }
+          | undefined;
         if (
           !asset ||
           asset.kind.toLowerCase().includes('video') ||
@@ -695,7 +628,6 @@ export class ProductionService {
       return result;
     });
   }
-
   private assertTarget(target: ProductionTarget): void {
     if (
       !target ||
@@ -707,7 +639,6 @@ export class ProductionService {
     )
       throw new Error('制作目标无效。');
   }
-
   private findShot(content: ContentService, shotId: string) {
     const repositories = this.projects.access(false, (db) => createRepositories(db));
     const shot = repositories.shots.get(shotId);
@@ -718,7 +649,6 @@ export class ProductionService {
     if (!activeShot) throw new Error('制作镜头已归档或不存在，请先恢复。');
     return activeShot;
   }
-
   private defaultImages(target: ProductionTarget, video: boolean) {
     if (target.kind !== 'shot') return [];
     return this.projects.access(false, (db, project) => {
@@ -742,7 +672,6 @@ export class ProductionService {
         : [];
     });
   }
-
   private formSource(
     target: ProductionTarget,
     shotIds?: string[],
@@ -770,17 +699,19 @@ export class ProductionService {
       ...(normalizedImages ? { inputImages: normalizedImages } : {}),
     };
   }
-
   private documentTitle(db: Database.Database, projectId: string, id: string): string {
     const row = db
       .prepare(
         "SELECT title FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
       )
-      .get(id, projectId) as { title: string } | undefined;
+      .get(id, projectId) as
+      | {
+          title: string;
+        }
+      | undefined;
     return row?.title ?? '资料';
   }
 }
-
 function planSegments(
   timeline: NonNullable<ProductionReadResult['timeline']>,
   adapter: NonNullable<ReturnType<typeof getAdapter>>,

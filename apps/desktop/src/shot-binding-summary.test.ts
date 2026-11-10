@@ -1,29 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import type { ShotInfo } from '@ai-video/contracts';
 import { aggregateShotBindings, shotReferenceDocumentIdsByScene } from './shot-binding-summary';
-
-const shot = (id: string, title: string, references?: ShotInfo['authoringIR']): ShotInfo => ({
+const shot = (
+  id: string,
+  title: string,
+  references?: import('@ai-video/contracts').PromptRecord,
+): ShotInfo => ({
   id,
   sceneId: 'scene',
   title,
   position: 0,
   status: 'draft',
-  authoringIR: references,
+  ...references,
   rowVersion: 1,
   createdAt: 'now',
   updatedAt: 'now',
 });
-
 describe('aggregateShotBindings', () => {
   it('unions shot references by role and keeps the shots and explicit assets for each document', () => {
     const first = shot('shot-1', '镜头一', {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: '林澈在旧码头。',
-      references: {
-        characterDocumentIds: ['character'],
-        sceneDocumentIds: ['location'],
-        propDocumentIds: ['radio'],
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{
+          characterDocumentIds: ['character'],
+          sceneDocumentIds: ['location'],
+          propDocumentIds: ['radio'],
+        },
       },
     });
     first.referenceBindings = {
@@ -31,15 +34,15 @@ describe('aggregateShotBindings', () => {
       sceneBindings: [{ sourceDocumentId: 'location', assetId: 'location-image' }],
     };
     const second = shot('shot-2', '镜头二', {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: '林澈拿起收音机。',
-      references: {
-        characterDocumentIds: ['character'],
-        propDocumentIds: ['radio'],
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{
+          characterDocumentIds: ['character'],
+          propDocumentIds: ['radio'],
+        },
       },
     });
-
     expect(aggregateShotBindings([first, second])).toEqual([
       {
         role: 'character',
@@ -64,31 +67,30 @@ describe('aggregateShotBindings', () => {
       },
     ]);
   });
-
   it('does not restore legacy media references when the shot IR explicitly clears that role', () => {
     const current = shot('shot-1', '镜头一', {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: '空镜。',
-      references: { characterDocumentIds: [], sceneDocumentIds: [] },
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{ characterDocumentIds: [], sceneDocumentIds: [] },
+      },
     });
     current.referenceBindings = {
       characterBindings: [{ characterDocumentId: 'old-character', assetId: 'old-image' }],
       sceneBindings: [{ sourceDocumentId: 'old-location', assetId: 'old-scene-image' }],
     };
-
     expect(aggregateShotBindings([current])).toEqual([]);
   });
-
   it('projects shot-only references into the scene document binding view', () => {
     const current = shot('shot-1', '镜头一', {
-      schemaVersion: 1,
-      kind: 'shot',
       prompt: '林澈在旧码头。',
-      references: {
-        characterDocumentIds: ['character'],
-        sceneDocumentIds: ['location'],
-        propDocumentIds: [],
+      bindings: {
+        schemaVersion: 1 as const,
+        ...{
+          characterDocumentIds: ['character'],
+          sceneDocumentIds: ['location'],
+          propDocumentIds: [],
+        },
       },
     });
     expect(

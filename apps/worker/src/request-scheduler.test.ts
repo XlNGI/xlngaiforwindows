@@ -51,20 +51,26 @@ describe('RequestScheduler', () => {
     await generation;
   });
 
-  it('keeps reads and local edits available during standalone audio sample generation', async () => {
-    const scheduler = new RequestScheduler();
-    let release!: () => void;
-    const generation = scheduler.run(
-      'audio.sample.confirm',
-      () => new Promise<void>((resolve) => (release = resolve)),
-    );
-    await expect(scheduler.run('audio.list', () => Promise.resolve([]))).resolves.toEqual([]);
-    await expect(scheduler.run('chat.message.save', () => Promise.resolve('saved'))).resolves.toBe(
-      'saved',
-    );
-    release();
-    await generation;
-  });
+  it.each(['audio.sample.confirm', 'characterVoiceDesign.confirm'] as const)(
+    'keeps reads, local edits and project close available during %s',
+    async (method) => {
+      const scheduler = new RequestScheduler();
+      let release!: () => void;
+      const generation = scheduler.run(
+        method,
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+      await expect(scheduler.run('audio.list', () => Promise.resolve([]))).resolves.toEqual([]);
+      await expect(
+        scheduler.run('chat.message.save', () => Promise.resolve('saved')),
+      ).resolves.toBe('saved');
+      await expect(scheduler.run('project.close', () => Promise.resolve('closed'))).resolves.toBe(
+        'closed',
+      );
+      release();
+      await generation;
+    },
+  );
 
   it('keeps local writes, cancellation, and task inspection available during media submission', async () => {
     const scheduler = new RequestScheduler();

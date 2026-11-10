@@ -1,3 +1,8 @@
+import {
+  validateProductionBundleSources,
+  validateProductionRequestedAt,
+  DOCUMENT_KINDS,
+} from '@ai-video/contracts';
 import type {
   ChatMessageRole,
   ChatMessageStatus,
@@ -12,18 +17,16 @@ import type {
   WorkerMethod,
 } from '@ai-video/contracts';
 import { parseProductionDefaults } from '@ai-video/generation-adapters';
-import { validateProjectContentIR, validateProductionAuthoringIR } from '@ai-video/contracts';
-
+import { validatePromptBindings, validateProductionTiming } from '@ai-video/contracts';
 const MAX_ID_LENGTH = 128;
 const MAX_TITLE_LENGTH = 200;
-const MAX_MESSAGE_LENGTH = 1_000_000;
-const MAX_DOCUMENT_LENGTH = 1_000_000;
+const MAX_MESSAGE_LENGTH = 1000000;
+const MAX_DOCUMENT_LENGTH = 1000000;
 const MAX_ERROR_LENGTH = 500;
 const MAX_KIND_LENGTH = 80;
 const MAX_PROVIDER_RESPONSE_ID_LENGTH = 256;
 const MAX_FINISH_REASON_LENGTH = 80;
 const MAX_RAW_USAGE_BYTES = 64 * 1024;
-
 const sessionMethods = new Set<WorkerMethod>([
   'media.review.list',
   'media.review.get',
@@ -165,20 +168,10 @@ const sessionMethods = new Set<WorkerMethod>([
   'maintenance.contextSnapshots.cleanup',
   'maintenance.researchCache.cleanup',
 ]);
-
 const scopes = new Set<ConversationScopeType>(['project', 'scene', 'shot']);
 const roles = new Set<ChatMessageRole>(['system', 'user', 'assistant', 'tool']);
 const messageStatuses = new Set<ChatMessageStatus>(['streaming', 'complete', 'failed']);
-const documentKinds = new Set([
-  'outline',
-  'plan',
-  'constraint',
-  'character',
-  'scene',
-  'prop',
-  'storyboard',
-  'note',
-]);
+const documentKinds = new Set<string>(DOCUMENT_KINDS);
 const documentAuthors = new Set(['user', 'import']);
 const taskLogKinds = new Set<TaskLogKind>(['agent-document', 'image', 'video', 'dubbing']);
 const videoFailureKinds = new Set(['transport', 'provider', 'download', 'interrupted', 'timeout']);
@@ -198,9 +191,7 @@ const agentDocumentOperations = new Set([
   'novel.episode.submit_structure',
 ]);
 const agentResearchModes = new Set(['auto', 'project_only', 'network_disabled']);
-
 export class RequestValidationError extends Error {}
-
 export class ConversationTaskPlanValidationError extends RequestValidationError {
   constructor(
     readonly code: ConversationTaskPlanErrorCode,
@@ -209,7 +200,6 @@ export class ConversationTaskPlanValidationError extends RequestValidationError 
     super(message);
   }
 }
-
 const conversationTaskModes = new Set(['document', 'novel-writing', 'short-drama']);
 const conversationTaskActions = new Set(['generate', 'revise', 'analyze']);
 const conversationTargetPlatforms = new Set(['seedance', 'generic-video', 'generic-image']);
@@ -237,7 +227,6 @@ const taskPlanAuthorityFields = new Set([
   'credential',
   'secret',
 ]);
-
 /** Strict validator for model-proposed plans. It never accepts Worker authority fields. */
 export function validateConversationTaskPlanV1(input: unknown): ConversationTaskPlanV1 {
   const plan = taskPlanObject(input, 'plan');
@@ -281,7 +270,6 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
       'Task plan deliverables must contain between one and eight items.',
     );
   }
-
   const kinds = new Set<ConversationDeliverableKind>();
   const deliverables = plan.deliverables.map((inputDeliverable, index) => {
     const deliverable = taskPlanObject(inputDeliverable, `deliverables[${index}]`);
@@ -338,7 +326,6 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     });
     return { kind, required: deliverable.required, dependsOn };
   });
-
   for (const deliverable of deliverables) {
     if (deliverable.dependsOn.some((dependency) => !kinds.has(dependency))) {
       throw taskPlanError(
@@ -348,7 +335,6 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     }
   }
   assertAcyclicDeliverables(deliverables);
-
   if (!Array.isArray(plan.constraints) || plan.constraints.length > 50) {
     throw taskPlanError(
       'TASK_PLAN_INVALID_TYPE',
@@ -356,7 +342,7 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     );
   }
   const constraints = plan.constraints.map((constraint, index) => {
-    if (typeof constraint !== 'string' || !constraint.trim() || constraint.length > 1_000) {
+    if (typeof constraint !== 'string' || !constraint.trim() || constraint.length > 1000) {
       throw taskPlanError(
         'TASK_PLAN_INVALID_TYPE',
         `Constraint ${index} must contain between one and 1000 characters.`,
@@ -364,7 +350,6 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     }
     return constraint.normalize('NFC').trim();
   });
-
   return {
     version: 1,
     mode: plan.mode as ConversationTaskPlanV1['mode'],
@@ -376,7 +361,6 @@ export function validateConversationTaskPlanV1(input: unknown): ConversationTask
     constraints,
   };
 }
-
 /** Dispatches the versioned model-owned portion of a task plan. */
 export function validateConversationTaskPlan(input: unknown): ConversationTaskPlan {
   const candidate = taskPlanObject(input, 'plan');
@@ -384,7 +368,6 @@ export function validateConversationTaskPlan(input: unknown): ConversationTaskPl
   if (candidate.version === 2) return validateConversationTaskPlanV2(input);
   throw taskPlanError('TASK_PLAN_INVALID_VERSION', 'Task plan version must be 1 or 2.');
 }
-
 /** Strict generic-plan validator. Worker authorization is checked by TaskPlanService. */
 export function validateConversationTaskPlanV2(input: unknown): ConversationTaskPlanV2 {
   const plan = taskPlanObject(input, 'plan');
@@ -398,7 +381,6 @@ export function validateConversationTaskPlanV2(input: unknown): ConversationTask
       'Generic task plans must contain between two and twelve steps.',
     );
   }
-
   const ids = new Set<string>();
   const steps = plan.steps.map((rawStep, index) => {
     const step = taskPlanObject(rawStep, `steps[${index}]`);
@@ -455,7 +437,6 @@ export function validateConversationTaskPlanV2(input: unknown): ConversationTask
       constraints: validatePlanConstraints(step.constraints, `Step ${step.id}`, 10),
     };
   });
-
   for (const step of steps) {
     if (step.dependsOn.some((dependency) => !ids.has(dependency))) {
       throw taskPlanError(
@@ -471,7 +452,6 @@ export function validateConversationTaskPlanV2(input: unknown): ConversationTask
     constraints: validatePlanConstraints(plan.constraints, 'Plan', 20),
   };
 }
-
 function validatePlanConstraints(value: unknown, label: string, maximumItems: number): string[] {
   if (!Array.isArray(value) || value.length > maximumItems) {
     throw taskPlanError(
@@ -489,7 +469,6 @@ function validatePlanConstraints(value: unknown, label: string, maximumItems: nu
     return constraint.normalize('NFC').trim();
   });
 }
-
 function assertAcyclicGenericSteps(steps: ConversationTaskPlanV2['steps']): void {
   const graph = new Map(steps.map((step) => [step.id, step.dependsOn]));
   const visiting = new Set<string>();
@@ -509,14 +488,12 @@ function assertAcyclicGenericSteps(steps: ConversationTaskPlanV2['steps']): void
   };
   for (const id of graph.keys()) visit(id);
 }
-
 function taskPlanObject(input: unknown, label: string): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw taskPlanError('TASK_PLAN_INVALID_TYPE', `${label} must be an object.`);
   }
   return input as Record<string, unknown>;
 }
-
 function rejectTaskPlanFields(value: Record<string, unknown>, allowed: string[]): void {
   const forbidden = Object.keys(value).find((key) => taskPlanAuthorityFields.has(key));
   if (forbidden) {
@@ -531,7 +508,6 @@ function rejectTaskPlanFields(value: Record<string, unknown>, allowed: string[])
     throw taskPlanError('TASK_PLAN_UNKNOWN_FIELD', `Unknown task plan field: ${unknown}.`);
   }
 }
-
 function assertAcyclicDeliverables(deliverables: ConversationTaskPlanV1['deliverables']): void {
   const graph = new Map(deliverables.map((item) => [item.kind, item.dependsOn]));
   const visiting = new Set<ConversationDeliverableKind>();
@@ -551,14 +527,12 @@ function assertAcyclicDeliverables(deliverables: ConversationTaskPlanV1['deliver
   };
   for (const kind of graph.keys()) visit(kind);
 }
-
 function taskPlanError(
   code: ConversationTaskPlanErrorCode,
   message: string,
 ): ConversationTaskPlanValidationError {
   return new ConversationTaskPlanValidationError(code, message);
 }
-
 export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
@@ -830,6 +804,33 @@ export function validateSessionRequestParams(
     return params;
   }
   if (dubbingMethods.has(method)) return validateDubbingRequest(method, input);
+  if (method === 'characterVoiceDesign.prepare' || method === 'characterVoiceDesign.confirm') {
+    const params = requireObject(input, 'params');
+    if (method === 'characterVoiceDesign.prepare') {
+      rejectUnknown(params, [
+        'characterDocumentId',
+        'voiceDocumentId',
+        'expectedVoiceDocumentVersionId',
+        'expectedCharacterRowVersion',
+        'providerProfileId',
+        'modelId',
+      ]);
+      for (const key of [
+        'characterDocumentId',
+        'voiceDocumentId',
+        'expectedVoiceDocumentVersionId',
+        'providerProfileId',
+      ])
+        requireId(params, key);
+      requireInteger(params, 'expectedCharacterRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      requireEnum(params, 'modelId', new Set(['speech-2.8-hd', 'speech-2.8-turbo']));
+    } else {
+      rejectUnknown(params, ['confirmationToken', 'approved']);
+      requireId(params, 'confirmationToken');
+      requireBoolean(params, 'approved');
+    }
+    return params;
+  }
   if (
     method === 'characterVoiceReference.list' ||
     method === 'characterVoiceReference.save' ||
@@ -916,7 +917,6 @@ export function validateSessionRequestParams(
   }
   if (!sessionMethods.has(method)) return requireObject(input, 'params');
   const params = requireObject(input, 'params');
-
   switch (method) {
     case 'document.list':
     case 'document.archived.list':
@@ -1007,7 +1007,7 @@ export function validateSessionRequestParams(
         rejectUnknown(chapter, ['title', 'displayLabel', 'contentMarkdown']);
         requireString(chapter, 'title', MAX_TITLE_LENGTH);
         optionalString(chapter, 'displayLabel', 80);
-        const content = requireString(chapter, 'contentMarkdown', 1_048_576);
+        const content = requireString(chapter, 'contentMarkdown', 1048576);
         if (!content.trim()) throw new RequestValidationError('Chapter content cannot be empty.');
       }
       break;
@@ -1083,7 +1083,7 @@ export function validateSessionRequestParams(
         if (
           !Array.isArray(params.chapterIds) ||
           params.chapterIds.length === 0 ||
-          params.chapterIds.length > 10_000
+          params.chapterIds.length > 10000
         ) {
           throw new RequestValidationError('单次导出请选择 1 至 10000 个章节。');
         }
@@ -1154,7 +1154,7 @@ export function validateSessionRequestParams(
       requireId(params, 'documentId');
       optionalId(params, 'documentVersionId');
       requireInteger(params, 'expectedDocumentRowVersion', 0, Number.MAX_SAFE_INTEGER);
-      optionalString(params, 'comment', 2_000);
+      optionalString(params, 'comment', 2000);
       break;
     case 'document.publish':
     case 'document.selfPublish':
@@ -1331,7 +1331,7 @@ export function validateSessionRequestParams(
       break;
     case 'maintenance.contextSnapshots.cleanup':
       rejectUnknown(params, ['olderThanDays']);
-      optionalInteger(params, 'olderThanDays', 1, 3_650);
+      optionalInteger(params, 'olderThanDays', 1, 3650);
       break;
     case 'maintenance.metrics':
       rejectUnknown(params, []);
@@ -1436,8 +1436,9 @@ export function validateSessionRequestParams(
         'title',
         'sceneDocumentId',
         'sceneDocumentIds',
-        'videoPrompt',
-        'authoringIR',
+        'prompt',
+        'bindings',
+        'timing',
         'materialBindings',
         'characterBindings',
         'dialogueAudioId',
@@ -1485,9 +1486,11 @@ export function validateSessionRequestParams(
             throw new RequestValidationError('Disabled media cannot also have a selected ID.');
         });
       }
-      if (params.videoPrompt !== undefined) requireString(params, 'videoPrompt', 20_000, true);
-      if (params.authoringIR !== undefined && params.authoringIR !== null)
-        validateProductionAuthoringIR(params.authoringIR, 'scene');
+      if (params.prompt !== undefined) requireString(params, 'prompt', 20000, true);
+      if (params.bindings !== undefined && params.bindings !== null)
+        validatePromptBindings(params.bindings);
+      if (params.timing !== undefined && params.timing !== null)
+        validateProductionTiming(params.timing);
       if (params.materialBindings !== undefined) {
         if (!Array.isArray(params.materialBindings) || params.materialBindings.length > 30) {
           throw new RequestValidationError('materialBindings must contain at most 30 items.');
@@ -1565,7 +1568,8 @@ export function validateSessionRequestParams(
         'status',
         'documentId',
         'prompt',
-        'authoringIR',
+        'bindings',
+        'timing',
         'referenceBindings',
         'expectedRowVersion',
       ]);
@@ -1574,9 +1578,11 @@ export function validateSessionRequestParams(
       requireString(params, 'title', MAX_TITLE_LENGTH);
       optionalString(params, 'status', 80);
       optionalId(params, 'documentId');
-      if (params.prompt !== undefined) requireString(params, 'prompt', 20_000, true);
-      if (params.authoringIR !== undefined && params.authoringIR !== null)
-        validateProductionAuthoringIR(params.authoringIR, 'shot');
+      if (params.prompt !== undefined) requireString(params, 'prompt', 20000, true);
+      if (params.bindings !== undefined && params.bindings !== null)
+        validatePromptBindings(params.bindings);
+      if (params.timing !== undefined && params.timing !== null)
+        validateProductionTiming(params.timing);
       if (params.referenceBindings !== undefined && params.referenceBindings !== null) {
         const bindings = requireObject(params.referenceBindings, 'referenceBindings');
         rejectUnknown(bindings, [
@@ -1640,7 +1646,7 @@ export function validateSessionRequestParams(
     case 'context.preview':
       rejectUnknown(params, ['conversationId', 'budgetTokens']);
       requireId(params, 'conversationId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       break;
     case 'novel.context.consistencyReport':
       rejectUnknown(params, []);
@@ -1788,7 +1794,7 @@ export function validateSessionRequestParams(
     case 'llm.generate':
       rejectUnknown(params, ['conversationId', 'budgetTokens', 'prompt', 'idempotencyKey']);
       requireId(params, 'conversationId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       requireString(params, 'prompt');
       optionalId(params, 'idempotencyKey');
       break;
@@ -1803,7 +1809,7 @@ export function validateSessionRequestParams(
         'attachments',
       ]);
       requireId(params, 'conversationId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       requireString(params, 'prompt');
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
@@ -1853,7 +1859,7 @@ export function validateSessionRequestParams(
     case 'llm.generation.retry':
       rejectUnknown(params, ['assistantMessageId', 'budgetTokens', 'idempotencyKey']);
       requireId(params, 'assistantMessageId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       optionalId(params, 'idempotencyKey');
       break;
     case 'llm.generation.retryPrepare':
@@ -1865,7 +1871,7 @@ export function validateSessionRequestParams(
         'idempotencyKey',
       ]);
       requireId(params, 'assistantMessageId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
       optionalId(params, 'idempotencyKey');
@@ -1886,10 +1892,13 @@ export function validateSessionRequestParams(
         'selectedChapterIds',
         'targetPlatform',
         'productionSkillId',
+        'productionWorkflowVersion',
+        'productionSources',
+        'productionRequestedAt',
         'attachments',
       ]);
       requireId(params, 'conversationId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       requireString(params, 'prompt');
       requireId(params, 'providerProfileId');
       requireId(params, 'modelId');
@@ -1906,6 +1915,19 @@ export function validateSessionRequestParams(
       validateNovelWritingIntent(params.novelIntent);
       optionalEnum(params, 'targetPlatform', conversationTargetPlatforms);
       optionalEnum(params, 'productionSkillId', new Set(['chapters-to-script', 'script-to-media']));
+      if (
+        params.productionWorkflowVersion !== undefined ||
+        params.productionSources !== undefined ||
+        params.productionRequestedAt !== undefined
+      ) {
+        if (
+          params.productionSkillId !== 'script-to-media' ||
+          params.productionWorkflowVersion !== 2
+        )
+          throw new Error('Version 2 requires script-to-media and explicit selected sources.');
+        validateProductionBundleSources(params.productionSources);
+        validateProductionRequestedAt(params.productionRequestedAt);
+      }
       break;
     case 'agent.run':
       rejectUnknown(params, [
@@ -1928,6 +1950,9 @@ export function validateSessionRequestParams(
         'researchMode',
         'novelIntent',
         'productionSkillId',
+        'productionWorkflowVersion',
+        'productionSources',
+        'productionRequestedAt',
       ]);
       requireId(params, 'conversationId');
       optionalEnum(params, 'taskExecution', new Set(['ordered', 'parallel']));
@@ -1949,7 +1974,7 @@ export function validateSessionRequestParams(
       );
       optionalId(params, 'providerProfileId');
       optionalId(params, 'modelId');
-      optionalInteger(params, 'budgetTokens', 1_000, 200_000);
+      optionalInteger(params, 'budgetTokens', 1000, 200000);
       optionalId(params, 'idempotencyKey');
       optionalId(params, 'adapterKey');
       optionalId(params, 'shotId');
@@ -1959,6 +1984,19 @@ export function validateSessionRequestParams(
       optionalEnum(params, 'researchMode', agentResearchModes);
       validateNovelWritingIntent(params.novelIntent);
       optionalEnum(params, 'productionSkillId', new Set(['chapters-to-script', 'script-to-media']));
+      if (
+        params.productionWorkflowVersion !== undefined ||
+        params.productionSources !== undefined ||
+        params.productionRequestedAt !== undefined
+      ) {
+        if (
+          params.productionSkillId !== 'script-to-media' ||
+          params.productionWorkflowVersion !== 2
+        )
+          throw new Error('Version 2 requires script-to-media and explicit selected sources.');
+        validateProductionBundleSources(params.productionSources);
+        validateProductionRequestedAt(params.productionRequestedAt);
+      }
       optionalEnum(params, 'providerRegion', new Set(['global', 'cn', 'unicompapi']));
       optionalEnum(
         params,
@@ -2131,10 +2169,8 @@ export function validateSessionRequestParams(
       optionalInteger(params, 'maxBytes', 0, 512 * 1024 * 1024);
       break;
   }
-
   return params;
 }
-
 const dubbingMethods = new Set<WorkerMethod>([
   'characterVoice.list',
   'characterVoice.save',
@@ -2160,7 +2196,6 @@ const dubbingMethods = new Set<WorkerMethod>([
   'dubbing.job.list',
   'dubbing.output.adopt',
 ]);
-
 function dubbingNumber(
   params: Record<string, unknown>,
   key: string,
@@ -2183,8 +2218,8 @@ function validateDubbingBudget(input: unknown): void {
   const currency = requireString(budget, 'currency', 3);
   if (!/^[A-Z]{3}$/.test(currency))
     throw new RequestValidationError('currency must be an uppercase three-letter code.');
-  dubbingNumber(budget, 'unitPrice', 0, 1_000_000);
-  dubbingNumber(budget, 'maxAmount', Number.MIN_VALUE, 1_000_000_000);
+  dubbingNumber(budget, 'unitPrice', 0, 1000000);
+  dubbingNumber(budget, 'maxAmount', Number.MIN_VALUE, 1000000000);
   optionalInteger(budget, 'maxAttempts', 1, 3);
 }
 function validateDubbingRequest(method: WorkerMethod, input: unknown): Record<string, unknown> {
@@ -2312,9 +2347,9 @@ function validateDubbingRequest(method: WorkerMethod, input: unknown): Record<st
           );
       }
       requireString(params, 'text', 4000);
-      requireInteger(params, 'position', 0, 1_000_000);
-      requireInteger(params, 'startMs', 0, 600_000);
-      optionalInteger(params, 'trailingPauseMs', 0, 60_000);
+      requireInteger(params, 'position', 0, 1000000);
+      requireInteger(params, 'startMs', 0, 600000);
+      optionalInteger(params, 'trailingPauseMs', 0, 60000);
       optionalEnum(
         params,
         'emotion',
@@ -2410,7 +2445,6 @@ function validateDubbingRequest(method: WorkerMethod, input: unknown): Record<st
   }
   return params;
 }
-
 function validateNovelWritingIntent(input: unknown): void {
   if (input === undefined) return;
   const intent = requireObject(input, 'novelIntent');
@@ -2425,7 +2459,6 @@ function validateNovelWritingIntent(input: unknown): void {
   optionalString(intent, 'chapterTitle', MAX_TITLE_LENGTH);
   optionalString(intent, 'displayLabel', 80);
 }
-
 function validateMediaSelection(input: unknown): void {
   if (input === undefined) return;
   const selection = requireObject(input, 'selection');
@@ -2477,7 +2510,6 @@ function validateMediaSelection(input: unknown): void {
     }
   }
 }
-
 function validateIdentity(params: Record<string, unknown>, additional: string[] = []): void {
   rejectUnknown(params, [
     'generationId',
@@ -2493,14 +2525,14 @@ function validateIdentity(params: Record<string, unknown>, additional: string[] 
   requireId(params, 'projectSessionId');
   requireId(params, 'conversationId');
 }
-
 function validateDocumentDraft(params: Record<string, unknown>): void {
   rejectUnknown(params, [
     'documentId',
     'kind',
     'title',
     'contentMarkdown',
-    'contentIR',
+    'sampleText',
+    'bindings',
     'scopeType',
     'scopeId',
     'expectedDocumentRowVersion',
@@ -2511,7 +2543,9 @@ function validateDocumentDraft(params: Record<string, unknown>): void {
   optionalEnum(params, 'kind', documentKinds);
   requireString(params, 'title', MAX_TITLE_LENGTH);
   requireString(params, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
-  if (params.contentIR !== undefined) validateProjectContentIR(params.contentIR);
+  if (params.bindings !== undefined && params.bindings !== null)
+    validatePromptBindings(params.bindings);
+  if (params.sampleText !== undefined) requireString(params, 'sampleText', 10000, true);
   const scope = optionalScope(params, 'scopeType');
   const scopeId = optionalId(params, 'scopeId');
   if (scope === 'project' && scopeId !== undefined) {
@@ -2524,7 +2558,6 @@ function validateDocumentDraft(params: Record<string, unknown>): void {
   optionalId(params, 'baseVersionId');
   optionalEnum(params, 'authorType', documentAuthors);
 }
-
 function validateAgentDocumentIntent(input: unknown): void {
   if (input === undefined) return;
   const intent = requireObject(input, 'documentIntent');
@@ -2548,7 +2581,6 @@ function validateAgentDocumentIntent(input: unknown): void {
     );
   }
 }
-
 function validateAgentToolCalls(input: unknown): void {
   if (!Array.isArray(input) || input.length < 1 || input.length > 8) {
     throw new RequestValidationError('calls must contain between one and eight tool calls.');
@@ -2565,7 +2597,6 @@ function validateAgentToolCalls(input: unknown): void {
     requireString(call, 'authorizationHandle', MAX_ID_LENGTH);
   }
 }
-
 function validateUsage(input: unknown): NormalizedLlmUsage | undefined {
   if (input === undefined) return undefined;
   const usage = requireObject(input, 'usage');
@@ -2601,14 +2632,12 @@ function validateUsage(input: unknown): NormalizedLlmUsage | undefined {
   }
   return usage;
 }
-
 function requireObject(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new RequestValidationError(`${name} must be an object.`);
   }
   return value as Record<string, unknown>;
 }
-
 function validateAdapterDescriptorRequest(value: unknown, adapterKey: string): void {
   const descriptor = requireObject(value, 'descriptor');
   if (descriptor.key !== adapterKey)
@@ -2655,13 +2684,11 @@ function validateAdapterDescriptorRequest(value: unknown, adapterKey: string): v
   if (!Array.isArray(uiSchema.fields))
     throw new RequestValidationError('descriptor.uiSchema.fields must be an array.');
 }
-
 function rejectUnknown(value: Record<string, unknown>, allowed: string[]): void {
   const allowedKeys = new Set(allowed);
   const unknown = Object.keys(value).find((key) => !allowedKeys.has(key));
   if (unknown) throw new RequestValidationError(`Unknown parameter: ${unknown}.`);
 }
-
 function requireString(
   value: Record<string, unknown>,
   key: string,
@@ -2677,7 +2704,6 @@ function requireString(
   }
   return input;
 }
-
 function optionalString(
   value: Record<string, unknown>,
   key: string,
@@ -2686,26 +2712,21 @@ function optionalString(
   if (value[key] === undefined) return undefined;
   return requireString(value, key, maxLength);
 }
-
 function requireId(value: Record<string, unknown>, key: string): string {
   return requireString(value, key, MAX_ID_LENGTH);
 }
-
 function optionalId(value: Record<string, unknown>, key: string): string | undefined {
   return optionalString(value, key, MAX_ID_LENGTH);
 }
-
 function requireScope(value: Record<string, unknown>, key: string): ConversationScopeType {
   return requireEnum(value, key, scopes);
 }
-
 function optionalScope(
   value: Record<string, unknown>,
   key: string,
 ): ConversationScopeType | undefined {
   return optionalEnum(value, key, scopes);
 }
-
 function requireEnum<T extends string>(
   value: Record<string, unknown>,
   key: string,
@@ -2717,7 +2738,6 @@ function requireEnum<T extends string>(
   }
   return input as T;
 }
-
 function optionalEnum<T extends string>(
   value: Record<string, unknown>,
   key: string,
@@ -2726,7 +2746,6 @@ function optionalEnum<T extends string>(
   if (value[key] === undefined) return undefined;
   return requireEnum(value, key, allowed);
 }
-
 function optionalInteger(
   value: Record<string, unknown>,
   key: string,
@@ -2742,7 +2761,6 @@ function optionalInteger(
   }
   return input as number;
 }
-
 function requireInteger(
   value: Record<string, unknown>,
   key: string,
@@ -2753,18 +2771,15 @@ function requireInteger(
   if (result === undefined) throw new RequestValidationError(`${key} is required.`);
   return result;
 }
-
 function requireBoolean(value: Record<string, unknown>, key: string): boolean {
   const input = value[key];
   if (typeof input !== 'boolean') throw new RequestValidationError(`${key} must be a boolean.`);
   return input;
 }
-
 function optionalBoolean(value: Record<string, unknown>, key: string): boolean | undefined {
   if (value[key] === undefined) return undefined;
   return requireBoolean(value, key);
 }
-
 function validateLlmAttachments(value: unknown): void {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > 8) {
@@ -2775,14 +2790,13 @@ function validateLlmAttachments(value: unknown): void {
     rejectUnknown(item, ['name', 'mimeType', 'dataUrl', 'text']);
     requireString(item, 'name', 240);
     requireString(item, 'mimeType', 160);
-    if (item.dataUrl !== undefined) requireString(item, 'dataUrl', 2_000_000);
-    if (item.text !== undefined) requireString(item, 'text', 2_000_000, true);
+    if (item.dataUrl !== undefined) requireString(item, 'dataUrl', 2000000);
+    if (item.text !== undefined) requireString(item, 'text', 2000000, true);
     if (item.dataUrl === undefined && item.text === undefined) {
       throw new RequestValidationError(`attachments[${index}] must contain dataUrl or text.`);
     }
   });
 }
-
 function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
   rejectUnknown(params, ['taskId', 'title', 'items']);
   optionalId(params, 'taskId');
@@ -2799,13 +2813,12 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'targetId',
       'parentSceneId',
       'parentItemOrdinal',
-      'sceneDocumentId',
       'title',
       'shotStatus',
-      'videoPrompt',
-      'characterDocumentIds',
-      'authoringIR',
       'prompt',
+      'bindings',
+      'timing',
+      'sampleText',
       'documentKind',
       'contentMarkdown',
       'scopeType',
@@ -2814,44 +2827,17 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
       'expectedCurrentVersionId',
     ]);
     requireEnum(item, 'entityType', new Set(['scene', 'shot', 'document']));
-    if (item.authoringIR !== undefined) {
-      if (item.entityType === 'document')
-        throw new RequestValidationError('Authoring IR is only valid for scene/shot items.');
-      validateProductionAuthoringIR(item.authoringIR, item.entityType as 'scene' | 'shot');
-    }
+    if (item.bindings !== undefined && item.bindings !== null)
+      validatePromptBindings(item.bindings);
+    if (item.timing !== undefined && item.timing !== null) validateProductionTiming(item.timing);
     requireEnum(item, 'action', new Set(['create', 'update']));
     optionalId(item, 'targetId');
     optionalId(item, 'parentSceneId');
-    if (item.sceneDocumentId !== null) optionalId(item, 'sceneDocumentId');
-    if (item.sceneDocumentId !== undefined && item.entityType !== 'scene')
-      throw new RequestValidationError('sceneDocumentId is only allowed on scene items.');
     optionalInteger(item, 'parentItemOrdinal', 0, items.length - 1);
     requireString(item, 'title', MAX_TITLE_LENGTH);
     optionalString(item, 'shotStatus', 80);
-    if (
-      (!item.authoringIR && item.videoPrompt !== undefined) ||
-      item.characterDocumentIds !== undefined ||
-      item.sceneDocumentId !== undefined
-    ) {
-      if (item.entityType !== 'scene' || item.sceneDocumentId === undefined)
-        throw new RequestValidationError(
-          'Scene bindings require a scene item and explicit sceneDocumentId.',
-        );
-      requireString(item, 'videoPrompt', 20000);
-      if (
-        !Array.isArray(item.characterDocumentIds) ||
-        item.characterDocumentIds.length > 30 ||
-        new Set(item.characterDocumentIds).size !== item.characterDocumentIds.length ||
-        item.characterDocumentIds.some(
-          (id) => typeof id !== 'string' || !id.trim() || id.length > 200,
-        )
-      )
-        throw new RequestValidationError('Invalid characterDocumentIds.');
-    }
     optionalString(item, 'prompt', 20000);
-    if (item.prompt !== undefined && item.entityType !== 'shot') {
-      throw new RequestValidationError('prompt is only allowed on shot items.');
-    }
+    if (item.sampleText !== undefined) requireString(item, 'sampleText', 10000, true);
     optionalEnum(item, 'documentKind', documentKinds);
     if (item.contentMarkdown !== undefined) {
       requireString(item, 'contentMarkdown', MAX_DOCUMENT_LENGTH, true);
@@ -2868,7 +2854,6 @@ function validateAgentChangeSetCreate(params: Record<string, unknown>): void {
     optionalId(item, 'expectedCurrentVersionId');
   });
 }
-
 function validateProductionSource(params: Record<string, unknown>): void {
   if (params.productionSource === undefined) return;
   const source = requireObject(params.productionSource, 'productionSource');
@@ -2891,7 +2876,6 @@ function validateProductionSource(params: Record<string, unknown>): void {
   requireEnum(target, 'kind', new Set(['character', 'setting', 'scene', 'shot']));
   requireId(target, 'id');
 }
-
 function validateProductionImages(params: Record<string, unknown>): void {
   if (params.inputImages === undefined) return;
   if (!Array.isArray(params.inputImages) || params.inputImages.length > 30)
@@ -2908,7 +2892,6 @@ function validateProductionImages(params: Record<string, unknown>): void {
     optionalString(image, 'label', 200);
   }
 }
-
 function validateSelectedChapterIds(params: Record<string, unknown>): void {
   if (params.selectedChapterIds === undefined) return;
   if (
@@ -2924,7 +2907,6 @@ function validateSelectedChapterIds(params: Record<string, unknown>): void {
     }
   }
 }
-
 function validateAgentChangeSetMutation(params: Record<string, unknown>): void {
   rejectUnknown(params, ['changeSetId', 'expectedRowVersion', 'itemIds']);
   requireId(params, 'changeSetId');

@@ -60,6 +60,7 @@ export async function callWorker<M extends WorkerMethod>(
       'characterVoiceReference.save',
       'characterVoiceReference.generate',
       'characterVoiceReference.confirm',
+      'characterVoiceDesign.confirm',
     ].includes(method)
   )
     window.dispatchEvent(new Event('production-source-updated'));

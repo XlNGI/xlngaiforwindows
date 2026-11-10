@@ -1,31 +1,26 @@
 import type { AdapterParameters, SceneInfo, SceneMediaResolveResult } from './index.js';
-import type { ProductionAuthoringIR, ProductionTiming } from './project-ir.js';
-
+import type { ProductionTiming } from './prompt-bindings.js';
 export interface ProductionTarget {
   kind: 'character' | 'setting' | 'scene' | 'shot';
   id: string;
 }
-
 export interface ProductionIssue {
   code: string;
   message: string;
   target?: ProductionTarget;
   targetTitle?: string;
 }
-
 /** Preserve the business purpose until the selected model assigns an input role. */
 export interface ProductionInputImage {
   url: string;
   role?: 'reference' | 'character' | 'scene' | 'first-frame' | 'last-frame';
   label?: string;
 }
-
 export interface ProductionImageSelection {
   assetId: string;
   role: NonNullable<ProductionInputImage['role']>;
   label?: string;
 }
-
 export interface ProductionFormSource {
   mode: 'form';
   target: ProductionTarget;
@@ -33,21 +28,20 @@ export interface ProductionFormSource {
   shotIds?: string[];
   inputImages?: ProductionImageSelection[];
 }
-
 export type ProductionSource = ProductionFormSource;
-
 export interface ProductionReadResult {
+  prompt?: string;
   target: ProductionTarget;
   rowVersion: number;
-  authoringIR?: ProductionAuthoringIR;
-  promptSource?: 'authoring-ir' | 'saved-prompt';
+  bindings?: import('./prompt-bindings.js').PromptBindingIR;
+  timing?: import('./prompt-bindings.js').ProductionTiming;
+  promptSource?: 'saved-prompt';
   issues: ProductionIssue[];
   notices?: ProductionIssue[];
   compiledPrompt?: string;
   timeline?: ProductionTimelineEntry[];
   estimatedDurationSeconds?: number;
 }
-
 export interface ProductionTimelineEntry {
   shotId: string;
   title: string;
@@ -57,14 +51,12 @@ export interface ProductionTimelineEntry {
   timing?: ProductionTiming;
   prompt: string;
 }
-
 export interface ProductionSegment {
   shotIds: string[];
   estimatedDurationSeconds: number;
   requestedDurationSeconds?: number;
   needsShotRevision?: boolean;
 }
-
 export interface ProductionCompileParams {
   target: ProductionTarget;
   adapterKey: string;
@@ -72,7 +64,6 @@ export interface ProductionCompileParams {
   shotIds?: string[];
   inputImages?: ProductionImageSelection[];
 }
-
 export interface ProductionCompileResult extends ProductionReadResult {
   parameters: AdapterParameters;
   source?: ProductionSource;
@@ -85,7 +76,6 @@ export interface ProductionCompileResult extends ProductionReadResult {
     characterNames: Record<string, string>;
   };
 }
-
 /** Project defaults are provider parameters only; creative intent belongs in prompt. */
 export interface ProductionDefaults {
   generation?: {
@@ -95,12 +85,10 @@ export interface ProductionDefaults {
     watermark?: boolean;
   };
 }
-
 export interface ProductionDefaultsInfo {
   rowVersion: number;
   settings: ProductionDefaults;
 }
-
 const id = { type: 'string', minLength: 1, maxLength: 200 };
 export const productionTargetSchema = {
   type: 'object',
@@ -111,7 +99,6 @@ export const productionTargetSchema = {
     id,
   },
 };
-
 export const productionDefaultsSchema = {
   type: 'object',
   additionalProperties: false,
@@ -128,9 +115,12 @@ export const productionDefaultsSchema = {
     },
   },
 };
-
 export function productionImageReference(
-  adapter: { contractId?: string; contractRevision?: number; capability?: string },
+  adapter: {
+    contractId?: string;
+    contractRevision?: number;
+    capability?: string;
+  },
   index: number,
 ): string | undefined {
   const contract = adapter.contractId;

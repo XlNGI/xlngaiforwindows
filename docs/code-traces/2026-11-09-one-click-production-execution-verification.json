@@ -1,0 +1,131 @@
+{
+  "testedAt": "2026-11-09T08:36:00.115Z",
+  "scope": "Current working-tree code; isolated temporary projects and mock providers; no live provider or user project writes",
+  "reports": [
+    {
+      "report": "worker-tests.json",
+      "success": true,
+      "passed": 298,
+      "failed": 0,
+      "pending": 0,
+      "files": [
+        {
+          "file": "agent-context-budget.test.ts",
+          "status": "passed",
+          "tests": 81,
+          "elapsedMs": 234
+        },
+        {
+          "file": "agent-pipeline-remediation.test.ts",
+          "status": "passed",
+          "tests": 113,
+          "elapsedMs": 78232
+        },
+        {
+          "file": "agent-saved-production-receipts.test.ts",
+          "status": "passed",
+          "tests": 1,
+          "elapsedMs": 9
+        },
+        {
+          "file": "agent-task-deliverables.test.ts",
+          "status": "passed",
+          "tests": 50,
+          "elapsedMs": 123
+        },
+        {
+          "file": "production-skill-validation.test.ts",
+          "status": "passed",
+          "tests": 53,
+          "elapsedMs": 1038
+        }
+      ]
+    },
+    {
+      "report": "desktop-tests.json",
+      "success": true,
+      "passed": 132,
+      "failed": 0,
+      "pending": 0,
+      "files": [
+        {
+          "file": "App.test.tsx",
+          "status": "passed",
+          "tests": 107,
+          "elapsedMs": 23516
+        },
+        {
+          "file": "ProductionPanel.scene-bindings.test.tsx",
+          "status": "passed",
+          "tests": 23,
+          "elapsedMs": 2004
+        },
+        {
+          "file": "ScriptWorkspace.test.tsx",
+          "status": "passed",
+          "tests": 2,
+          "elapsedMs": 106
+        }
+      ]
+    },
+    {
+      "report": "requirement-tests.json",
+      "success": true,
+      "passed": 2,
+      "failed": 0,
+      "pending": 0,
+      "files": [
+        {
+          "file": "one-click-audit-requirements.generated.test.ts",
+          "status": "passed",
+          "tests": 2,
+          "elapsedMs": 1701,
+          "cases": [
+            {
+              "title": "audits nonempty original requirements across shot, material and binding assessments (openai-responses)",
+              "status": "passed"
+            },
+            {
+              "title": "audits nonempty original requirements across shot, material and binding assessments (openai-chat-completions)",
+              "status": "passed"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "totalPassed": 432,
+  "totalFailed": 0,
+  "sourceHashes": {
+    "apps/worker/src/agent-context-budget.ts": "c5588cc3d30763dd0bfcc4b085ed5c348b9ee870c3dbe40b44d2534f46d080e1",
+    "apps/worker/src/agent-task-deliverables.ts": "7745a629c704e0417a963f7a0653eb05843dba1099ab6c4f350ed66a27f3d6d3",
+    "apps/worker/src/agent-task-review.ts": "56485ee086cdd7de9c2f9053947544312e00b32a83d7a792c360a98032a33734",
+    "apps/worker/src/agent-system-tool-service.ts": "8dee86fbf9491cd61320187d8c3fac71f8e24eaa4d152f18c33e6cab46bbf75d",
+    "apps/worker/src/agent-saved-production-receipts.ts": "63c8994b153e190227d8e4ae7b0813e3ede5020e8a3b951887345081ae093541"
+  },
+  "additionalRequirementFlow": {
+    "protocols": [
+      "openai-responses",
+      "openai-chat-completions"
+    ],
+    "fixture": "one scene, two shots, character/scene/prop documents, two original requirement records",
+    "negativeControl": "Every review rejects passed without per-requirement coverage",
+    "positiveControl": "Every target supplies two scoped requirement assessments with exact requirement quotations and actual prompt/contentMarkdown evidence",
+    "completedThroughFinalBindingReview": true,
+    "notValidated": [
+      "live model tool selection and recovery",
+      "full 8547-character user-constraint semantic assessment",
+      "normal production latency",
+      "media output quality"
+    ]
+  },
+  "replaySummary": {
+    "implementation": "Current TypeScript source via tsx",
+    "samples": 19,
+    "fingerprintGroups": 18,
+    "maxGroupCount": 2,
+    "thrown": null,
+    "identicalControlError": "AGENT_TOOL_FAILURE_STALLED: 相同工具目标和错误状态已重复四次，期间没有新的用户指令、读取证据或保存进展。已停止无效重试；已保存内容保留，本次任务尚未完成。",
+    "scope": "Only the same protected-plan errors, preserving their actual arguments. Intermediate reads and successful writes omitted. This isolates fingerprint fragmentation; it is not a complete runtime replay."
+  }
+}

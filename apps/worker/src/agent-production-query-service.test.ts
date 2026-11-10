@@ -6,8 +6,10 @@ import { AgentProductionQueryService } from './agent-production-query-service.js
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
 import { ProjectService } from './project-service.js';
-
-const fixtures: Array<{ projects: ProjectService; directory: string }> = [];
+const fixtures: Array<{
+  projects: ProjectService;
+  directory: string;
+}> = [];
 afterEach(async () => {
   for (const f of fixtures.splice(0)) {
     f.projects.close();
@@ -26,13 +28,13 @@ async function setup() {
     contentMarkdown: '古道资料',
   });
   const ir = {
-    schemaVersion: 1 as const,
-    kind: 'scene' as const,
     prompt: '雨中观察'.repeat(1000),
-    references: { sceneDocumentIds: [setting.id] },
-    data: { custom: '原样返回' },
+    bindings: {
+      schemaVersion: 1 as const,
+      ...{ sceneDocumentIds: [setting.id] },
+    },
   };
-  const scene = content.saveScene({ title: '雨夜', authoringIR: ir });
+  const scene = content.saveScene({ title: '雨夜', ...ir });
   const conversation = content.createConversation({ scopeType: 'project' });
   const identity = {
     projectId: project.id,
@@ -51,7 +53,6 @@ async function setup() {
     query: new AgentProductionQueryService(production),
   };
 }
-
 it('keeps structure reads body-free and pages the exact IR with view-specific unchanged responses', async () => {
   const f = await setup();
   const target = { kind: 'scene' as const, id: f.scene.id };
@@ -93,7 +94,6 @@ it('keeps structure reads body-free and pages the exact IR with view-specific un
     'view',
   );
 });
-
 it('invalidates child IR, reference versions and provider defaults while preserving prompt text', async () => {
   const f = await setup();
   const target = { kind: 'scene' as const, id: f.scene.id };
@@ -101,7 +101,7 @@ it('invalidates child IR, reference versions and provider defaults while preserv
   f.content.saveShot({
     sceneId: f.scene.id,
     title: '入场',
-    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '她从雨中走入。' },
+    ...{ prompt: '她从雨中走入。' },
   });
   const child = f.query.read(target, {}, f.identity, 'structure');
   expect(child.version).not.toBe(first.version);
@@ -121,20 +121,20 @@ it('invalidates child IR, reference versions and provider defaults while preserv
     settings: { generation: { watermark: false } },
   });
   expect(f.query.read(target, {}, f.identity, 'structure').version).not.toBe(reference.version);
-  expect(f.production.read(target).authoringIR).toEqual(f.ir);
+  expect(f.production.read(target)).toMatchObject(f.ir);
 });
-
 it('keeps an unchanged shot page valid after sibling edits while invalidating actual dependencies', async () => {
   const f = await setup();
   const makeShot = (title: string) =>
     f.content.saveShot({
       sceneId: f.scene.id,
       title,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: title.repeat(400),
-        references: { sceneDocumentIds: [f.setting.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ sceneDocumentIds: [f.setting.id] },
+        },
       },
     });
   const first = makeShot('第一镜');
@@ -148,7 +148,7 @@ it('keeps an unchanged shot page valid after sibling edits while invalidating ac
     sceneId: first.sceneId,
     title: first.title,
     expectedRowVersion: first.rowVersion,
-    authoringIR: { schemaVersion: 1, kind: 'shot', prompt: '第一镜修订' },
+    ...{ prompt: '第一镜修订' },
   });
   expect(f.production.queryVersion(sceneTarget)).not.toBe(sceneVersion);
   expect(f.production.queryVersion(target)).toBe(page.version);
@@ -162,10 +162,9 @@ it('keeps an unchanged shot page valid after sibling edits while invalidating ac
   ).not.toThrow();
   f.content.saveShot({
     shotId: second.id,
-    sceneId: second.sceneId,
-    title: second.title,
+
     expectedRowVersion: second.rowVersion,
-    authoringIR: { ...second.authoringIR!, prompt: '第二镜自身修订' },
+    ...{ ...second, prompt: '第二镜自身修订' },
   });
   const ownVersion = f.production.queryVersion(target);
   expect(ownVersion).not.toBe(page.version);
@@ -193,7 +192,6 @@ it('keeps an unchanged shot page valid after sibling edits while invalidating ac
   });
   expect(f.production.queryVersion(target)).not.toBe(parentVersion);
 });
-
 it('isolates cached snapshots across conversations and evicts older entries', async () => {
   const f = await setup();
   const read = vi.spyOn(f.production, 'readForAgent');
@@ -212,18 +210,18 @@ it('isolates cached snapshots across conversations and evicts older entries', as
   f.query.read(target, { view: 'text' }, { ...f.identity, conversationId: 'another' }, 'authoring');
   expect(read).toHaveBeenCalledTimes(27);
 });
-
 it('reads one shot with its scene and CAS and pages whole structure records with version checks', async () => {
   const f = await setup();
   const shots = Array.from({ length: 25 }, (_, i) =>
     f.content.saveShot({
       sceneId: f.scene.id,
       title: `镜头${i + 1}`,
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: `动作${i}`,
-        references: { sceneDocumentIds: [f.setting.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ sceneDocumentIds: [f.setting.id] },
+        },
       },
     }),
   );
@@ -255,9 +253,16 @@ it('reads one shot with its scene and CAS and pages whole structure records with
     );
     collected.push(...page.recordPage!.records);
   }
-  expect(collected.map((record) => (record.value as { id: string }).id)).toEqual(
-    shots.map((shot) => shot.id),
-  );
+  expect(
+    collected.map(
+      (record) =>
+        (
+          record.value as {
+            id: string;
+          }
+        ).id,
+    ),
+  ).toEqual(shots.map((shot) => shot.id));
   expect(() => f.query.read(target, { recordOffset: 10 }, f.identity, 'structure')).toThrow(
     'expectedVersion',
   );

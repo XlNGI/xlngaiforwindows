@@ -9,7 +9,6 @@ import {
   withAgentToolInstructions,
 } from './agent-policy-instructions.js';
 import { loadedToolGuidance } from './agent-workflow-guidance.js';
-
 describe('Agent visible progress guidance', () => {
   it('requests user-facing updates during multi-step work without exposing private reasoning', () => {
     const instructions = withAgentResponseLanguageInstruction('project assistant');
@@ -24,19 +23,16 @@ describe('Agent visible progress guidance', () => {
     expect(withAgentResponseLanguageInstruction(instructions)).toBe(instructions);
   });
 });
-
 describe('Agent character image guidance', () => {
   it('includes the sheet requirements for document authoring and direct image generation', () => {
     const instructions = withAgentToolInstructions('', [
       { name: 'document.submit_draft' },
       { name: 'media.image.prepare' },
     ]);
-
     expect(instructions).toContain('# Agent character image deliverable');
     expect(instructions).toContain(CHARACTER_SHEET_IMAGE_REQUIREMENTS);
-    expect(instructions).toContain('只放在 contentIR.data、备注或聊天解释里不会进入生图');
+    expect(instructions).toContain('只放在备注或聊天解释里不会进入生图');
   });
-
   it('requires current-session requirements in the final authored prompt', () => {
     const instructions = withAgentToolInstructions('', [
       { name: 'document.create_draft' },
@@ -44,30 +40,26 @@ describe('Agent character image guidance', () => {
       { name: 'library.search' },
       { name: 'media.image.prepare' },
     ]);
-
     expect(instructions).toContain('# Agent final prompt coverage policy');
     expect(instructions).toContain('本轮输入中的【本会话要求约束】和【用户本次请求】');
     expect(instructions).toContain('剧情约束文档使用 documentKind=constraint');
     expect(instructions).toContain('将已读取且适用的剧情、人物行为和连续性条款落实到作品内容');
-    expect(instructions).toContain('只写在 contentIR.data、authoringIR.data、references');
+    expect(instructions).toContain('只写在 bindings、备注或普通回复');
     expect(instructions).toContain('界面只负责展示、参数审核和用户确认');
     expect(withAgentToolInstructions(instructions, [{ name: 'document.update_draft' }])).toBe(
       instructions,
     );
   });
-
   it('does not add character sheet requirements to scene-only authoring', () => {
     const instructions = withAgentToolInstructions('', [{ name: 'scene.submit_structure' }]);
     expect(instructions).not.toContain('# Agent character image deliverable');
   });
-
   it('delivers the same requirements through lazy image-tool loading', () => {
     expect(loadedToolGuidance(['media.image.prepare'])).toContain(
       CHARACTER_SHEET_IMAGE_REQUIREMENTS,
     );
   });
 });
-
 describe('Agent scene reference image guidance', () => {
   it.each([
     'document.submit_draft',
@@ -87,7 +79,6 @@ describe('Agent scene reference image guidance', () => {
     expect(loadedToolGuidance([name], workflow)).toContain(SCENE_REFERENCE_IMAGE_REQUIREMENTS);
     expect(withAgentToolInstructions(instructions, [{ name }], workflow)).toBe(instructions);
   });
-
   it('keeps image requirements out of ordinary reads and scene/shot video authoring', () => {
     for (const name of ['library.read', 'scene.submit_structure', 'media.video.prepare']) {
       expect(withAgentToolInstructions('', [{ name }])).not.toContain(
@@ -96,7 +87,6 @@ describe('Agent scene reference image guidance', () => {
     }
   });
 });
-
 describe('Agent video prompt guidance', () => {
   it.each([
     'document.submit_draft',
@@ -116,7 +106,6 @@ describe('Agent video prompt guidance', () => {
     );
     expect(loadedToolGuidance([name], workflow)).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
   });
-
   it('keeps video writing defaults out of image-only and ordinary read tools', () => {
     const instructions = withAgentToolInstructions('', [
       { name: 'media.image.prepare' },
@@ -125,11 +114,9 @@ describe('Agent video prompt guidance', () => {
     expect(instructions).not.toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
   });
 });
-
 describe('Agent conversation input guidance', () => {
   it('declares the form protocol when conversation.ask is available', () => {
     const instructions = withAgentToolInstructions('', [{ name: 'conversation.ask' }]);
-
     expect(instructions).toContain('# Agent conversation input policy');
     expect(instructions).toContain('任务完成后的可选下一步也属于用户选择');
     expect(instructions).toContain('即使只用一句话表达');
@@ -138,24 +125,20 @@ describe('Agent conversation input guidance', () => {
     expect(instructions).toContain('不要把待用户选择的编号列表');
     expect(instructions).toContain('不要解析 Markdown 猜测表单');
   });
-
   it('keeps the form protocol once when tools refresh after a write', () => {
     const initial = withAgentToolInstructions('项目助理', [{ name: 'conversation.ask' }]);
     const refreshed = withAgentToolInstructions(initial, [
       { name: 'conversation.ask' },
       { name: 'novel.chapter.write_draft' },
     ]);
-
     expect(refreshed.split('# Agent conversation input policy')).toHaveLength(2);
     expect(refreshed).toContain(initial);
   });
-
   it('does not add the form protocol when the tool is unavailable', () => {
     expect(withAgentToolInstructions('', [{ name: 'library.read' }])).not.toContain(
       '# Agent conversation input policy',
     );
   });
-
   it('applies the response language policy to every loaded tool set', () => {
     const instructions = withAgentToolInstructions('', [{ name: 'library.read' }]);
     expect(instructions).toContain('# Agent response language policy');

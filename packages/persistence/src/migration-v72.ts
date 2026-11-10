@@ -2,7 +2,21 @@ import type Database from 'better-sqlite3';
 
 /** Install the database boundary for published-document immutability. */
 export function applyMigrationV72(database: Database.Database): void {
-  database.exec(`
+  const modern = (
+    database.prepare('PRAGMA table_info(document_versions)').all() as Array<{ name: string }>
+  ).some((c) => c.name === 'sample_text');
+  const execute = (sql: string) =>
+    database.exec(
+      sql
+        .replaceAll('content_ir_json', modern ? 'bindings_json' : 'content_ir_json')
+        .replace(
+          'AND NEW.title_snapshot IS coalesce((',
+          modern
+            ? 'AND NEW.sample_text IS (SELECT v.sample_text FROM documents d JOIN document_versions v ON v.id=d.published_version_id WHERE d.id=NEW.document_id) AND NEW.title_snapshot IS coalesce(('
+            : 'AND NEW.title_snapshot IS coalesce((',
+        ),
+    );
+  execute(`
     DROP TRIGGER IF EXISTS document_audit_unpublish_user_only;
     DROP TRIGGER IF EXISTS document_audit_published_read_only_insert;
     DROP TRIGGER IF EXISTS documents_published_read_only_update;
@@ -38,7 +52,7 @@ export function applyMigrationV72(database: Database.Database): void {
     )
     .all() as Array<{ sql: string }>;
 
-  database.exec(`
+  execute(`
     CREATE TABLE document_audit_events_v72 (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -74,7 +88,7 @@ export function applyMigrationV72(database: Database.Database): void {
 
   for (const { sql } of schemaObjects) database.exec(sql);
 
-  database.exec(`
+  execute(`
     CREATE TRIGGER document_audit_unpublish_user_only
     BEFORE INSERT ON document_audit_events
     WHEN NEW.action = 'unpublished'

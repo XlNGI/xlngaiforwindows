@@ -25,9 +25,7 @@ import {
   openProjectDatabase,
   rewriteLegacyContextSnapshots,
 } from './index.js';
-
 const temporaryDirectories: string[] = [];
-
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
 });
@@ -36,18 +34,16 @@ async function temporaryDatabase() {
   temporaryDirectories.push(directory);
   return openProjectDatabase(join(directory, 'project.sqlite'));
 }
-
 function removeSceneBindingMigration(database: Awaited<ReturnType<typeof temporaryDatabase>>) {
   database.exec(`DROP TRIGGER scenes_validate_scene_document_insert;
     DROP TRIGGER scenes_validate_scene_document_update;
     DROP INDEX idx_scenes_scene_document;
     DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN scene_document_id;
-    ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
+
     DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN video_prompt;
     DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN material_bindings_json;
     DELETE FROM schema_migrations WHERE version >= 42;`);
 }
-
 describe('project database', () => {
   it('retries the v64 Agent quota ledger when the physical schema is ahead of the ledger', async () => {
     const database = await temporaryDatabase();
@@ -79,7 +75,6 @@ describe('project database', () => {
       database.close();
     }
   });
-
   it('backfills Agent usage counters and initializes counters for new tasks', async () => {
     const database = await temporaryDatabase();
     try {
@@ -87,27 +82,23 @@ describe('project database', () => {
       database
         .prepare('INSERT INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)')
         .run('usage-project', 'Usage project', 'now', 'now');
-      const insertTask = database.prepare(
-        `INSERT INTO agent_tasks
+      const insertTask = database.prepare(`INSERT INTO agent_tasks
          (id,project_id,project_session_id,task_type,scope_type,title,request_snapshot_json,
           request_hash,status,created_at,updated_at,phase,tool_call_count)
          VALUES(?,'usage-project','session','document-query','project',?,'{}','hash','running',
-                'now','now','model_running',?)`,
-      );
+                'now','now','model_running',?)`);
       insertTask.run('existing-task', 'Existing task', 7);
       database.exec(`
         DROP TRIGGER agent_task_usage_counter_insert;
         DROP TABLE agent_task_usage_counters;
         DELETE FROM schema_migrations WHERE version >= 69;
       `);
-
       expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
       expect(
         database
           .prepare('SELECT tool_call_count FROM agent_task_usage_counters WHERE task_id=?')
           .get('existing-task'),
       ).toEqual({ tool_call_count: 7 });
-
       insertTask.run('new-task', 'New task', 0);
       expect(
         database
@@ -118,7 +109,6 @@ describe('project database', () => {
       database.close();
     }
   });
-
   it('rolls back review-form migration atomically and preserves saved forms on repeated migration', async () => {
     const database = await temporaryDatabase();
     try {
@@ -147,104 +137,6 @@ describe('project database', () => {
       database.close();
     }
   });
-
-  it('adds the IR binding repair marker atomically from v60 and preserves explicit repair state', async () => {
-    const database = await temporaryDatabase();
-    try {
-      migrateDatabase(database);
-      database.exec(`INSERT INTO projects(id,name,created_at,updated_at) VALUES('ir-v60','IR Legacy','now','now');
-        INSERT INTO scenes(id,project_id,title,position,created_at,updated_at,row_version) VALUES('scene','ir-v60','旧场次',0,'now','now',3);
-        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN authoring_bindings_applied;
-        DELETE FROM schema_migrations WHERE version>=61;
-        CREATE TRIGGER fail_ir_binding_v61 BEFORE INSERT ON schema_migrations WHEN NEW.version=61 BEGIN SELECT RAISE(ABORT,'v61 failure'); END;`);
-      expect(() => migrateDatabase(database)).toThrow('v61 failure');
-      expect(getSchemaVersion(database)).toBe(60);
-      expect(
-        database
-          .prepare(
-            "SELECT name FROM pragma_table_info('scenes') WHERE name='authoring_bindings_applied'",
-          )
-          .get(),
-      ).toBeUndefined();
-      database.exec('DROP TRIGGER fail_ir_binding_v61');
-      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
-      expect(
-        database
-          .prepare('SELECT authoring_bindings_applied,row_version FROM scenes WHERE id=?')
-          .get('scene'),
-      ).toEqual({ authoring_bindings_applied: 0, row_version: 3 });
-      database.exec(
-        "UPDATE scenes SET authoring_bindings_applied=1 WHERE id='scene'; DELETE FROM schema_migrations WHERE version>=61",
-      );
-      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
-      expect(
-        database.prepare('SELECT authoring_bindings_applied FROM scenes WHERE id=?').get('scene'),
-      ).toEqual({ authoring_bindings_applied: 1 });
-    } finally {
-      database.close();
-    }
-  });
-
-  it('adds nullable IR columns atomically from v59 and preserves legacy production text', async () => {
-    const database = await temporaryDatabase();
-    try {
-      migrateDatabase(database);
-      database.exec(`
-        INSERT INTO projects(id,name,created_at,updated_at) VALUES('ir-v59','IR Legacy','now','now');
-        INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at,row_version)
-          VALUES('ir-scene','ir-v59','旧场次',0,'旧场次提示词','now','now',3);
-        INSERT INTO shots(id,scene_id,title,position,prompt,created_at,updated_at,row_version)
-          VALUES('ir-shot','ir-scene','旧镜头',0,'旧镜头提示词','now','now',4);
-        DROP TRIGGER document_versions_published_read_only_insert;
-        ALTER TABLE document_versions DROP COLUMN content_ir_json;
-        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN authoring_ir_json;
-        DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE shots DROP COLUMN authoring_ir_json;
-        ALTER TABLE agent_change_set_items DROP COLUMN production_authoring_ir_json;
-        DELETE FROM schema_migrations WHERE version>=60;
-      `);
-      expect(getSchemaVersion(database)).toBe(59);
-      database.exec(
-        "CREATE TRIGGER fail_ir_v60 BEFORE INSERT ON schema_migrations WHEN NEW.version=60 BEGIN SELECT RAISE(ABORT,'v60 failure'); END;",
-      );
-
-      expect(() => migrateDatabase(database)).toThrow('v60 failure');
-      expect(getSchemaVersion(database)).toBe(59);
-      expect(
-        database
-          .prepare("SELECT name FROM pragma_table_info('scenes') WHERE name='authoring_ir_json'")
-          .get(),
-      ).toBeUndefined();
-
-      database.exec('DROP TRIGGER fail_ir_v60');
-      expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
-      expect(
-        database
-          .prepare('SELECT title,video_prompt,row_version FROM scenes WHERE id=?')
-          .get('ir-scene'),
-      ).toEqual({ title: '旧场次', video_prompt: '旧场次提示词', row_version: 3 });
-      expect(
-        database.prepare('SELECT title,prompt,row_version FROM shots WHERE id=?').get('ir-shot'),
-      ).toEqual({ title: '旧镜头', prompt: '旧镜头提示词', row_version: 4 });
-      expect(
-        database.prepare('SELECT authoring_ir_json FROM scenes WHERE id=?').get('ir-scene'),
-      ).toEqual({
-        authoring_ir_json: JSON.stringify({
-          schemaVersion: 1,
-          kind: 'scene',
-          prompt: '旧场次提示词',
-        }),
-      });
-      expect(() =>
-        database
-          .prepare('UPDATE scenes SET authoring_ir_json=? WHERE id=?')
-          .run('{invalid', 'ir-scene'),
-      ).toThrow();
-      expect(checkIntegrity(database).ok).toBe(true);
-    } finally {
-      database.close();
-    }
-  });
-
   it('upgrades populated v48 shot prompts atomically and keeps the shot-only proposal guard', async () => {
     const database = await temporaryDatabase();
     try {
@@ -280,8 +172,10 @@ describe('project database', () => {
         .prepare(
           "SELECT sql FROM sqlite_master WHERE name='agent_change_set_item_shot_prompt_match'",
         )
-        .get() as { sql: string };
-      expect(trigger.sql).toContain("NEW.entity_type != 'shot'");
+        .get() as {
+        sql: string;
+      };
+      expect(trigger.sql).toContain("NEW.entity_type = 'document'");
       expect(checkIntegrity(database).ok).toBe(true);
     } finally {
       database.close();
@@ -292,7 +186,7 @@ describe('project database', () => {
     try {
       migrateDatabase(database);
       database.exec(
-        "ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json; DELETE FROM schema_migrations WHERE version>=47; INSERT INTO projects(id,name,created_at,updated_at) VALUES('v46','Legacy','now','now'); INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('scene','v46','旧场次',0,'旧提示词','now','now');",
+        " DELETE FROM schema_migrations WHERE version>=47; INSERT INTO projects(id,name,created_at,updated_at) VALUES('v46','Legacy','now','now'); INSERT INTO scenes(id,project_id,title,position,video_prompt,created_at,updated_at) VALUES('scene','v46','旧场次',0,'旧提示词','now','now');",
       );
       expect(getSchemaVersion(database)).toBe(46);
       database.exec(
@@ -319,7 +213,7 @@ describe('project database', () => {
             "SELECT name FROM pragma_table_info('agent_change_set_items') WHERE name='scene_bindings_json'",
           )
           .get(),
-      ).toBeTruthy();
+      ).toBeUndefined();
       expect(checkIntegrity(database).ok).toBe(true);
     } finally {
       database.close();
@@ -334,7 +228,7 @@ describe('project database', () => {
       DROP TRIGGER scenes_validate_scene_document_update;
       DROP INDEX idx_scenes_scene_document;
       DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN scene_document_id;
-      ALTER TABLE agent_change_set_items DROP COLUMN scene_document_id;
+
       DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN video_prompt;
       DROP TRIGGER IF EXISTS agent_changes_scenes_update; DROP TRIGGER IF EXISTS agent_changes_shots_update; ALTER TABLE scenes DROP COLUMN material_bindings_json;
       DELETE FROM schema_migrations WHERE version >= 42;
@@ -409,7 +303,11 @@ describe('project database', () => {
     ).toMatchObject({ name: 'agent_media_selections' });
     const taskTable = database
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'")
-      .get() as { sql: string } | undefined;
+      .get() as
+      | {
+          sql: string;
+        }
+      | undefined;
     expect(taskTable?.sql).toContain(
       'tool_call_limit INTEGER NOT NULL DEFAULT 16 CHECK (tool_call_limit BETWEEN 1 AND 32)',
     );
@@ -508,7 +406,6 @@ describe('project database', () => {
     ).toMatchObject({ name: 'project_structure_nodes' });
     database.close();
   });
-
   it('backfills structure nodes when upgrading an existing v40 project', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -541,7 +438,6 @@ describe('project database', () => {
       DROP TABLE project_structure_nodes;
       DELETE FROM schema_migrations WHERE version = 41;
     `);
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       database
@@ -558,7 +454,6 @@ describe('project database', () => {
     ]);
     database.close();
   });
-
   it('upgrades v36 media jobs without retrying ambiguous legacy submissions', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -589,11 +484,9 @@ describe('project database', () => {
       capability: 'video',
       adapterKey: 'TEXT_TO_VIDEO:legacy:model:v1',
     });
-    const insertJob = database.prepare(
-      `INSERT INTO generation_jobs
+    const insertJob = database.prepare(`INSERT INTO generation_jobs
        (id, project_id, adapter_key, status, request_json, task_snapshot_json, created_at, updated_at)
-       VALUES (?, 'project', 'TEXT_TO_VIDEO:legacy:model:v1', ?, '{}', ?, 'now', 'now')`,
-    );
+       VALUES (?, 'project', 'TEXT_TO_VIDEO:legacy:model:v1', ?, '{}', ?, 'now', 'now')`);
     for (const status of [
       'succeeded',
       'failed',
@@ -608,7 +501,6 @@ describe('project database', () => {
     ]) {
       insertJob.run(`job-${status}`, status, legacySnapshot);
     }
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     const states = database
       .prepare('SELECT id, media_state AS mediaState FROM generation_jobs ORDER BY id')
@@ -633,7 +525,13 @@ describe('project database', () => {
     const submissionIndex: unknown = database
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
       .get('idx_generation_jobs_submission_idempotency');
-    const submissionIndexSql = (submissionIndex as { sql?: unknown } | undefined)?.sql;
+    const submissionIndexSql = (
+      submissionIndex as
+        | {
+            sql?: unknown;
+          }
+        | undefined
+    )?.sql;
     expect(submissionIndexSql).toBeTypeOf('string');
     expect(submissionIndexSql).toContain(
       'ON generation_jobs(project_id, submission_idempotency_key)',
@@ -652,7 +550,6 @@ describe('project database', () => {
     });
     database.close();
   });
-
   it('preserves frozen v1 task plans and deliverables when upgrading from v37', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -698,12 +595,10 @@ describe('project database', () => {
         JSON.stringify({ selectedChapterIds: ['chapter-1'] }),
         'a'.repeat(64),
       );
-    const insertDeliverable = database.prepare(
-      `INSERT INTO agent_task_deliverables
+    const insertDeliverable = database.prepare(`INSERT INTO agent_task_deliverables
        (id, plan_id, task_id, project_id, ordinal, kind, required, depends_on_json,
         status, entity_type, entity_id, error_code, error_message, row_version, created_at, updated_at)
-       VALUES (?, 'plan', 'task', 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
+       VALUES (?, 'plan', 'task', 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     insertDeliverable.run(
       'outline',
       0,
@@ -734,7 +629,6 @@ describe('project database', () => {
       'characters-created',
       'characters-updated',
     );
-
     expect(getSchemaVersion(database)).toBe(37);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
@@ -810,7 +704,6 @@ describe('project database', () => {
     });
     database.close();
   });
-
   it('binds media selections to the executing media tool call and keeps terminal status immutable', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -902,15 +795,12 @@ describe('project database', () => {
                  'now', 'now', 'native')`,
       )
       .run('b'.repeat(64));
-    const insertSelection = database.prepare(
-      `INSERT INTO agent_media_selections
+    const insertSelection = database.prepare(`INSERT INTO agent_media_selections
        (id, project_id, task_id, generation_id, attempt_id, provider_step_id,
         original_tool_call_id, kind, normalized_arguments_hash, arguments_json, request_json,
         token_hash, status, expires_at, created_at)
        VALUES (?, 'project', 'task', 'generation', 'attempt', 'step', 'call', ?, ?, '{}', '{}',
-               ?, 'pending', 'later', 'now')`,
-    );
-
+               ?, 'pending', 'later', 'now')`);
     expect(() =>
       insertSelection.run('wrong-kind', 'video', 'c'.repeat(64), 'd'.repeat(64)),
     ).toThrow('media selection does not match its tool call');
@@ -925,7 +815,6 @@ describe('project database', () => {
     ).toThrow('invalid agent media selection transition');
     database.close();
   });
-
   it('backfills current saved novel drafts when upgrading from v29', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -988,7 +877,6 @@ describe('project database', () => {
          VALUES (?, ?, ?, 0, ?, 'active', 0, ?, ?)`,
       )
       .run('chapter', 'project', 'document', '第一章', 'now', 'now');
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     const chunks = database
       .prepare(
@@ -1002,20 +890,23 @@ describe('project database', () => {
     }>;
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.every((chunk) => chunk.source_document_version_id === 'version')).toBe(true);
-    expect(chunks.every((chunk) => chunk.content_length <= 2_200)).toBe(true);
+    expect(chunks.every((chunk) => chunk.content_length <= 2200)).toBe(true);
     const library = database
       .prepare(
         `SELECT source_type, status, title FROM project_library_chunks
          WHERE source_id = ? ORDER BY ordinal`,
       )
-      .all('chapter') as Array<{ source_type: string; status: string; title: string }>;
+      .all('chapter') as Array<{
+      source_type: string;
+      status: string;
+      title: string;
+    }>;
     expect(library.length).toBeGreaterThan(1);
     expect(library.every((chunk) => chunk.source_type === 'novel-chapter')).toBe(true);
     expect(library.every((chunk) => chunk.status === 'draft')).toBe(true);
     expect(library[0]?.title).toBe('第一章 旧小说草稿');
     database.close();
   });
-
   it('rewrites legacy context snapshots to manifests', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -1039,7 +930,7 @@ describe('project database', () => {
           systemInstruction: 'secret-instruction',
           rendered: 'full-rendered-body',
           estimatedTokens: 100,
-          budgetTokens: 1_000,
+          budgetTokens: 1000,
           sources: [
             {
               id: 'document',
@@ -1057,11 +948,12 @@ describe('project database', () => {
         }),
         'now',
       );
-
     expect(rewriteLegacyContextSnapshots(database)).toBe(1);
     const row = database
       .prepare('SELECT content_json FROM context_snapshots WHERE id = ?')
-      .get('legacy-snapshot') as { content_json: string };
+      .get('legacy-snapshot') as {
+      content_json: string;
+    };
     const manifest = JSON.parse(row.content_json) as Record<string, unknown>;
     expect(manifest).toMatchObject({ version: 1, projectId: 'project' });
     expect(row.content_json).not.toContain('secret-instruction');
@@ -1073,14 +965,12 @@ describe('project database', () => {
     });
     database.close();
   });
-
   it('enforces conversation scope and chat message invariants', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
     database
       .prepare('INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
       .run('project', 'Constraints', 'now', 'now');
-
     expect(() =>
       database
         .prepare(
@@ -1099,7 +989,6 @@ describe('project database', () => {
         )
         .run('invalid-scene', 'project', 'scene', null, 'Invalid', 'now', 'now'),
     ).toThrow('invalid conversation scope');
-
     database
       .prepare(
         `INSERT INTO conversations
@@ -1118,7 +1007,6 @@ describe('project database', () => {
     ).toThrow('invalid chat message state');
     database.close();
   });
-
   it('prevents terminal LLM and message states from returning to active states', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -1178,7 +1066,6 @@ describe('project database', () => {
         'now',
         'now',
       );
-
     expect(() =>
       database
         .prepare("UPDATE llm_generations SET status = 'streaming' WHERE id = ?")
@@ -1191,7 +1078,6 @@ describe('project database', () => {
     ).toThrow('invalid chat message transition');
     database.close();
   });
-
   it('rolls back a partially failed business transaction', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -1210,7 +1096,6 @@ describe('project database', () => {
     expect(row.count).toBe(0);
     database.close();
   });
-
   it('enforces foreign keys', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -1223,7 +1108,6 @@ describe('project database', () => {
     ).toThrow();
     database.close();
   });
-
   it('migrates an existing v1 project and preserves its documents', async () => {
     const database = await temporaryDatabase();
     database.exec(MIGRATION_V1);
@@ -1238,14 +1122,12 @@ describe('project database', () => {
         'INSERT INTO documents (id, project_id, kind, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run('document', 'project', 'outline', 'Legacy Outline', 'now', 'now');
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       database.prepare('SELECT title, scope_type FROM documents WHERE id = ?').get('document'),
     ).toMatchObject({ title: 'Legacy Outline', scope_type: 'project' });
     database.close();
   });
-
   it('migrates v2 chat messages and adds a durable reply association', async () => {
     const database = await temporaryDatabase();
     database.exec(MIGRATION_V1);
@@ -1265,7 +1147,6 @@ describe('project database', () => {
         'INSERT INTO chat_messages (id, conversation_id, role, content, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run('assistant', 'conversation', 'assistant', 'Legacy reply', 'complete', 'now');
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       database
@@ -1274,7 +1155,6 @@ describe('project database', () => {
     ).toMatchObject({ content: 'Legacy reply', reply_to_message_id: null });
     database.close();
   });
-
   it('removes signed query parameters from URL fields when migrating v5 projects', async () => {
     const database = await temporaryDatabase();
     for (const [version, migration] of [
@@ -1327,7 +1207,6 @@ describe('project database', () => {
         'https://cdn.example/frame.png?X-Amz-Signature=result-secret#fragment',
         'now',
       );
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(database.prepare('SELECT source_url FROM assets WHERE id = ?').get('asset')).toEqual({
       source_url: 'https://cdn.example/frame.png',
@@ -1337,7 +1216,6 @@ describe('project database', () => {
     ).toEqual({ provider_url: 'https://cdn.example/frame.png' });
     database.close();
   });
-
   it('upgrades v11 documents with an authoritative published version and migration publication', async () => {
     const database = await temporaryDatabase();
     for (const [version, migration] of [
@@ -1374,7 +1252,6 @@ describe('project database', () => {
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run('version', 'document', 1, '# Legacy', 'now');
-
     expect(getSchemaVersion(database)).toBe(11);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
@@ -1408,7 +1285,6 @@ describe('project database', () => {
     ).toEqual({ document_version_id: 'version', published_by_type: 'migration' });
     database.close();
   });
-
   it('migrates v12 projects to a bounded immutable document audit trail', async () => {
     const database = await temporaryDatabase();
     for (const [version, migration] of [
@@ -1447,7 +1323,6 @@ describe('project database', () => {
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run('version', 'document', 1, '# Audit', 'now');
-
     database.exec(MIGRATION_V13);
     database
       .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
@@ -1471,7 +1346,6 @@ describe('project database', () => {
         '{}',
         'before-v71',
       );
-
     expect(getSchemaVersion(database)).toBe(13);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
@@ -1480,13 +1354,11 @@ describe('project database', () => {
         .prepare('SELECT action, sequence FROM document_audit_events WHERE id = ?')
         .get('audit-preserved'),
     ).toEqual({ action: 'draft_saved', sequence: 99 });
-    const insert = database.prepare(
-      `INSERT INTO document_audit_events
+    const insert = database.prepare(`INSERT INTO document_audit_events
        (id, project_id, sequence, action, actor_type, actor_id, document_id,
         document_version_id, source_version_id, review_id, publication_id, task_id,
         metadata_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     insert.run(
       'audit-1',
       'project',
@@ -1551,13 +1423,12 @@ describe('project database', () => {
         null,
         null,
         null,
-        JSON.stringify({ value: 'x'.repeat(4_097) }),
+        JSON.stringify({ value: 'x'.repeat(4097) }),
         'later',
       ),
     ).toThrow();
     database.close();
   });
-
   it('rebuilds v13 Agent evidence without retaining tool request or result bodies', async () => {
     const database = await temporaryDatabase();
     for (const [version, migration] of [
@@ -1655,7 +1526,6 @@ describe('project database', () => {
         'now',
         2,
       );
-
     expect(migrateDatabase(database)).toBe(CURRENT_SCHEMA_VERSION);
     expect(
       database.prepare("SELECT row_version, phase FROM agent_tasks WHERE id = 'task'").get(),
@@ -1700,7 +1570,6 @@ describe('project database', () => {
     });
     database.close();
   });
-
   it('rolls back the whole v31 migration when one task-plan table conflicts', async () => {
     const database = await temporaryDatabase();
     migrateDatabase(database);
@@ -1710,7 +1579,6 @@ describe('project database', () => {
     database.exec('DROP TABLE agent_task_deliverables; DROP TABLE agent_task_plans;');
     database.prepare('DELETE FROM schema_migrations WHERE version >= 31').run();
     database.exec('CREATE TABLE agent_task_deliverables (conflict TEXT);');
-
     expect(() => migrateDatabase(database)).toThrow();
     expect(getSchemaVersion(database)).toBe(30);
     expect(

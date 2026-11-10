@@ -113,7 +113,7 @@ describe('scene cast and audio storage', () => {
       db.exec(`DROP TRIGGER agent_changes_scenes_update;
         DROP TRIGGER scene_dialogue_insert_valid;DROP TRIGGER scene_dialogue_update_valid;
         DROP TABLE scene_character_bindings;ALTER TABLE scenes DROP COLUMN dialogue_audio_id;
-        ALTER TABLE agent_change_set_items DROP COLUMN scene_bindings_json;
+
         DELETE FROM schema_migrations WHERE version>=46;`);
       db.prepare('UPDATE scenes SET material_bindings_json=? WHERE id=?').run(
         JSON.stringify([

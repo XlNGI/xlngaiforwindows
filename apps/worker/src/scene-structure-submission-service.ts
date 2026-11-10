@@ -8,23 +8,15 @@ import { parseEpisodeStructureArguments, validateEpisodeReferences } from './epi
 import { resolveWriteResource } from './project-resource-map.js';
 import { ProjectService } from './project-service.js';
 import type { AgentSystemToolIdentity } from './agent-system-tool-service.js';
-import { validateProductionAuthoringIR } from '@ai-video/contracts';
-import { requireProductionSceneDocument } from './scene-document-binding.js';
-import { requireProductionCharacters } from './scene-cast-binding.js';
-import { validateProductionIRReferences } from './project-ir-validation.js';
-import {
-  isScriptToMediaTask,
-  requireScriptToMediaShotReferences,
-} from './production-skill-validation.js';
+import { validatePromptBindings } from '@ai-video/contracts';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import {
   ProductionService,
   summarizeProductionReadiness,
   summarizeProductionNotices,
 } from './production-service.js';
-
 export class SceneStructureSubmissionService {
   constructor(private readonly projects: ProjectService) {}
-
   private readiness(sceneIds: string[]) {
     const production = new ProductionService(this.projects);
     const reads = sceneIds.map((id) => ({ id, read: production.read({ kind: 'scene', id }) }));
@@ -36,7 +28,6 @@ export class SceneStructureSubmissionService {
       ...summarizeProductionNotices(reads.flatMap(({ read }) => read.notices ?? [])),
     };
   }
-
   stage(args: Record<string, unknown>, identity: AgentSystemToolIdentity): Record<string, unknown> {
     const definition = SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'scene.structure.stage')!;
     try {
@@ -69,8 +60,16 @@ export class SceneStructureSubmissionService {
           count: number;
           scene?: Record<string, unknown>;
           shots: Array<Record<string, unknown> | null>;
-          sources?: Array<{ documentId: string; versionId: string | null; status: string }>;
-          saved?: { changeSetId: string; sceneId: string; shotIds: string[] };
+          sources?: Array<{
+            documentId: string;
+            versionId: string | null;
+            status: string;
+          }>;
+          saved?: {
+            changeSetId: string;
+            sceneId: string;
+            shotIds: string[];
+          };
         };
         type Stage = {
           id: string;
@@ -98,7 +97,9 @@ export class SceneStructureSubmissionService {
               .prepare(
                 'SELECT COUNT(*) AS value FROM scene_structure_stages WHERE project_id=? AND conversation_id=?',
               )
-              .get(project.id, identity.conversationId) as { value: number }
+              .get(project.id, identity.conversationId) as {
+              value: number;
+            }
           ).value;
           const stageRows = database
             .prepare(
@@ -231,7 +232,10 @@ export class SceneStructureSubmissionService {
                   "SELECT current_version_id FROM documents WHERE id=? AND project_id=? AND lifecycle_status='active'",
                 )
                 .get(source.documentId, project.id) as
-                { current_version_id: string | null } | undefined;
+                | {
+                    current_version_id: string | null;
+                  }
+                | undefined;
               return current?.current_version_id === source.versionId
                 ? []
                 : [
@@ -285,23 +289,13 @@ export class SceneStructureSubmissionService {
             nextSceneIndex: complete ? undefined : nextSceneIndex,
             referenceChanges: referenceChanges.slice(0, 5),
             referenceChangesTruncated: referenceChanges.length > 5,
-            referenceScope: 'shot.authoringIR.references',
+            referenceScope: 'shot.bindings',
             bindingInstruction:
               'Each current saved shot owns its document references. Empty staged scene-header metadata is not evidence of missing shot references. Stage data are historical setup, not current shot state. Use production.read on the returned real shotIds, view=authoring, before editing an existing shot with current CAS.',
             ...(selected
               ? {
                   sources: selected.sources ?? [],
                   sourcesScope: 'staged-scene-header',
-                  // Only pre-IR stages expose the old scene binding contract.
-                  // Modern shot references must not be reported as empty here.
-                  ...(selected.scene && !selected.scene.authoringIR
-                    ? {
-                        bindings: {
-                          sceneDocumentId: selected.scene.sceneDocumentId,
-                          characterDocumentIds: selected.scene.characterDocumentIds,
-                        },
-                      }
-                    : {}),
                   previousSaved: parts
                     .slice(0, args.sceneIndex as number)
                     .filter((part) => part.saved)
@@ -338,27 +332,19 @@ export class SceneStructureSubmissionService {
                 'STAGE_SCENE_ALREADY_SAVED: revise the returned sceneId with its current CAS; do not recreate it.',
               );
             part.scene = structuredClone(args.scene as Record<string, unknown>);
-            const ir =
-              part.scene.authoringIR === undefined
-                ? undefined
-                : validateProductionAuthoringIR(part.scene.authoringIR, 'scene');
-            if (!ir) throw new Error('Staged scene requires authoringIR.');
-            if (part.scene.sceneDocumentId)
-              requireProductionSceneDocument(
+            const bindings = part.scene.bindings;
+            if (bindings)
+              validatePromptBindingReferences(
                 database,
                 project.id,
-                part.scene.sceneDocumentId as string,
+                validatePromptBindings(bindings),
               );
-            if (part.scene.characterDocumentIds !== undefined)
-              requireProductionCharacters(database, project.id, part.scene.characterDocumentIds);
-            if (ir) validateProductionIRReferences(database, project.id, ir);
-            const references = ir?.references ?? {};
+            const references = bindings as
+              import('@ai-video/contracts').PromptBindingIR | undefined;
             const ids = [
-              ...(part.scene.sceneDocumentId ? [part.scene.sceneDocumentId as string] : []),
-              ...(part.scene.characterDocumentIds ?? []),
-              ...(references.characterDocumentIds ?? []),
-              ...(references.sceneDocumentIds ?? []),
-              ...(references.propDocumentIds ?? []),
+              ...(references?.characterDocumentIds ?? []),
+              ...(references?.sceneDocumentIds ?? []),
+              ...(references?.propDocumentIds ?? []),
             ];
             part.sources = [...new Set(ids)].map((documentId) => {
               const document = database
@@ -406,21 +392,7 @@ export class SceneStructureSubmissionService {
                 scenes: [{ ...part.scene, shots: args.shots }],
               }),
             );
-            if (isScriptToMediaTask(database, identity.taskId))
-              for (const stagedScene of staged.scenes)
-                for (const [shotIndex, shot] of stagedScene.shots.entries())
-                  requireScriptToMediaShotReferences(
-                    shot.authoringIR,
-                    `scene ${String(args.sceneIndex)} shot ${offset + shotIndex}`,
-                  );
             validateEpisodeReferences(database, project.id, staged);
-            for (const stagedScene of staged.scenes) {
-              if (stagedScene.authoringIR)
-                validateProductionIRReferences(database, project.id, stagedScene.authoringIR);
-              for (const shot of stagedScene.shots)
-                if (shot.authoringIR)
-                  validateProductionIRReferences(database, project.id, shot.authoringIR);
-            }
           }
           if (before === JSON.stringify(parts)) return describe();
         } else if (!['finalize', 'checkpoint'].includes(String(args.operation)))
@@ -441,7 +413,11 @@ export class SceneStructureSubmissionService {
                 AND status='succeeded' AND json_extract(result_summary_json,'$.stageId')=?
               ORDER BY rowid DESC LIMIT 1`,
                 )
-                .get(identity.taskId, row.id) as { version: number } | undefined)
+                .get(identity.taskId, row.id) as
+                | {
+                    version: number;
+                  }
+                | undefined)
             : undefined;
         const expectedVersion = args.expectedRowVersion ?? observed?.version;
         if (expectedVersion === undefined)
@@ -493,7 +469,6 @@ export class SceneStructureSubmissionService {
       })(),
     );
   }
-
   submit(
     args: Record<string, unknown>,
     identity: AgentSystemToolIdentity,
@@ -561,40 +536,9 @@ export class SceneStructureSubmissionService {
         const structure = parseEpisodeStructureArguments(
           JSON.stringify({ episodeTitle: args.episodeTitle, scenes: args.scenes }),
         );
-        if (isScriptToMediaTask(database, identity.taskId))
-          for (const [sceneIndex, scene] of structure.scenes.entries())
-            for (const [shotIndex, shot] of scene.shots.entries())
-              requireScriptToMediaShotReferences(
-                shot.authoringIR,
-                `scene ${sceneIndex} shot ${shotIndex}`,
-              );
-        // Only an explicit binding-only legacy edit uses scene-level bindings.
-        // Modern IR owns its prompt and shot references; compatibility metadata
-        // must not activate the old all-or-nothing binding contract.
-        const legacyBindingEdits = new Set(structure.scenes.filter((scene) => !scene.authoringIR));
         validateEpisodeReferences(database, project.id, structure);
         const items: AgentChangeSetItemDraft[] = [];
         for (const scene of structure.scenes) {
-          // Normalize compatible IDs into the one IR binding path. Explicit
-          // modern IR scopes win; binding-only edits override inherited scopes.
-          if (scene.authoringIR) {
-            const references = scene.authoringIR.references ?? {};
-            const legacyEdit = legacyBindingEdits.has(scene);
-            scene.authoringIR = {
-              ...scene.authoringIR,
-              references: {
-                ...references,
-                ...(scene.characterDocumentIds !== undefined &&
-                (legacyEdit || references.characterDocumentIds === undefined)
-                  ? { characterDocumentIds: scene.characterDocumentIds }
-                  : {}),
-                ...(scene.sceneDocumentId !== undefined &&
-                (legacyEdit || references.sceneDocumentIds === undefined)
-                  ? { sceneDocumentIds: scene.sceneDocumentId ? [scene.sceneDocumentId] : [] }
-                  : {}),
-              },
-            };
-          }
           const parentItemOrdinal = items.length;
           items.push({
             entityType: 'scene',
@@ -603,16 +547,9 @@ export class SceneStructureSubmissionService {
               ? { targetId: scene.sceneId, expectedRowVersion: scene.expectedRowVersion }
               : {}),
             title: scene.title,
-            // A setting locator is valid independently of legacy cast/prompt
-            // edits and remains the fallback when IR omits scene references.
-            sceneDocumentId: scene.sceneDocumentId,
-            ...(legacyBindingEdits.has(scene)
-              ? {
-                  videoPrompt: scene.videoPrompt,
-                  characterDocumentIds: scene.characterDocumentIds,
-                }
-              : {}),
-            authoringIR: scene.authoringIR,
+            prompt: scene.prompt,
+            bindings: scene.bindings,
+            timing: scene.timing,
           });
           for (const shot of scene.shots)
             items.push({ entityType: 'shot', action: 'create', parentItemOrdinal, ...shot });

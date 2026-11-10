@@ -1,0 +1,3312 @@
+{
+  "recordedAt": "2026-11-09T15:48:44.159Z",
+  "acceptance": "failed",
+  "realProviderCalled": true,
+  "taskId": "88d7e67c-bdd0-4a27-a779-2f8e34b23360",
+  "generationId": "8b8a562f-a0c3-45ab-ba3e-7c72a14b29a6",
+  "projectId": "16821ce8-b7b6-4be4-af72-9b895c59fd7e",
+  "terminal": {
+    "taskStatus": "failed",
+    "generationStatus": "failed",
+    "errorCode": "BUNDLE_TASK_BUDGET_EXHAUSTED",
+    "taskErrorCode": "failed",
+    "generationErrorCode": "generation-failed",
+    "errorMessage": "BUNDLE_TASK_BUDGET_EXHAUSTED: Preserve candidates and committed facts; the bounded task needs a new explicit scope/budget.",
+    "completedAt": "2026-11-09T15:42:44.302Z",
+    "completionState": null,
+    "nativeHarnessExitCode": 101,
+    "nativeHarnessResult": "0 passed; 1 failed; actual failed != expected complete"
+  },
+  "scope": {
+    "entryPoint": "agent.run + conversation.runtime.start with workflow version 2 (same RPC as Desktop button)",
+    "actualUiClick": false,
+    "installedApplicationReplaced": false,
+    "originalBusinessProjectWritten": false,
+    "modelContentOrReviewInjected": false,
+    "projectDatabase": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/app-data/project/project.sqlite",
+    "originalTaskIdNotResumedOrReplaced": "4b089522-8131-4d8c-8aac-19c6739199e3",
+    "source": {
+      "documentId": "a1b33ca3-379b-4abb-af08-bbc9abd2ccf4",
+      "versionId": "f3ec086b-08ae-484d-baa3-6902e06604a0",
+      "title": "《凌晨四点的订单》第一集把控与剧本改编稿"
+    },
+    "constraintsCharacters": 8547,
+    "originalRequestCharacters": 580,
+    "buttonRequestCharacters": 414,
+    "requestChange": "Current button workflow v2 supersedes the captured legacy shot-first sequence under the user-confirmed business change."
+  },
+  "identity": {
+    "checkedAt": "2026-11-09T15:44:35.761Z",
+    "filesChecked": 466,
+    "changedFiles": [],
+    "workerExecutableSha256": "58bc7ad4ef247ed6c774b36d537fdd5c03e5cd3929685a02dd5e11c014a19ae4",
+    "sourceBackupHash": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2",
+    "expectedSourceBackupHash": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2",
+    "sourceChecks": [
+      {
+        "documentId": "114d00ba-2d37-4b13-a2df-1e58f70a1dfe",
+        "versionId": "8ff1307e-5697-4754-859c-42b4cac4efba",
+        "currentVersionUnchanged": true,
+        "markdownEqualsOriginal": true,
+        "irEqualsOriginal": true,
+        "markdownHash": "339a7a14ee9fcf9c638f824978eb0cf790ac47fc71683fcd0a4ea9bc5a6bafbd"
+      },
+      {
+        "documentId": "e23e2ce0-0227-4be7-b75f-3249c37fe3bb",
+        "versionId": "bc36d6a4-9966-4263-8ef6-a797a4da5ec9",
+        "currentVersionUnchanged": true,
+        "markdownEqualsOriginal": true,
+        "irEqualsOriginal": true,
+        "markdownHash": "2a8c7a3dac8d8339efedf32c90343777047133e858013319d9a667462c0b404b"
+      },
+      {
+        "documentId": "a1b33ca3-379b-4abb-af08-bbc9abd2ccf4",
+        "versionId": "f3ec086b-08ae-484d-baa3-6902e06604a0",
+        "currentVersionUnchanged": true,
+        "markdownEqualsOriginal": true,
+        "irEqualsOriginal": true,
+        "markdownHash": "d9b76c95c3d5fdbfad64937e12a40b57709fe63ff6163eae22a69b3f48867c66"
+      }
+    ],
+    "constraintsCharacters": 8547,
+    "constraintsEqualOriginal": true,
+    "constraintsHash": "f8e8ab422b35da7e21f0c351ed2e0d66285bbed3f285729249d8297bf9231d7d",
+    "promptHash": "4f84aaeff87b24091ac073be97623c7fa1a11deab851f19c30f4a7c122b4e534",
+    "promptHashMatches": true,
+    "originalRequestCharacters": 580,
+    "buttonRequestCharacters": 414,
+    "originalRequestPreservedAsHistory": true,
+    "requestChange": "Current button workflow v2 supersedes the captured legacy shot-first sequence under the user-confirmed business change.",
+    "providerAndModelUnchanged": true
+  },
+  "provider": {
+    "profileId": "3c84cd7e-6093-42a5-b857-2d465da83c8c",
+    "providerLabel": "ergou-gpt-chat",
+    "modelId": "c540f921-12ca-4195-bf50-e3fbbd78e1cf",
+    "modelLabel": "gpt-5.6-terra",
+    "protocol": "openai-chat-completions",
+    "ledgerRecords": 40,
+    "realModelRequests": 39,
+    "waitOnlyRecords": [
+      {
+        "id": "2449255f-24f3-49a5-a03f-1fb5a049c836",
+        "createdAt": "2026-11-09T15:10:27.654Z",
+        "completedAt": "2026-11-09T15:10:27.657Z",
+        "firstSeen": {
+          "dependency_wait": "2026-11-09T15:10:27.654Z",
+          "capacity_wait": "2026-11-09T15:10:27.656Z",
+          "complete": "2026-11-09T15:10:27.657Z"
+        }
+      }
+    ],
+    "inputTokens": 2013178,
+    "outputTokens": 55003,
+    "cachedInputTokens": 1038017,
+    "reasoningTokens": 4427,
+    "totalTaskTokens": 2068181,
+    "transportRetries": 0,
+    "cost": null,
+    "accountingNote": "39 real model requests plus one 3 ms local scheduling wait record. Cumulative input includes repeated and cached context, not one context window. Provider pricing snapshot absent; no cost computed."
+  },
+  "timing": {
+    "requestedAt": "2026-11-09T15:10:25.844Z",
+    "taskCreatedAt": "2026-11-09T15:10:27.643Z",
+    "terminalAt": "2026-11-09T15:42:44.302Z",
+    "requestedAtBeijing": "2026-11-09 23:10:25.844 +08:00",
+    "terminalAtBeijing": "2026-11-09 23:42:44.302 +08:00",
+    "requestToTerminalMs": 1938458,
+    "taskToTerminalMs": 1936659,
+    "preparationMs": 1799,
+    "firstCandidateAt": "2026-11-09T15:37:00.417Z",
+    "firstCandidateAtBeijing": "2026-11-09 23:37:00.417 +08:00",
+    "requestToFirstCandidateMs": 1594573,
+    "modelRequestElapsedSumMs": 1932519,
+    "candidateReadModelRequests": 17,
+    "candidateReadRequestElapsedSumMs": 288797,
+    "candidateReadRequestInputTokens": 962688,
+    "candidateReadLocalSumMs": 28.518900000024587,
+    "localBundleMetricSumMs": 46.285399999978836,
+    "localStages": [
+      {
+        "operation": "begin",
+        "calls": 1,
+        "failures": 0,
+        "durationMs": 2.2664999999979045,
+        "startedAt": "2026-11-09T15:11:55.027Z",
+        "finishedAt": "2026-11-09T15:11:55.029Z"
+      },
+      {
+        "operation": "check",
+        "calls": 2,
+        "failures": 0,
+        "durationMs": 7.8401999999186955,
+        "startedAt": "2026-11-09T15:15:04.076Z",
+        "finishedAt": "2026-11-09T15:37:38.406Z"
+      },
+      {
+        "operation": "put",
+        "calls": 1,
+        "failures": 0,
+        "durationMs": 4.705700000049546,
+        "startedAt": "2026-11-09T15:37:00.414Z",
+        "finishedAt": "2026-11-09T15:37:00.419Z"
+      },
+      {
+        "operation": "read",
+        "calls": 17,
+        "failures": 0,
+        "durationMs": 28.518900000024587,
+        "startedAt": "2026-11-09T15:38:18.471Z",
+        "finishedAt": "2026-11-09T15:42:44.282Z"
+      },
+      {
+        "operation": "source",
+        "calls": 1,
+        "failures": 0,
+        "durationMs": 1.7291999999870313,
+        "startedAt": "2026-11-09T15:12:07.155Z",
+        "finishedAt": "2026-11-09T15:12:07.157Z"
+      },
+      {
+        "operation": "state",
+        "calls": 1,
+        "failures": 0,
+        "durationMs": 1.224900000001071,
+        "startedAt": "2026-11-09T15:14:05.629Z",
+        "finishedAt": "2026-11-09T15:14:05.630Z"
+      }
+    ],
+    "limits": "One failed sample. Model-request duration includes transport and response generation; no pure LLM reading duration, successful end-to-end duration, UI first-visible time, P95, SLA or speedup measured. Local bundle metrics cover only instrumented successful operations and exclude business commit/readback, which were not reached."
+  },
+  "budget": {
+    "partBytes": 262144,
+    "bundleBytes": 8388608,
+    "objects": 1000,
+    "parts": 128,
+    "repairRevisions": 12,
+    "repeatedErrors": 3,
+    "taskTurns": 128,
+    "taskElapsedMs": 3600000,
+    "taskInputTokens": 2000000,
+    "taskOutputTokens": 256000
+  },
+  "bundle": {
+    "revision": 1,
+    "acceptedRepairs": 0,
+    "candidateCounts": {
+      "documents": 9,
+      "byKind": {
+        "character": 1,
+        "scene": 4,
+        "prop": 1,
+        "voice": 3,
+        "plan": 0
+      },
+      "storyScenes": 4,
+      "shots": 4
+    },
+    "candidateObjects": [
+      {
+        "key": "character-shenmo",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "67bdd5c95bf63ba0cace967bf74bce9aa7ba617a233e67948f7131a4c1c6bfe1",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "prop-old-phone",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "7e2d912068756ed84be6ed1e2210df88929b618ae545d63d30d45b00bc9793f3",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-ref-01",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "11c5e94f5fd080f6937cb64ca34653757fbaddf9280eb98ae6e6ef8c9b067db7",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-ref-02",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "4d0af22deb23e152b2dde908a1f46b14c65aa91d25a1daca75384d55b8ccfd3e",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-ref-03",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "22d6934aa1e8383ea9cb6f3f319302d8576a1b956a655d1811037494797cff48",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-ref-04",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "b0142979f751e3c74ac1fda7eb30a1654dea83896b476d3ab7ebb3815248dfa8",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "voice-shenmo",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "321eff9be55468335cb88ac4fee9fc3115bf00642a64449bec6924d0abad92a6",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "voice-service",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "e792eacfdf9a142eaf5854aefbdb5cfc6c95defc9fa7c02792bbf025d26183c0",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "voice-woman",
+        "kind": "document",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "80317868317736fa8075075779d96f6825ca3c636aa27824cce38e4b0a527fec",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-01",
+        "kind": "scene",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "79c1a127af932b2cafe31ad105ef1de5459b601d03d28eef108ab42f78fb6ff5",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-02",
+        "kind": "scene",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "7dc3fdb73dff193d5154bf1de52af3ac274673e588add83ed010204bf37abd5c",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-03",
+        "kind": "scene",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "4688dd30844f83aecd93adff535264100c5a2dc251d3f045efe906c9669ce96a",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "scene-04",
+        "kind": "scene",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "554993839b3733c508c6fba19baba90817bfcde8c24c28b79242481f5ee1ece2",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "shot-01-01",
+        "kind": "shot",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "694661eb17cf7e7faa7de391d747efdadbc3787ef0fb27a397c81c356694cdb0",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "shot-02-01",
+        "kind": "shot",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "2da2ab5e99589555e63cb6c68e728346f6a0543e085f120730656143de106bae",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "shot-03-01",
+        "kind": "shot",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "0d7c9276933e32313fa7ba347966cc50360806f66741c61b46947e4846ea8425",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      },
+      {
+        "key": "shot-04-01",
+        "kind": "shot",
+        "resultId": "e7fe72c1-29a0-4fa5-8a5e-070010764b20",
+        "hash": "82865d3634183fcfa67c884afda3c4d3e5820ebd08498ccea480a38e23f45968",
+        "updatedAt": "2026-11-09T15:37:00.417Z",
+        "providerStepId": "299fd4d9-5d42-4aee-822d-ae2af9942272"
+      }
+    ],
+    "budget": {
+      "estimatedInputTokens": 11677,
+      "estimatedOutputTokens": 18000,
+      "outputAllowance": 16384,
+      "outputSource": "conservative-fallback",
+      "recommendedMode": "partitioned"
+    },
+    "lastCheckAt": "2026-11-09T15:37:38.400Z",
+    "lastCheckSealed": false,
+    "lastCheckUnread": [
+      "character-shenmo",
+      "prop-old-phone",
+      "scene-ref-01",
+      "scene-ref-02",
+      "scene-ref-03",
+      "scene-ref-04",
+      "voice-shenmo",
+      "voice-service",
+      "voice-woman",
+      "scene-01",
+      "scene-02",
+      "scene-03",
+      "scene-04",
+      "shot-01-01",
+      "shot-02-01",
+      "shot-03-01",
+      "shot-04-01"
+    ],
+    "readback": {
+      "status": "bundle_not_committed",
+      "verified": false
+    },
+    "committed": false,
+    "savedDocuments": 0,
+    "savedScenes": 0,
+    "savedShots": 0,
+    "review": {
+      "available": true,
+      "readyToSubmit": false,
+      "approved": false,
+      "currentTargetCount": 17,
+      "acceptedTargetCount": 0,
+      "pendingTargetCount": 17,
+      "openIssueCount": 0
+    },
+    "media": {
+      "jobs": 0,
+      "drafts": 0,
+      "audio": 0
+    },
+    "integrity": {
+      "quickCheck": [
+        {
+          "quick_check": "ok"
+        }
+      ],
+      "foreignKeyCheck": []
+    }
+  },
+  "failures": {
+    "total": 9,
+    "inToolLedger": 3,
+    "preflightOnly": 6,
+    "entries": [
+      {
+        "id": "e342a34b-d2ca-45f0-a41a-a18fb12f5074",
+        "callId": "call_4ae6db523bb441c991ba1b3e9cdc7de7",
+        "toolName": "conversation.task.checkpoint",
+        "createdAt": "2026-11-09T15:10:42.138Z",
+        "content": "Validation failed for tool \"conversation.task.checkpoint\":\n  - deliverables: must not have fewer than 1 items\nDeliverables: documentKind is only for document.submit_draft (scripts use plan); requireReferences supports scene.update_shot_prompts and scene structure creation. Structure tools count saved scenes. targetIds are existing output IDs; omit them for new outputs.",
+        "operation": "plan",
+        "objects": null,
+        "recordedInToolCallLedger": false
+      },
+      {
+        "id": "36170e91-c849-4f97-a005-961a3372993c",
+        "callId": "call_6d8dfffe976d46fdbfeef12c9791bf97",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:13:41.102Z",
+        "content": "Validation failed for tool \"production.bundle\":\n  - part.scenes: must have required properties scenes, shots",
+        "operation": "put",
+        "partKey": "part-01-materials",
+        "objects": {
+          "documents": 8,
+          "scenes": 0,
+          "shots": 0
+        },
+        "recordedInToolCallLedger": false
+      },
+      {
+        "id": "b4ddbb01-74a4-47d1-bac0-9f92c8130186",
+        "callId": "call_616d623bf2764c2ca41adc15d5bb9955",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:18:46.723Z",
+        "content": "{\"version\":1,\"status\":\"rejected\",\"error\":{\"code\":\"AGENT_TOOL_ARGUMENTS_INVALID\",\"message\":\"speech speaker identity does not match visibility.\",\"retryable\":true}}",
+        "operation": "put",
+        "partKey": "part-01-core-scenes-01-02",
+        "objects": {
+          "documents": 9,
+          "scenes": 2,
+          "shots": 3
+        },
+        "recordedInToolCallLedger": true,
+        "matchedToolLedgerId": "8f66acc2-eb9f-4228-bd81-3d5baca21282"
+      },
+      {
+        "id": "e2a0ad18-9f8c-422a-b29b-b0990a58955c",
+        "callId": "call_4e15cf1aae5c46709cee68aa099ce822",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:22:03.288Z",
+        "content": "Validation failed for tool \"production.bundle\":\n  - part.documents.6.contentIR.data: must have required properties data\n  - part.documents.7.contentIR.data: must have required properties data\n  - part.documents.8.contentIR.data: must have required properties data",
+        "operation": "put",
+        "partKey": "part-01",
+        "objects": {
+          "documents": 9,
+          "scenes": 2,
+          "shots": 3
+        },
+        "recordedInToolCallLedger": false
+      },
+      {
+        "id": "d829e26c-82ae-47e5-aeb2-7aa8b8767332",
+        "callId": "call_9fabc9bce5994733af1631eb30f5afca",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:26:53.840Z",
+        "content": "{\"version\":1,\"status\":\"rejected\",\"error\":{\"code\":\"AGENT_TOOL_ARGUMENTS_INVALID\",\"message\":\"speech speaker identity does not match visibility.\",\"retryable\":true}}",
+        "operation": "put",
+        "partKey": "all-v1",
+        "objects": {
+          "documents": 9,
+          "scenes": 2,
+          "shots": 8
+        },
+        "recordedInToolCallLedger": true,
+        "matchedToolLedgerId": "f4e78f8b-4f1d-4b3c-9e0c-526174b4afcc"
+      },
+      {
+        "id": "428ed1c9-3e5f-4c3e-991d-8523bf72e1c8",
+        "callId": "call_29a6c487181647c88648a54f81ec2927",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:31:01.408Z",
+        "content": "Unsupported fields: \"part.shots[0].references.speech\".\nValidation failed for tool \"production.bundle\":\n  - part.shots.0.speech: must have required properties speech\n  - part.shots.0.references: must not have additional properties",
+        "operation": "put",
+        "partKey": "part-01-complete",
+        "objects": {
+          "documents": 9,
+          "scenes": 4,
+          "shots": 2
+        },
+        "recordedInToolCallLedger": false
+      },
+      {
+        "id": "83e7db4e-21e7-4774-85a3-21abf06c7811",
+        "callId": "call_be95cca16b764e05b4f016ca5b86d27c",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:32:35.182Z",
+        "content": "{\"version\":1,\"status\":\"rejected\",\"error\":{\"code\":\"AGENT_TOOL_ARGUMENTS_INVALID\",\"message\":\"voice contentIR.sampleText must contain 1–10000 characters.\",\"retryable\":true}}",
+        "operation": "put",
+        "partKey": "shared-materials",
+        "objects": {
+          "documents": 9,
+          "scenes": 4,
+          "shots": 0
+        },
+        "recordedInToolCallLedger": true,
+        "matchedToolLedgerId": "562ad76b-23bf-407d-8049-a9dad18fe556"
+      },
+      {
+        "id": "594c6f0b-9c03-4885-b8be-b1849895fed3",
+        "callId": "call_93691631747e4e1899c333c0b777a1a5",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:33:50.253Z",
+        "content": "Unsupported fields: \"part.reused\".\nValidation failed for tool \"production.bundle\":\n  - part.scenes: must have required properties scenes, shots\n  - part: must not have additional properties\n  - part.documents.7: must be object\n  - part.documents.8: must be object\n  - part.documents.9: must be object",
+        "operation": "put",
+        "partKey": "part-all-v1",
+        "objects": {
+          "documents": 10,
+          "scenes": 0,
+          "shots": 0
+        },
+        "recordedInToolCallLedger": false
+      },
+      {
+        "id": "96a843ea-1ebc-461e-b0f9-59c852d5ef46",
+        "callId": "call_3432c64b96604815bf02753f346810e5",
+        "toolName": "production.bundle",
+        "createdAt": "2026-11-09T15:37:53.366Z",
+        "content": "Validation failed for tool \"production.bundle\":\n  - limit: must be <= 10000",
+        "operation": "read",
+        "objects": null,
+        "recordedInToolCallLedger": false
+      }
+    ],
+    "ledgerAssociation": "Matched by identical tool, error text and timestamps less than one second apart; provider_step_id is not the external tool call ID.",
+    "allFailuresMustBeCounted": "agent_tool_calls alone exposes only three failures; Result Store records nine. assertBundleRunBudget reads only the former and matches only BUNDLE_/TASK_REVIEW_ codes. Preflight failures and generic AGENT_TOOL_ARGUMENTS_INVALID are omitted from the same-error no-progress stop."
+  },
+  "contentAcceptance": {
+    "decision": "not_acceptable",
+    "candidateRevision": 1,
+    "acceptedSystemReview": false,
+    "automaticFactsOnly": {
+      "observedAt": "2026-11-09T15:44:35.613Z",
+      "taskStatus": "failed",
+      "candidateOnly": true,
+      "automaticFactsOnly": true,
+      "semanticAcceptance": "Automatic facts do not confer acceptance. Independent full-content audit completed separately below; system review was never accepted.",
+      "counts": {
+        "documents": 9,
+        "byKind": {
+          "character": 1,
+          "scene": 4,
+          "prop": 1,
+          "voice": 3,
+          "plan": 0
+        },
+        "storyScenes": 4,
+        "shots": 4
+      },
+      "literalChecks": [
+        {
+          "text": "请尽快前往取餐。",
+          "promptTargets": [
+            "shot-01-01"
+          ],
+          "speechTargets": []
+        },
+        {
+          "text": "请务必完成配送。收货人正在等待。",
+          "promptTargets": [
+            "shot-01-01"
+          ],
+          "speechTargets": []
+        },
+        {
+          "text": "我接到一份异常订单。商家电话空号，收货地址是旧客运站，收货人没有电话。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": [
+            "shot-02-01"
+          ]
+        },
+        {
+          "text": "这边显示订单状态正常，商家正在备餐。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": [
+            "shot-02-01"
+          ]
+        },
+        {
+          "text": "那家粥铺已经关门了。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": [
+            "shot-02-01"
+          ]
+        },
+        {
+          "text": "系统显示商家营业中。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": [
+            "shot-02-01"
+          ]
+        },
+        {
+          "text": "我就在店附近。门是关的，里面没有灯。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": [
+            "shot-02-01"
+          ]
+        },
+        {
+          "text": "如果商家无法出餐，您可以到店拍照，然后在订单页面申请异常报备。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": []
+        },
+        {
+          "text": "收货人呢？这个名字和电话是怎么回事？",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "这边只能看到收货人姓名，电话号码显示为空。您先按照系统流程取餐，如果确实无法联系收货人，可以申请取消。",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "订单提示让我必须完成配送。",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "平台没有这类提示。",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "我拍照以后取消，会扣钱吗？",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "异常订单不会扣除骑手责任。",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "能帮我登记吗？",
+          "promptTargets": [],
+          "speechTargets": []
+        },
+        {
+          "text": "放在最后一排，不要交给门卫。",
+          "promptTargets": [
+            "shot-02-01"
+          ],
+          "speechTargets": []
+        },
+        {
+          "text": "如果是沈默送来的，不要报警。",
+          "promptTargets": [
+            "shot-03-01"
+          ],
+          "speechTargets": [
+            "shot-03-01"
+          ]
+        },
+        {
+          "text": "他们会先查你的手机。不要相信平台上的时间，也不要去找——",
+          "promptTargets": [
+            "shot-03-01"
+          ],
+          "speechTargets": [
+            "shot-03-01"
+          ]
+        },
+        {
+          "text": "这一次，不要把东西交给活人。",
+          "promptTargets": [
+            "shot-04-01"
+          ],
+          "speechTargets": []
+        }
+      ],
+      "markerChecks": [
+        {
+          "key": "shot-01-01",
+          "title": "高架桥下看见异常订单",
+          "promptCharacters": 324,
+          "sections": {
+            "视频目标": true,
+            "【基础设定】": false,
+            "【氛围与画质】": false,
+            "动态流程": false,
+            "负面约束": false
+          },
+          "durationSeconds": 18,
+          "timingRationale": "手机信息阅读与认名需要短暂停顿，单一观察目标适合一镜完成。",
+          "beats": [
+            {
+              "kind": "action",
+              "startSeconds": 0,
+              "endSeconds": 5,
+              "description": "沈默停下并查看手机。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 5,
+              "endSeconds": 12,
+              "description": "他读取异常订单信息。"
+            },
+            {
+              "kind": "pause",
+              "startSeconds": 12,
+              "endSeconds": 15,
+              "description": "看到许妍姓名后停顿。"
+            },
+            {
+              "kind": "camera",
+              "startSeconds": 15,
+              "endSeconds": 18,
+              "description": "焦点回到沈默反应。"
+            }
+          ],
+          "visualCharacters": [
+            "character-shenmo"
+          ],
+          "sceneReferences": [
+            "scene-ref-01"
+          ],
+          "propReferences": [],
+          "speech": []
+        },
+        {
+          "key": "shot-02-01",
+          "title": "关门粥铺与客服核验",
+          "promptCharacters": 447,
+          "sections": {
+            "视频目标": true,
+            "【基础设定】": false,
+            "【氛围与画质】": false,
+            "动态流程": false,
+            "负面约束": false
+          },
+          "durationSeconds": 42,
+          "timingRationale": "客服对白决定主要时长，现场观察与骑行作为同镜动作衔接；对白按自然语速，不压缩原文。",
+          "beats": [
+            {
+              "kind": "action",
+              "startSeconds": 0,
+              "endSeconds": 8,
+              "description": "确认关门无灯并拍照。"
+            },
+            {
+              "kind": "dialogue",
+              "startSeconds": 8,
+              "endSeconds": 30,
+              "description": "沈默和客服按源文顺序通话核验。"
+            },
+            {
+              "kind": "pause",
+              "startSeconds": 30,
+              "endSeconds": 34,
+              "description": "保存截图并停顿。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 34,
+              "endSeconds": 42,
+              "description": "骑行离开，备注更新。"
+            }
+          ],
+          "visualCharacters": [
+            "character-shenmo"
+          ],
+          "sceneReferences": [
+            "scene-ref-02"
+          ],
+          "propReferences": [],
+          "speech": [
+            {
+              "key": "s2-shenmo-1",
+              "speakerKind": "character",
+              "character": {
+                "localKey": "character-shenmo"
+              },
+              "visibility": "visible",
+              "voice": {
+                "localKey": "voice-shenmo"
+              },
+              "text": "我接到一份异常订单。商家电话空号，收货地址是旧客运站，收货人没有电话。",
+              "startSeconds": 8
+            },
+            {
+              "key": "s2-service-1",
+              "speakerKind": "narration",
+              "visibility": "narration",
+              "voice": {
+                "localKey": "voice-service"
+              },
+              "text": "这边显示订单状态正常，商家正在备餐。",
+              "startSeconds": 12
+            },
+            {
+              "key": "s2-shenmo-2",
+              "speakerKind": "character",
+              "character": {
+                "localKey": "character-shenmo"
+              },
+              "visibility": "visible",
+              "voice": {
+                "localKey": "voice-shenmo"
+              },
+              "text": "那家粥铺已经关门了。",
+              "startSeconds": 15
+            },
+            {
+              "key": "s2-service-2",
+              "speakerKind": "narration",
+              "visibility": "narration",
+              "voice": {
+                "localKey": "voice-service"
+              },
+              "text": "系统显示商家营业中。",
+              "startSeconds": 18
+            },
+            {
+              "key": "s2-shenmo-3",
+              "speakerKind": "character",
+              "character": {
+                "localKey": "character-shenmo"
+              },
+              "visibility": "visible",
+              "voice": {
+                "localKey": "voice-shenmo"
+              },
+              "text": "我就在店附近。门是关的，里面没有灯。",
+              "startSeconds": 21
+            }
+          ]
+        },
+        {
+          "key": "shot-03-01",
+          "title": "旧客运站找到旧手机并听见录音",
+          "promptCharacters": 427,
+          "sections": {
+            "视频目标": true,
+            "【基础设定】": false,
+            "【氛围与画质】": false,
+            "动态流程": false,
+            "负面约束": false
+          },
+          "durationSeconds": 52,
+          "timingRationale": "观察、进入、寻找和听录音服务同一信息揭示，录音停顿与反应占据自然时长，不机械拆镜。",
+          "beats": [
+            {
+              "kind": "action",
+              "startSeconds": 0,
+              "endSeconds": 12,
+              "description": "观察站外入口。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 12,
+              "endSeconds": 24,
+              "description": "进入大厅并走到最后一排。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 24,
+              "endSeconds": 32,
+              "description": "找到并拾起旧手机。"
+            },
+            {
+              "kind": "dialogue",
+              "startSeconds": 32,
+              "endSeconds": 45,
+              "description": "画外录音发出两句警告并被噪声截断。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 45,
+              "endSeconds": 52,
+              "description": "手机熄灭，沈默记录内容。"
+            }
+          ],
+          "visualCharacters": [
+            "character-shenmo"
+          ],
+          "sceneReferences": [
+            "scene-ref-03"
+          ],
+          "propReferences": [
+            "prop-old-phone"
+          ],
+          "speech": [
+            {
+              "key": "s3-woman-1",
+              "speakerKind": "narration",
+              "visibility": "narration",
+              "voice": {
+                "localKey": "voice-woman"
+              },
+              "text": "如果是沈默送来的，不要报警。",
+              "startSeconds": 32
+            },
+            {
+              "key": "s3-woman-2",
+              "speakerKind": "narration",
+              "visibility": "narration",
+              "voice": {
+                "localKey": "voice-woman"
+              },
+              "text": "他们会先查你的手机。不要相信平台上的时间，也不要去找——",
+              "startSeconds": 37
+            }
+          ]
+        },
+        {
+          "key": "shot-04-01",
+          "title": "第二单指向沈默出租屋",
+          "promptCharacters": 310,
+          "sections": {
+            "视频目标": true,
+            "【基础设定】": false,
+            "【氛围与画质】": false,
+            "动态流程": false,
+            "负面约束": false
+          },
+          "durationSeconds": 24,
+          "timingRationale": "订单状态和第二单备注需要可读停顿，离站与停步保持一个连续目标。",
+          "beats": [
+            {
+              "kind": "action",
+              "startSeconds": 0,
+              "endSeconds": 7,
+              "description": "收起旧手机并离站。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 7,
+              "endSeconds": 14,
+              "description": "原订单异常完成且收入为零。"
+            },
+            {
+              "kind": "pause",
+              "startSeconds": 14,
+              "endSeconds": 18,
+              "description": "第二单提示音使沈默停步。"
+            },
+            {
+              "kind": "action",
+              "startSeconds": 18,
+              "endSeconds": 24,
+              "description": "读取地址和备注，意识到住址被掌握。"
+            }
+          ],
+          "visualCharacters": [
+            "character-shenmo"
+          ],
+          "sceneReferences": [
+            "scene-ref-04"
+          ],
+          "propReferences": [
+            "prop-old-phone"
+          ],
+          "speech": []
+        }
+      ],
+      "sceneChecks": [
+        {
+          "key": "scene-01",
+          "title": "场次一：高架桥下异常订单落到沈默手中",
+          "promptCharacters": 147,
+          "orderedShotKeys": [
+            "shot-01-01"
+          ],
+          "fullShotPromptIncluded": [
+            {
+              "key": "shot-01-01",
+              "included": false
+            }
+          ]
+        },
+        {
+          "key": "scene-02",
+          "title": "场次二：订单核验与出发",
+          "promptCharacters": 150,
+          "orderedShotKeys": [
+            "shot-02-01"
+          ],
+          "fullShotPromptIncluded": [
+            {
+              "key": "shot-02-01",
+              "included": false
+            }
+          ]
+        },
+        {
+          "key": "scene-03",
+          "title": "场次三：旧客运站寻找与录音揭示",
+          "promptCharacters": 253,
+          "orderedShotKeys": [
+            "shot-03-01"
+          ],
+          "fullShotPromptIncluded": [
+            {
+              "key": "shot-03-01",
+              "included": false
+            }
+          ]
+        },
+        {
+          "key": "scene-04",
+          "title": "场次四：车站外第二单把危险带回家",
+          "promptCharacters": 167,
+          "orderedShotKeys": [
+            "shot-04-01"
+          ],
+          "fullShotPromptIncluded": [
+            {
+              "key": "shot-04-01",
+              "included": false
+            }
+          ]
+        }
+      ],
+      "voiceChecks": [
+        {
+          "key": "voice-shenmo",
+          "title": "沈默对白试音",
+          "descriptionCharacters": 37,
+          "sampleText": "我接到一份异常订单。商家电话空号，收货地址是旧客运站，收货人没有电话。",
+          "irKind": "voice"
+        },
+        {
+          "key": "voice-service",
+          "title": "平台客服对白试音",
+          "descriptionCharacters": 37,
+          "sampleText": "这边显示订单状态正常，商家正在备餐。",
+          "irKind": "voice"
+        },
+        {
+          "key": "voice-woman",
+          "title": "录音中的年轻女人对白试音",
+          "descriptionCharacters": 63,
+          "sampleText": "如果是沈默送来的，不要报警。",
+          "irKind": "voice"
+        }
+      ],
+      "refFailures": [],
+      "totalEstimatedStorySeconds": 136,
+      "media": {
+        "jobs": 0,
+        "drafts": 0,
+        "audio": 0
+      },
+      "integrity": {
+        "quickCheck": [
+          {
+            "quick_check": "ok"
+          }
+        ],
+        "foreignKeyCheck": []
+      },
+      "readback": {
+        "status": "bundle_not_committed",
+        "verified": false
+      }
+    },
+    "independentFindings": [
+      {
+        "id": "CONTENT-01",
+        "targets": [
+          "character-shenmo"
+        ],
+        "issue": "The character document contains identity facts and unknown appearance notes, but no usable character-image prompt or required main figure, five full-body views, six head angles, clothing breakdown, material/color board and expression layout. Unknown appearance does not remove the required layout."
+      },
+      {
+        "id": "CONTENT-02",
+        "targets": [
+          "scene-ref-01",
+          "scene-ref-02",
+          "scene-ref-03",
+          "scene-ref-04",
+          "prop-old-phone"
+        ],
+        "issue": "Material documents are story/environment descriptions, not complete image prompts. Scene documents omit the required dominant panorama plus matching detail insets on one canvas and n=1. The prop document describes plot use rather than an independent object-image prompt."
+      },
+      {
+        "id": "CONTENT-03",
+        "targets": [
+          "shot-01-01",
+          "shot-02-01",
+          "shot-03-01",
+          "shot-04-01"
+        ],
+        "issue": "All four shot prompts omit the explicitly requested sections 【基础设定】, 【氛围与画质】, 动态流程 and 负面约束. Content also lacks the required detail density and per-cue performance/reaction specification."
+      },
+      {
+        "id": "CONTENT-04",
+        "targets": [
+          "shot-02-01"
+        ],
+        "issue": "Seven required literal lines are absent from the shot prompt. The phrase 其余核验对白按源文顺序继续 substitutes for complete text. Only five speech cues are present, so even one line printed in the prompt is missing from the typed speech plan."
+      },
+      {
+        "id": "CONTENT-05",
+        "targets": [
+          "shot-02-01"
+        ],
+        "issue": "The prompt assigns the complete customer-service exchange to seconds 8–30 (22 seconds), including lines it omits. The source's full exchange cannot be represented by claiming natural speech while compressing it into this interval; speech cue intervals also crowd the first lines."
+      },
+      {
+        "id": "CONTENT-06",
+        "targets": [
+          "scene-01",
+          "scene-02",
+          "scene-03",
+          "scene-04"
+        ],
+        "issue": "All four scene prompts are summaries and do not include their ordered shot's complete prompt as explicitly required."
+      },
+      {
+        "id": "CONTENT-07",
+        "targets": [
+          "shot-02-01",
+          "shot-03-01"
+        ],
+        "issue": "Customer-service dialogue and the recorded woman's speech are typed as narration/narration to satisfy validation. They are offscreen character speech in the source; speaker identity and visibility semantics have been conflated."
+      },
+      {
+        "id": "CONTENT-08",
+        "targets": [
+          "shot-02-01",
+          "scene-ref-02"
+        ],
+        "issue": "The shot shows the closed congee shop, but its bound scene document describes a generic city cycling route and omits the shop. Type-correct keys do not establish correct location coverage."
+      },
+      {
+        "id": "CONTENT-09",
+        "targets": [
+          "character-shenmo"
+        ],
+        "issue": "The speaking character has no defaultVoice relation, although a voice-shenmo object exists. Per-shot cues establish some relations but do not establish this default relation."
+      },
+      {
+        "id": "CONTENT-10",
+        "targets": [
+          "shot-04-01"
+        ],
+        "issue": "The opening states the old phone has already been put in the delivery box, then the 0–7 second action puts it in the box again. Initial state and action continuity conflict."
+      },
+      {
+        "id": "CONTENT-11",
+        "targets": [
+          "shot-02-01",
+          "shot-03-01"
+        ],
+        "issue": "The source's state change from not actually collecting food to marked picked-up is omitted. Own working phone, bicycle and delivery box are used but have no corresponding material definitions; only the cracked old phone has a prop document."
+      }
+    ],
+    "snapshotNote": "Re-read after terminal. Revision remains 1, repairs 0, all candidate entry timestamps remain the first put. Independent audit is an acceptance finding, never an injected Runtime review receipt.",
+    "customerServiceDialogue": {
+      "sourceLines": 13,
+      "sourceCharactersIncludingPunctuation": 246,
+      "assignedSeconds": 22,
+      "charactersPerSecond": 11.181818181818182,
+      "naturalDeliveryAccepted": false
+    },
+    "missingDialogue": [
+      "收货人呢？这个名字和电话是怎么回事？",
+      "这边只能看到收货人姓名，电话号码显示为空。您先按照系统流程取餐，如果确实无法联系收货人，可以申请取消。",
+      "订单提示让我必须完成配送。",
+      "平台没有这类提示。",
+      "我拍照以后取消，会扣钱吗？",
+      "异常订单不会扣除骑手责任。",
+      "能帮我登记吗？"
+    ],
+    "storyDurationClaimSeconds": 136,
+    "storyDurationAccepted": false,
+    "shotCountIsNotAFailure": "Four shots are not rejected merely for differing from an older 13-shot result; completeness and natural timing are assessed from this source and constraints."
+  },
+  "providerRequests": [
+    {
+      "ordinal": 1,
+      "id": "7e16e8c2-c65d-4bcd-9193-f4da1537c8c0",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:10:27.674Z",
+      "completedAt": "2026-11-09T15:10:36.013Z",
+      "elapsedMs": 8339,
+      "toolName": "conversation.task.checkpoint",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 24642,
+        "cachedInputTokens": 0,
+        "outputTokens": 106,
+        "totalTokens": 24748
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:10:27.674Z",
+        "dispatching": "2026-11-09T15:10:27.688Z",
+        "native_queued": "2026-11-09T15:10:27.704Z",
+        "admitted": "2026-11-09T15:10:27.705Z",
+        "sent": "2026-11-09T15:10:34.037Z",
+        "headers": "2026-11-09T15:10:34.039Z",
+        "first_byte": "2026-11-09T15:10:34.040Z",
+        "visible_text": "2026-11-09T15:10:34.041Z",
+        "tool_arguments": "2026-11-09T15:10:35.812Z",
+        "usage": "2026-11-09T15:10:36.008Z",
+        "complete": "2026-11-09T15:10:36.013Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.009700000000009368,
+          "dispatching": 14.442000000000007,
+          "native_queued": 29.946300000000008,
+          "admitted": 31.508999999999958,
+          "sent": 6360.7776,
+          "headers": 6365.4424,
+          "first_byte": 6366.6292,
+          "visible_text": 6367.6838,
+          "tool_arguments": 8137.530900000001,
+          "complete": 8338.963899999999
+        },
+        "nativeFirstMs": {
+          "native_queued": 8,
+          "admitted": 8,
+          "sent": 6338,
+          "headers": 6338,
+          "first_byte": 6339,
+          "tool_arguments": 8112
+        }
+      }
+    },
+    {
+      "ordinal": 2,
+      "id": "3400d576-8934-4a1b-86c0-ecbee327484f",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:10:36.076Z",
+      "completedAt": "2026-11-09T15:10:42.132Z",
+      "elapsedMs": 6056,
+      "toolName": "conversation.task.checkpoint",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 26366,
+        "cachedInputTokens": 0,
+        "outputTokens": 36,
+        "totalTokens": 26402
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:10:36.076Z",
+        "dispatching": "2026-11-09T15:10:36.088Z",
+        "native_queued": "2026-11-09T15:10:36.103Z",
+        "admitted": "2026-11-09T15:10:36.104Z",
+        "sent": "2026-11-09T15:10:41.830Z",
+        "headers": "2026-11-09T15:10:41.831Z",
+        "first_byte": "2026-11-09T15:10:41.832Z",
+        "tool_arguments": "2026-11-09T15:10:41.833Z",
+        "usage": "2026-11-09T15:10:42.128Z",
+        "complete": "2026-11-09T15:10:42.132Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005699999999706051,
+          "dispatching": 12.053400000000693,
+          "native_queued": 26.71860000000015,
+          "admitted": 28.05290000000059,
+          "sent": 5753.454900000001,
+          "headers": 5754.798199999999,
+          "first_byte": 5755.9779,
+          "tool_arguments": 5757.3598999999995,
+          "complete": 6055.3847000000005
+        },
+        "nativeFirstMs": {
+          "native_queued": 8,
+          "admitted": 8,
+          "sent": 5735,
+          "headers": 5735,
+          "first_byte": 5735,
+          "tool_arguments": 5735
+        }
+      }
+    },
+    {
+      "ordinal": 3,
+      "id": "6690935f-2e0b-487b-b60c-5adaa579a0d5",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:10:42.168Z",
+      "completedAt": "2026-11-09T15:10:50.605Z",
+      "elapsedMs": 8437,
+      "toolName": "tools.load",
+      "argumentBytes": 142,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 28607,
+        "cachedInputTokens": 15606,
+        "outputTokens": 56,
+        "totalTokens": 28663
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:10:42.168Z",
+        "dispatching": "2026-11-09T15:10:42.180Z",
+        "native_queued": "2026-11-09T15:10:42.196Z",
+        "admitted": "2026-11-09T15:10:42.198Z",
+        "sent": "2026-11-09T15:10:50.031Z",
+        "headers": "2026-11-09T15:10:50.032Z",
+        "first_byte": "2026-11-09T15:10:50.034Z",
+        "tool_arguments": "2026-11-09T15:10:50.049Z",
+        "usage": "2026-11-09T15:10:50.603Z",
+        "complete": "2026-11-09T15:10:50.605Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.007499999999708962,
+          "dispatching": 12.889199999999619,
+          "native_queued": 28.469499999999243,
+          "admitted": 30.22269999999844,
+          "sent": 7863.244599999998,
+          "headers": 7864.749499999998,
+          "first_byte": 7866.042300000001,
+          "tool_arguments": 7881.308699999998,
+          "complete": 8437.1512
+        },
+        "nativeFirstMs": {
+          "native_queued": 8,
+          "admitted": 8,
+          "sent": 7843,
+          "headers": 7843,
+          "first_byte": 7843,
+          "tool_arguments": 7843
+        }
+      }
+    },
+    {
+      "ordinal": 4,
+      "id": "3d3e03a3-9140-4a71-a509-2db324d2f5e2",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:10:50.656Z",
+      "completedAt": "2026-11-09T15:11:03.193Z",
+      "elapsedMs": 12537,
+      "toolName": "production.skill.read",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 32936,
+        "cachedInputTokens": 0,
+        "outputTokens": 133,
+        "reasoningTokens": 23,
+        "totalTokens": 33069
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:10:50.656Z",
+        "dispatching": "2026-11-09T15:10:50.671Z",
+        "native_queued": "2026-11-09T15:10:50.694Z",
+        "admitted": "2026-11-09T15:10:50.695Z",
+        "sent": "2026-11-09T15:10:59.964Z",
+        "headers": "2026-11-09T15:10:59.966Z",
+        "first_byte": "2026-11-09T15:10:59.967Z",
+        "visible_text": "2026-11-09T15:10:59.969Z",
+        "tool_arguments": "2026-11-09T15:11:02.890Z",
+        "usage": "2026-11-09T15:11:03.190Z",
+        "complete": "2026-11-09T15:11:03.193Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.008299999997689156,
+          "dispatching": 14.400399999998626,
+          "native_queued": 37.275399999998626,
+          "admitted": 38.83729999999923,
+          "sent": 9307.764799999997,
+          "headers": 9309.2598,
+          "first_byte": 9310.453399999999,
+          "visible_text": 9312.2598,
+          "tool_arguments": 12233.908699999996,
+          "complete": 12536.7326
+        },
+        "nativeFirstMs": {
+          "native_queued": 12,
+          "admitted": 12,
+          "sent": 9283,
+          "headers": 9283,
+          "first_byte": 9283,
+          "tool_arguments": 12206
+        }
+      }
+    },
+    {
+      "ordinal": 5,
+      "id": "2bc76904-bace-49dd-9d00-4d723c325a6b",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:11:03.256Z",
+      "completedAt": "2026-11-09T15:11:24.642Z",
+      "elapsedMs": 21386,
+      "toolName": "project.get_context",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 42024,
+        "cachedInputTokens": 38322,
+        "outputTokens": 219,
+        "reasoningTokens": 195,
+        "totalTokens": 42243
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:11:03.256Z",
+        "dispatching": "2026-11-09T15:11:03.272Z",
+        "native_queued": "2026-11-09T15:11:03.296Z",
+        "admitted": "2026-11-09T15:11:03.297Z",
+        "sent": "2026-11-09T15:11:24.399Z",
+        "headers": "2026-11-09T15:11:24.401Z",
+        "first_byte": "2026-11-09T15:11:24.402Z",
+        "tool_arguments": "2026-11-09T15:11:24.403Z",
+        "usage": "2026-11-09T15:11:24.637Z",
+        "complete": "2026-11-09T15:11:24.642Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005799999998998828,
+          "dispatching": 16.366800000003423,
+          "native_queued": 39.6221000000005,
+          "admitted": 41.14410000000498,
+          "sent": 21143.028300000005,
+          "headers": 21144.757300000005,
+          "first_byte": 21145.929900000003,
+          "tool_arguments": 21147.035600000003,
+          "complete": 21385.692800000004
+        },
+        "nativeFirstMs": {
+          "native_queued": 14,
+          "admitted": 14,
+          "sent": 21117,
+          "headers": 21117,
+          "first_byte": 21117,
+          "tool_arguments": 21117
+        }
+      }
+    },
+    {
+      "ordinal": 6,
+      "id": "d19b512d-987b-4ad5-9373-75dbd7f9093f",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:11:24.730Z",
+      "completedAt": "2026-11-09T15:11:42.733Z",
+      "elapsedMs": 18003,
+      "toolName": "project.structure.get",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 40561,
+        "cachedInputTokens": 22021,
+        "outputTokens": 302,
+        "reasoningTokens": 155,
+        "totalTokens": 40863
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:11:24.730Z",
+        "dispatching": "2026-11-09T15:11:24.746Z",
+        "native_queued": "2026-11-09T15:11:24.769Z",
+        "admitted": "2026-11-09T15:11:24.770Z",
+        "sent": "2026-11-09T15:11:39.330Z",
+        "headers": "2026-11-09T15:11:39.332Z",
+        "first_byte": "2026-11-09T15:11:39.334Z",
+        "visible_text": "2026-11-09T15:11:39.336Z",
+        "tool_arguments": "2026-11-09T15:11:42.522Z",
+        "usage": "2026-11-09T15:11:42.728Z",
+        "complete": "2026-11-09T15:11:42.733Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0051000000021304,
+          "dispatching": 16.52900000000227,
+          "native_queued": 39.15260000000126,
+          "admitted": 40.47350000000006,
+          "sent": 14599.330699999999,
+          "headers": 14602.290400000005,
+          "first_byte": 14603.899500000007,
+          "visible_text": 14606.154199999997,
+          "tool_arguments": 17792.621600000006,
+          "complete": 18003.21510000001
+        },
+        "nativeFirstMs": {
+          "native_queued": 13,
+          "admitted": 13,
+          "sent": 14573,
+          "headers": 14573,
+          "first_byte": 14573,
+          "tool_arguments": 17765
+        }
+      }
+    },
+    {
+      "ordinal": 7,
+      "id": "9a4dc4ec-840d-41ef-b05e-f0b8726c0bdd",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:11:42.807Z",
+      "completedAt": "2026-11-09T15:11:55.003Z",
+      "elapsedMs": 12196,
+      "toolName": "production.bundle",
+      "argumentBytes": 37,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 42831,
+        "cachedInputTokens": 22021,
+        "outputTokens": 160,
+        "reasoningTokens": 124,
+        "totalTokens": 42991
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:11:42.807Z",
+        "dispatching": "2026-11-09T15:11:42.825Z",
+        "native_queued": "2026-11-09T15:11:42.849Z",
+        "admitted": "2026-11-09T15:11:42.851Z",
+        "sent": "2026-11-09T15:11:54.322Z",
+        "headers": "2026-11-09T15:11:54.323Z",
+        "first_byte": "2026-11-09T15:11:54.324Z",
+        "tool_arguments": "2026-11-09T15:11:54.326Z",
+        "usage": "2026-11-09T15:11:54.999Z",
+        "complete": "2026-11-09T15:11:55.003Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005199999999604188,
+          "dispatching": 18.079999999987194,
+          "native_queued": 41.633600000001024,
+          "admitted": 43.0283999999956,
+          "sent": 11513.4093,
+          "headers": 11515.920099999988,
+          "first_byte": 11517.099999999991,
+          "tool_arguments": 11518.232399999994,
+          "complete": 12194.621599999999
+        },
+        "nativeFirstMs": {
+          "native_queued": 14,
+          "admitted": 14,
+          "sent": 11485,
+          "headers": 11485,
+          "first_byte": 11486,
+          "tool_arguments": 11487
+        }
+      }
+    },
+    {
+      "ordinal": 8,
+      "id": "00ea75b0-053d-4917-8287-00240668d58b",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:11:55.105Z",
+      "completedAt": "2026-11-09T15:12:07.123Z",
+      "elapsedMs": 12018,
+      "toolName": "production.bundle",
+      "argumentBytes": 98,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 41255,
+        "cachedInputTokens": 0,
+        "outputTokens": 156,
+        "reasoningTokens": 86,
+        "totalTokens": 41411
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:11:55.105Z",
+        "dispatching": "2026-11-09T15:11:55.127Z",
+        "native_queued": "2026-11-09T15:11:55.152Z",
+        "admitted": "2026-11-09T15:11:55.153Z",
+        "sent": "2026-11-09T15:12:05.772Z",
+        "headers": "2026-11-09T15:12:05.774Z",
+        "first_byte": "2026-11-09T15:12:05.775Z",
+        "tool_arguments": "2026-11-09T15:12:05.776Z",
+        "usage": "2026-11-09T15:12:07.120Z",
+        "complete": "2026-11-09T15:12:07.123Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005900000003748573,
+          "dispatching": 21.92359999999462,
+          "native_queued": 46.46450000000186,
+          "admitted": 47.869800000000396,
+          "sent": 10666.990600000005,
+          "headers": 10668.520000000004,
+          "first_byte": 10669.720000000001,
+          "tool_arguments": 10671.171099999992,
+          "complete": 12017.325199999992
+        },
+        "nativeFirstMs": {
+          "native_queued": 14,
+          "admitted": 14,
+          "sent": 10635,
+          "headers": 10635,
+          "first_byte": 10635,
+          "tool_arguments": 10635
+        }
+      }
+    },
+    {
+      "ordinal": 9,
+      "id": "a1112f88-ce58-4d32-a844-ec9eb810caa7",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:12:07.219Z",
+      "completedAt": "2026-11-09T15:13:41.092Z",
+      "elapsedMs": 93873,
+      "toolName": "production.bundle",
+      "argumentBytes": 6528,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 49036,
+        "cachedInputTokens": 22021,
+        "outputTokens": 2923,
+        "reasoningTokens": 619,
+        "totalTokens": 51959
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:12:07.219Z",
+        "dispatching": "2026-11-09T15:12:07.243Z",
+        "native_queued": "2026-11-09T15:12:07.273Z",
+        "admitted": "2026-11-09T15:12:07.275Z",
+        "sent": "2026-11-09T15:12:36.920Z",
+        "headers": "2026-11-09T15:12:36.923Z",
+        "first_byte": "2026-11-09T15:12:36.925Z",
+        "visible_text": "2026-11-09T15:12:36.926Z",
+        "tool_arguments": "2026-11-09T15:12:41.409Z",
+        "usage": "2026-11-09T15:13:41.090Z",
+        "complete": "2026-11-09T15:13:41.092Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005199999999604188,
+          "dispatching": 23.384199999985867,
+          "native_queued": 53.92459999999846,
+          "admitted": 55.50859999998647,
+          "sent": 29699.36189999999,
+          "headers": 29703.010899999994,
+          "first_byte": 29705.109099999987,
+          "visible_text": 29706.696399999986,
+          "tool_arguments": 34188.316499999986,
+          "complete": 93873.06039999999
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 29662,
+          "headers": 29662,
+          "first_byte": 29663,
+          "tool_arguments": 34145
+        }
+      }
+    },
+    {
+      "ordinal": 10,
+      "id": "1d590a59-7c5f-416b-ba20-31ab5fa488fa",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:13:41.177Z",
+      "completedAt": "2026-11-09T15:14:05.597Z",
+      "elapsedMs": 24420,
+      "toolName": "production.bundle",
+      "argumentBytes": 28,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 49529,
+        "cachedInputTokens": 22021,
+        "outputTokens": 363,
+        "reasoningTokens": 224,
+        "totalTokens": 49892
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:13:41.177Z",
+        "dispatching": "2026-11-09T15:13:41.200Z",
+        "native_queued": "2026-11-09T15:13:41.228Z",
+        "admitted": "2026-11-09T15:13:41.229Z",
+        "sent": "2026-11-09T15:14:00.989Z",
+        "headers": "2026-11-09T15:14:00.993Z",
+        "first_byte": "2026-11-09T15:14:00.995Z",
+        "visible_text": "2026-11-09T15:14:01.198Z",
+        "tool_arguments": "2026-11-09T15:14:04.672Z",
+        "usage": "2026-11-09T15:14:05.593Z",
+        "complete": "2026-11-09T15:14:05.597Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.005300000018905848,
+          "dispatching": 23.398800000024494,
+          "native_queued": 50.73820000002161,
+          "admitted": 52.27550000001793,
+          "sent": 19810.83660000001,
+          "headers": 19815.82270000002,
+          "first_byte": 19817.982500000013,
+          "visible_text": 20019.4516,
+          "tool_arguments": 23495.585100000026,
+          "complete": 24420.37520000001
+        },
+        "nativeFirstMs": {
+          "native_queued": 15,
+          "admitted": 15,
+          "sent": 19775,
+          "headers": 19775,
+          "first_byte": 19776,
+          "tool_arguments": 23459
+        }
+      }
+    },
+    {
+      "ordinal": 11,
+      "id": "f3340c99-cc39-4039-9c07-db31ef1128a5",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:14:05.694Z",
+      "completedAt": "2026-11-09T15:14:47.621Z",
+      "elapsedMs": 41927,
+      "toolName": "conversation.task.checkpoint",
+      "argumentBytes": 3489,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 50283,
+        "cachedInputTokens": 22021,
+        "outputTokens": 1365,
+        "reasoningTokens": 299,
+        "totalTokens": 51648
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:14:05.694Z",
+        "dispatching": "2026-11-09T15:14:05.718Z",
+        "native_queued": "2026-11-09T15:14:05.745Z",
+        "admitted": "2026-11-09T15:14:05.746Z",
+        "sent": "2026-11-09T15:14:23.386Z",
+        "headers": "2026-11-09T15:14:23.388Z",
+        "first_byte": "2026-11-09T15:14:23.390Z",
+        "visible_text": "2026-11-09T15:14:23.585Z",
+        "tool_arguments": "2026-11-09T15:14:27.337Z",
+        "usage": "2026-11-09T15:14:47.618Z",
+        "complete": "2026-11-09T15:14:47.621Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.004799999995157123,
+          "dispatching": 23.477899999998044,
+          "native_queued": 50.560800000006566,
+          "admitted": 52.21369999999297,
+          "sent": 17689.69339999999,
+          "headers": 17694.00469999999,
+          "first_byte": 17695.633299999987,
+          "visible_text": 17888.052999999985,
+          "tool_arguments": 21642.2782,
+          "complete": 41925.96839999998
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 17655,
+          "headers": 17655,
+          "first_byte": 17655,
+          "tool_arguments": 21604
+        }
+      }
+    },
+    {
+      "ordinal": 12,
+      "id": "d6dba2c7-7810-4b93-861a-8add5266ede0",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:14:47.726Z",
+      "completedAt": "2026-11-09T15:15:04.042Z",
+      "elapsedMs": 16316,
+      "toolName": "production.bundle",
+      "argumentBytes": 11,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 52048,
+        "cachedInputTokens": 22021,
+        "outputTokens": 238,
+        "reasoningTokens": 124,
+        "totalTokens": 52286
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:14:47.726Z",
+        "dispatching": "2026-11-09T15:14:47.751Z",
+        "native_queued": "2026-11-09T15:14:47.780Z",
+        "admitted": "2026-11-09T15:14:47.781Z",
+        "sent": "2026-11-09T15:15:00.484Z",
+        "headers": "2026-11-09T15:15:00.487Z",
+        "first_byte": "2026-11-09T15:15:00.489Z",
+        "visible_text": "2026-11-09T15:15:00.635Z",
+        "tool_arguments": "2026-11-09T15:15:03.288Z",
+        "usage": "2026-11-09T15:15:04.038Z",
+        "complete": "2026-11-09T15:15:04.042Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003200000006472692,
+          "dispatching": 24.770100000023376,
+          "native_queued": 52.9037000000244,
+          "admitted": 54.396300000022165,
+          "sent": 12755.3597,
+          "headers": 12760.038900000014,
+          "first_byte": 12762.082800000004,
+          "visible_text": 12906.93220000001,
+          "tool_arguments": 15561.662900000025,
+          "complete": 16314.915400000027
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 12718,
+          "headers": 12719,
+          "first_byte": 12719,
+          "tool_arguments": 15523
+        }
+      }
+    },
+    {
+      "ordinal": 13,
+      "id": "e987432f-fc73-4786-8018-4188a987917a",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:15:04.162Z",
+      "completedAt": "2026-11-09T15:18:46.676Z",
+      "elapsedMs": 222514,
+      "toolName": "production.bundle",
+      "argumentBytes": 22763,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 56747,
+        "cachedInputTokens": 50245,
+        "outputTokens": 7552,
+        "reasoningTokens": 183,
+        "totalTokens": 64299
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:15:04.162Z",
+        "dispatching": "2026-11-09T15:15:04.187Z",
+        "native_queued": "2026-11-09T15:15:04.216Z",
+        "admitted": "2026-11-09T15:15:04.217Z",
+        "sent": "2026-11-09T15:15:26.542Z",
+        "headers": "2026-11-09T15:15:26.546Z",
+        "first_byte": "2026-11-09T15:15:26.549Z",
+        "visible_text": "2026-11-09T15:15:26.551Z",
+        "tool_arguments": "2026-11-09T15:15:30.467Z",
+        "usage": "2026-11-09T15:18:46.674Z",
+        "complete": "2026-11-09T15:18:46.676Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.004399999976158142,
+          "dispatching": 25.005799999984447,
+          "native_queued": 53.45689999999013,
+          "admitted": 55.03349999996135,
+          "sent": 22377.187600000005,
+          "headers": 22383.771499999973,
+          "first_byte": 22387.088699999964,
+          "visible_text": 22388.564199999964,
+          "tool_arguments": 26304.289899999974,
+          "complete": 222514.35359999997
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 22340,
+          "headers": 22340,
+          "first_byte": 22341,
+          "tool_arguments": 26262
+        }
+      }
+    },
+    {
+      "ordinal": 14,
+      "id": "18969490-625e-461f-b744-e5c4eeb55247",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:18:46.791Z",
+      "completedAt": "2026-11-09T15:22:03.274Z",
+      "elapsedMs": 196483,
+      "toolName": "production.bundle",
+      "argumentBytes": 20206,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 53463,
+        "cachedInputTokens": 21951,
+        "outputTokens": 7110,
+        "reasoningTokens": 397,
+        "totalTokens": 60573
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:18:46.791Z",
+        "dispatching": "2026-11-09T15:18:46.817Z",
+        "native_queued": "2026-11-09T15:18:46.846Z",
+        "admitted": "2026-11-09T15:18:46.848Z",
+        "sent": "2026-11-09T15:19:12.904Z",
+        "headers": "2026-11-09T15:19:12.906Z",
+        "first_byte": "2026-11-09T15:19:12.908Z",
+        "visible_text": "2026-11-09T15:19:12.909Z",
+        "tool_arguments": "2026-11-09T15:19:17.282Z",
+        "usage": "2026-11-09T15:22:03.271Z",
+        "complete": "2026-11-09T15:22:03.274Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0035000000498257577,
+          "dispatching": 25.953400000056718,
+          "native_queued": 54.960100000025705,
+          "admitted": 57.1989000000176,
+          "sent": 26113.14559999999,
+          "headers": 26115.218500000017,
+          "first_byte": 26116.848100000003,
+          "visible_text": 26118.31250000006,
+          "tool_arguments": 30490.63200000004,
+          "complete": 196483.0271
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 26075,
+          "headers": 26075,
+          "first_byte": 26075,
+          "tool_arguments": 30449
+        }
+      }
+    },
+    {
+      "ordinal": 15,
+      "id": "8d588f5e-527f-47da-8224-1542877e2223",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:22:03.350Z",
+      "completedAt": "2026-11-09T15:22:25.333Z",
+      "elapsedMs": 21983,
+      "toolName": "conversation.task.checkpoint",
+      "argumentBytes": 132,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 53986,
+        "cachedInputTokens": 21951,
+        "outputTokens": 226,
+        "reasoningTokens": 57,
+        "totalTokens": 54212
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:22:03.350Z",
+        "dispatching": "2026-11-09T15:22:03.377Z",
+        "native_queued": "2026-11-09T15:22:03.405Z",
+        "admitted": "2026-11-09T15:22:03.406Z",
+        "sent": "2026-11-09T15:22:20.173Z",
+        "headers": "2026-11-09T15:22:20.175Z",
+        "first_byte": "2026-11-09T15:22:20.177Z",
+        "visible_text": "2026-11-09T15:22:20.178Z",
+        "tool_arguments": "2026-11-09T15:22:23.263Z",
+        "usage": "2026-11-09T15:22:25.330Z",
+        "complete": "2026-11-09T15:22:25.333Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003600000054575503,
+          "dispatching": 26.73809999995865,
+          "native_queued": 54.58660000003874,
+          "admitted": 56.32590000005439,
+          "sent": 16823.191499999957,
+          "headers": 16825.038100000005,
+          "first_byte": 16826.482100000023,
+          "visible_text": 16828.25390000001,
+          "tool_arguments": 19913.100399999996,
+          "complete": 21982.560999999987
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 16785,
+          "headers": 16785,
+          "first_byte": 16785,
+          "tool_arguments": 19872
+        }
+      }
+    },
+    {
+      "ordinal": 16,
+      "id": "0ec13036-02af-469d-bb85-a1dec15d5a1e",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:22:25.458Z",
+      "completedAt": "2026-11-09T15:26:53.790Z",
+      "elapsedMs": 268332,
+      "toolName": "production.bundle",
+      "argumentBytes": 27763,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 54572,
+        "cachedInputTokens": 21321,
+        "outputTokens": 9487,
+        "reasoningTokens": 239,
+        "totalTokens": 64059
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:22:25.458Z",
+        "dispatching": "2026-11-09T15:22:25.485Z",
+        "native_queued": "2026-11-09T15:22:25.513Z",
+        "admitted": "2026-11-09T15:22:25.515Z",
+        "sent": "2026-11-09T15:22:52.443Z",
+        "headers": "2026-11-09T15:22:52.444Z",
+        "first_byte": "2026-11-09T15:22:52.446Z",
+        "visible_text": "2026-11-09T15:22:52.636Z",
+        "tool_arguments": "2026-11-09T15:22:56.674Z",
+        "usage": "2026-11-09T15:26:53.787Z",
+        "complete": "2026-11-09T15:26:53.790Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0032999999821186066,
+          "dispatching": 27.038100000005215,
+          "native_queued": 55.525699999998324,
+          "admitted": 57.178799999994226,
+          "sent": 26984.426399999997,
+          "headers": 26986.279699999955,
+          "first_byte": 26987.700599999982,
+          "visible_text": 27177.43319999997,
+          "tool_arguments": 31215.578299999936,
+          "complete": 268332.2781
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 26945,
+          "headers": 26945,
+          "first_byte": 26946,
+          "tool_arguments": 31175
+        }
+      }
+    },
+    {
+      "ordinal": 17,
+      "id": "3dc3f360-69a2-4953-a7e4-f4faa32256da",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:26:53.912Z",
+      "completedAt": "2026-11-09T15:31:01.393Z",
+      "elapsedMs": 247481,
+      "toolName": "production.bundle",
+      "argumentBytes": 24745,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 59542,
+        "cachedInputTokens": 55678,
+        "outputTokens": 8678,
+        "reasoningTokens": 429,
+        "totalTokens": 68220
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:26:53.912Z",
+        "dispatching": "2026-11-09T15:26:53.940Z",
+        "native_queued": "2026-11-09T15:26:53.970Z",
+        "admitted": "2026-11-09T15:26:53.972Z",
+        "sent": "2026-11-09T15:27:32.969Z",
+        "headers": "2026-11-09T15:27:32.972Z",
+        "first_byte": "2026-11-09T15:27:32.973Z",
+        "visible_text": "2026-11-09T15:27:33.349Z",
+        "tool_arguments": "2026-11-09T15:27:36.675Z",
+        "usage": "2026-11-09T15:31:01.388Z",
+        "complete": "2026-11-09T15:31:01.393Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003700000001117587,
+          "dispatching": 28.26500000001397,
+          "native_queued": 58.19910000008531,
+          "admitted": 59.88930000003893,
+          "sent": 39054.66100000008,
+          "headers": 39059.453000000096,
+          "first_byte": 39061.235800000024,
+          "visible_text": 39434.518500000006,
+          "tool_arguments": 42762.71200000006,
+          "complete": 247480.88840000017
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 39013,
+          "headers": 39014,
+          "first_byte": 39014,
+          "tool_arguments": 42720
+        }
+      }
+    },
+    {
+      "ordinal": 18,
+      "id": "97b64212-6fb1-416a-a6eb-83e22896854d",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:31:01.477Z",
+      "completedAt": "2026-11-09T15:32:35.139Z",
+      "elapsedMs": 93662,
+      "toolName": "production.bundle",
+      "argumentBytes": 9054,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 53813,
+        "cachedInputTokens": 22597,
+        "outputTokens": 3157,
+        "reasoningTokens": 121,
+        "totalTokens": 56970
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:31:01.477Z",
+        "dispatching": "2026-11-09T15:31:01.504Z",
+        "native_queued": "2026-11-09T15:31:01.532Z",
+        "admitted": "2026-11-09T15:31:01.534Z",
+        "sent": "2026-11-09T15:31:18.170Z",
+        "headers": "2026-11-09T15:31:18.174Z",
+        "first_byte": "2026-11-09T15:31:18.188Z",
+        "visible_text": "2026-11-09T15:31:18.347Z",
+        "tool_arguments": "2026-11-09T15:31:21.300Z",
+        "usage": "2026-11-09T15:32:35.135Z",
+        "complete": "2026-11-09T15:32:35.139Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.002899999963119626,
+          "dispatching": 26.802599999820814,
+          "native_queued": 54.88629999989644,
+          "admitted": 56.56529999990016,
+          "sent": 16690.200500000035,
+          "headers": 16696.34999999986,
+          "first_byte": 16710.11360000004,
+          "visible_text": 16867.411199999973,
+          "tool_arguments": 19821.77370000002,
+          "complete": 93662.9757999999
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 16651,
+          "headers": 16651,
+          "first_byte": 16652,
+          "tool_arguments": 19779
+        }
+      }
+    },
+    {
+      "ordinal": 19,
+      "id": "dc1c34ec-6e24-46df-80a2-f5ac3a3bba49",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:32:35.253Z",
+      "completedAt": "2026-11-09T15:33:50.241Z",
+      "elapsedMs": 74988,
+      "toolName": "production.bundle",
+      "argumentBytes": 5421,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 58237,
+        "cachedInputTokens": 54270,
+        "outputTokens": 2079,
+        "reasoningTokens": 136,
+        "totalTokens": 60316
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:32:35.253Z",
+        "dispatching": "2026-11-09T15:32:35.280Z",
+        "native_queued": "2026-11-09T15:32:35.307Z",
+        "admitted": "2026-11-09T15:32:35.309Z",
+        "sent": "2026-11-09T15:33:00.494Z",
+        "headers": "2026-11-09T15:33:00.498Z",
+        "first_byte": "2026-11-09T15:33:00.516Z",
+        "visible_text": "2026-11-09T15:33:00.696Z",
+        "tool_arguments": "2026-11-09T15:33:04.200Z",
+        "usage": "2026-11-09T15:33:50.237Z",
+        "complete": "2026-11-09T15:33:50.241Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.00419999985024333,
+          "dispatching": 27.100199999986216,
+          "native_queued": 54.85089999996126,
+          "admitted": 56.497599999886006,
+          "sent": 25239.253399999812,
+          "headers": 25245.614799999865,
+          "first_byte": 25263.21039999998,
+          "visible_text": 25441.105299999937,
+          "tool_arguments": 28947.274499999825,
+          "complete": 74988.54709999985
+        },
+        "nativeFirstMs": {
+          "native_queued": 16,
+          "admitted": 16,
+          "sent": 25200,
+          "headers": 25201,
+          "first_byte": 25201,
+          "tool_arguments": 28907
+        }
+      }
+    },
+    {
+      "ordinal": 20,
+      "id": "8c8503a0-6fa7-4918-a77d-4d3020afdbe9",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:33:50.321Z",
+      "completedAt": "2026-11-09T15:37:00.373Z",
+      "elapsedMs": 190052,
+      "toolName": "production.bundle",
+      "argumentBytes": 21159,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55895,
+        "cachedInputTokens": 22597,
+        "outputTokens": 7316,
+        "reasoningTokens": 184,
+        "totalTokens": 63211
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:33:50.321Z",
+        "dispatching": "2026-11-09T15:33:50.348Z",
+        "native_queued": "2026-11-09T15:33:50.377Z",
+        "admitted": "2026-11-09T15:33:50.379Z",
+        "sent": "2026-11-09T15:34:06.387Z",
+        "headers": "2026-11-09T15:34:06.392Z",
+        "first_byte": "2026-11-09T15:34:06.394Z",
+        "visible_text": "2026-11-09T15:34:06.985Z",
+        "tool_arguments": "2026-11-09T15:34:11.127Z",
+        "usage": "2026-11-09T15:37:00.369Z",
+        "complete": "2026-11-09T15:37:00.373Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.002899999963119626,
+          "dispatching": 27.466499999864027,
+          "native_queued": 56.41500000003725,
+          "admitted": 58.27309999987483,
+          "sent": 16063.842799999984,
+          "headers": 16070.587400000077,
+          "first_byte": 16072.922800000058,
+          "visible_text": 16661.887099999934,
+          "tool_arguments": 20806.23490000004,
+          "complete": 190052.55960000004
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 16024,
+          "headers": 16024,
+          "first_byte": 16025,
+          "tool_arguments": 20763
+        }
+      }
+    },
+    {
+      "ordinal": 21,
+      "id": "1d4c2b78-2134-4f73-b2ea-71c1e9996992",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:37:00.507Z",
+      "completedAt": "2026-11-09T15:37:38.359Z",
+      "elapsedMs": 37852,
+      "toolName": "production.bundle",
+      "argumentBytes": 11,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 63662,
+        "cachedInputTokens": 59431,
+        "outputTokens": 256,
+        "reasoningTokens": 120,
+        "totalTokens": 63918
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:37:00.507Z",
+        "dispatching": "2026-11-09T15:37:00.545Z",
+        "native_queued": "2026-11-09T15:37:00.580Z",
+        "admitted": "2026-11-09T15:37:00.582Z",
+        "sent": "2026-11-09T15:37:33.302Z",
+        "headers": "2026-11-09T15:37:33.304Z",
+        "first_byte": "2026-11-09T15:37:33.306Z",
+        "visible_text": "2026-11-09T15:37:34.171Z",
+        "tool_arguments": "2026-11-09T15:37:37.590Z",
+        "usage": "2026-11-09T15:37:38.356Z",
+        "complete": "2026-11-09T15:37:38.359Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003100000089034438,
+          "dispatching": 38.60519999987446,
+          "native_queued": 73.5352000000421,
+          "admitted": 75.4124999998603,
+          "sent": 32794.89859999996,
+          "headers": 32796.972899999935,
+          "first_byte": 32798.979300000006,
+          "visible_text": 33662.45629999996,
+          "tool_arguments": 37082.42519999994,
+          "complete": 37852.035399999935
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 32738,
+          "headers": 32739,
+          "first_byte": 32739,
+          "tool_arguments": 37020
+        }
+      }
+    },
+    {
+      "ordinal": 22,
+      "id": "acf003d5-f686-4811-b100-353da14536cd",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:37:38.491Z",
+      "completedAt": "2026-11-09T15:37:53.358Z",
+      "elapsedMs": 14867,
+      "toolName": "production.bundle",
+      "argumentBytes": 11,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 60455,
+        "cachedInputTokens": 22597,
+        "outputTokens": 205,
+        "reasoningTokens": 55,
+        "totalTokens": 60660
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:37:38.491Z",
+        "dispatching": "2026-11-09T15:37:38.520Z",
+        "native_queued": "2026-11-09T15:37:38.551Z",
+        "admitted": "2026-11-09T15:37:38.552Z",
+        "sent": "2026-11-09T15:37:49.159Z",
+        "headers": "2026-11-09T15:37:49.161Z",
+        "first_byte": "2026-11-09T15:37:49.162Z",
+        "visible_text": "2026-11-09T15:37:49.164Z",
+        "tool_arguments": "2026-11-09T15:37:52.478Z",
+        "usage": "2026-11-09T15:37:53.354Z",
+        "complete": "2026-11-09T15:37:53.358Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0026000000070780516,
+          "dispatching": 29.262199999997392,
+          "native_queued": 59.943800000008196,
+          "admitted": 61.77319999993779,
+          "sent": 10667.970500000054,
+          "headers": 10669.862999999896,
+          "first_byte": 10671.589600000065,
+          "visible_text": 10673.536300000036,
+          "tool_arguments": 13986.78780000005,
+          "complete": 14867.441399999894
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 10626,
+          "headers": 10626,
+          "first_byte": 10626,
+          "tool_arguments": 13939
+        }
+      }
+    },
+    {
+      "ordinal": 23,
+      "id": "4bdc43f3-dad0-4128-b419-43bfd517a289",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:37:53.441Z",
+      "completedAt": "2026-11-09T15:38:18.434Z",
+      "elapsedMs": 24993,
+      "toolName": "production.bundle",
+      "argumentBytes": 59,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 58769,
+        "cachedInputTokens": 22597,
+        "outputTokens": 182,
+        "reasoningTokens": 53,
+        "totalTokens": 58951
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:37:53.441Z",
+        "dispatching": "2026-11-09T15:37:53.470Z",
+        "native_queued": "2026-11-09T15:37:53.500Z",
+        "admitted": "2026-11-09T15:37:53.502Z",
+        "sent": "2026-11-09T15:38:14.959Z",
+        "headers": "2026-11-09T15:38:14.962Z",
+        "first_byte": "2026-11-09T15:38:14.964Z",
+        "visible_text": "2026-11-09T15:38:15.678Z",
+        "tool_arguments": "2026-11-09T15:38:17.528Z",
+        "usage": "2026-11-09T15:38:18.431Z",
+        "complete": "2026-11-09T15:38:18.434Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0027000000700354576,
+          "dispatching": 29.261000000173226,
+          "native_queued": 59.3984000000637,
+          "admitted": 61.23219999996945,
+          "sent": 21516.970200000098,
+          "headers": 21521.16960000014,
+          "first_byte": 21523.27099999995,
+          "visible_text": 22236.38269999996,
+          "tool_arguments": 24086.266700000037,
+          "complete": 24992.675000000047
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 21475,
+          "headers": 21475,
+          "first_byte": 21476,
+          "tool_arguments": 24040
+        }
+      }
+    },
+    {
+      "ordinal": 24,
+      "id": "f6bc9608-c029-4def-b4b0-3ec720b46443",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:38:18.556Z",
+      "completedAt": "2026-11-09T15:38:36.013Z",
+      "elapsedMs": 17457,
+      "toolName": "production.bundle",
+      "argumentBytes": 40,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 58948,
+        "cachedInputTokens": 22597,
+        "outputTokens": 255,
+        "reasoningTokens": 112,
+        "totalTokens": 59203
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:38:18.556Z",
+        "dispatching": "2026-11-09T15:38:18.603Z",
+        "native_queued": "2026-11-09T15:38:18.634Z",
+        "admitted": "2026-11-09T15:38:18.636Z",
+        "sent": "2026-11-09T15:38:31.182Z",
+        "headers": "2026-11-09T15:38:31.185Z",
+        "first_byte": "2026-11-09T15:38:31.189Z",
+        "visible_text": "2026-11-09T15:38:31.376Z",
+        "tool_arguments": "2026-11-09T15:38:35.077Z",
+        "usage": "2026-11-09T15:38:36.009Z",
+        "complete": "2026-11-09T15:38:36.013Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003000000026077032,
+          "dispatching": 46.89670000015758,
+          "native_queued": 77.66760000004433,
+          "admitted": 79.812099999981,
+          "sent": 12623.837999999989,
+          "headers": 12629.195300000021,
+          "first_byte": 12632.290400000056,
+          "visible_text": 12817.276300000027,
+          "tool_arguments": 16520.893099999987,
+          "complete": 17456.282400000142
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 12564,
+          "headers": 12564,
+          "first_byte": 12564,
+          "tool_arguments": 16456
+        }
+      }
+    },
+    {
+      "ordinal": 25,
+      "id": "6328b19a-715f-46a2-9b5c-f3410269f13d",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:38:36.138Z",
+      "completedAt": "2026-11-09T15:38:50.531Z",
+      "elapsedMs": 14393,
+      "toolName": "production.bundle",
+      "argumentBytes": 55,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55226,
+        "cachedInputTokens": 21970,
+        "outputTokens": 202,
+        "reasoningTokens": 62,
+        "totalTokens": 55428
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:38:36.138Z",
+        "dispatching": "2026-11-09T15:38:36.169Z",
+        "native_queued": "2026-11-09T15:38:36.199Z",
+        "admitted": "2026-11-09T15:38:36.201Z",
+        "sent": "2026-11-09T15:38:46.172Z",
+        "headers": "2026-11-09T15:38:46.174Z",
+        "first_byte": "2026-11-09T15:38:46.175Z",
+        "visible_text": "2026-11-09T15:38:46.796Z",
+        "tool_arguments": "2026-11-09T15:38:49.247Z",
+        "usage": "2026-11-09T15:38:50.529Z",
+        "complete": "2026-11-09T15:38:50.531Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.002500000176951289,
+          "dispatching": 30.986800000071526,
+          "native_queued": 60.78370000002906,
+          "admitted": 62.77140000020154,
+          "sent": 10032.052500000224,
+          "headers": 10035.554600000149,
+          "first_byte": 10037.170800000196,
+          "visible_text": 10655.374200000195,
+          "tool_arguments": 13108.564800000051,
+          "complete": 14392.933799999999
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 9989,
+          "headers": 9989,
+          "first_byte": 9989,
+          "tool_arguments": 13064
+        }
+      }
+    },
+    {
+      "ordinal": 26,
+      "id": "aa6c0af1-5ebf-48f4-987a-1aa86c680841",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:38:50.655Z",
+      "completedAt": "2026-11-09T15:39:21.584Z",
+      "elapsedMs": 30929,
+      "toolName": "production.bundle",
+      "argumentBytes": 58,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 59748,
+        "cachedInputTokens": 54249,
+        "outputTokens": 210,
+        "reasoningTokens": 80,
+        "totalTokens": 59958
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:38:50.655Z",
+        "dispatching": "2026-11-09T15:38:50.684Z",
+        "native_queued": "2026-11-09T15:38:50.713Z",
+        "admitted": "2026-11-09T15:38:50.715Z",
+        "sent": "2026-11-09T15:39:17.667Z",
+        "headers": "2026-11-09T15:39:17.674Z",
+        "first_byte": "2026-11-09T15:39:17.678Z",
+        "visible_text": "2026-11-09T15:39:17.680Z",
+        "tool_arguments": "2026-11-09T15:39:20.400Z",
+        "usage": "2026-11-09T15:39:21.578Z",
+        "complete": "2026-11-09T15:39:21.584Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0031999999191612005,
+          "dispatching": 28.91429999982938,
+          "native_queued": 58.2441000000108,
+          "admitted": 60.06889999983832,
+          "sent": 27010.231499999994,
+          "headers": 27018.082299999893,
+          "first_byte": 27022.528699999908,
+          "visible_text": 27024.95169999986,
+          "tool_arguments": 29745.200999999885,
+          "complete": 30929.577300000004
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 26969,
+          "headers": 26969,
+          "first_byte": 26969,
+          "tool_arguments": 29699
+        }
+      }
+    },
+    {
+      "ordinal": 27,
+      "id": "acce6f4e-c762-4bbd-9175-78996507456c",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:39:21.721Z",
+      "completedAt": "2026-11-09T15:39:40.727Z",
+      "elapsedMs": 19006,
+      "toolName": "production.bundle",
+      "argumentBytes": 41,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 59778,
+        "cachedInputTokens": 54174,
+        "outputTokens": 165,
+        "reasoningTokens": 33,
+        "totalTokens": 59943
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:39:21.721Z",
+        "dispatching": "2026-11-09T15:39:21.750Z",
+        "native_queued": "2026-11-09T15:39:21.780Z",
+        "admitted": "2026-11-09T15:39:21.782Z",
+        "sent": "2026-11-09T15:39:37.325Z",
+        "headers": "2026-11-09T15:39:37.329Z",
+        "first_byte": "2026-11-09T15:39:37.330Z",
+        "visible_text": "2026-11-09T15:39:37.332Z",
+        "tool_arguments": "2026-11-09T15:39:39.836Z",
+        "usage": "2026-11-09T15:39:40.722Z",
+        "complete": "2026-11-09T15:39:40.727Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003000000026077032,
+          "dispatching": 29.13799999980256,
+          "native_queued": 58.52709999983199,
+          "admitted": 60.423599999863654,
+          "sent": 15601.089699999895,
+          "headers": 15607.372699999949,
+          "first_byte": 15609.248799999943,
+          "visible_text": 15611.037199999904,
+          "tool_arguments": 18114.57579999999,
+          "complete": 19005.429599999916
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 15559,
+          "headers": 15560,
+          "first_byte": 15560,
+          "tool_arguments": 18072
+        }
+      }
+    },
+    {
+      "ordinal": 28,
+      "id": "843a653a-b4e7-4be7-817a-924db7ca056e",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:39:40.848Z",
+      "completedAt": "2026-11-09T15:39:50.607Z",
+      "elapsedMs": 9759,
+      "toolName": "production.bundle",
+      "argumentBytes": 0,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55413,
+        "cachedInputTokens": 21910,
+        "outputTokens": 86,
+        "reasoningTokens": 38,
+        "totalTokens": 55499
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:39:40.848Z",
+        "dispatching": "2026-11-09T15:39:40.897Z",
+        "native_queued": "2026-11-09T15:39:40.926Z",
+        "admitted": "2026-11-09T15:39:40.928Z",
+        "sent": "2026-11-09T15:39:50.154Z",
+        "headers": "2026-11-09T15:39:50.158Z",
+        "first_byte": "2026-11-09T15:39:50.160Z",
+        "tool_arguments": "2026-11-09T15:39:50.161Z",
+        "usage": "2026-11-09T15:39:50.603Z",
+        "complete": "2026-11-09T15:39:50.607Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0031999999191612005,
+          "dispatching": 48.60029999981634,
+          "native_queued": 77.81739999982528,
+          "admitted": 79.82459999993443,
+          "sent": 9303.484699999914,
+          "headers": 9309.405799999833,
+          "first_byte": 9311.275899999775,
+          "tool_arguments": 9312.976499999873,
+          "complete": 9758.024199999869
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 9242,
+          "headers": 9242,
+          "first_byte": 9243,
+          "tool_arguments": 9243
+        }
+      }
+    },
+    {
+      "ordinal": 29,
+      "id": "75566744-c1b3-4284-8144-0fdad1ba1d82",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:39:50.728Z",
+      "completedAt": "2026-11-09T15:40:16.115Z",
+      "elapsedMs": 25387,
+      "toolName": "production.bundle",
+      "argumentBytes": 71,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 59471,
+        "cachedInputTokens": 53829,
+        "outputTokens": 164,
+        "reasoningTokens": 29,
+        "totalTokens": 59635
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:39:50.728Z",
+        "dispatching": "2026-11-09T15:39:50.757Z",
+        "native_queued": "2026-11-09T15:39:50.787Z",
+        "admitted": "2026-11-09T15:39:50.788Z",
+        "sent": "2026-11-09T15:40:12.623Z",
+        "headers": "2026-11-09T15:40:12.625Z",
+        "first_byte": "2026-11-09T15:40:12.627Z",
+        "visible_text": "2026-11-09T15:40:12.647Z",
+        "tool_arguments": "2026-11-09T15:40:15.530Z",
+        "usage": "2026-11-09T15:40:16.097Z",
+        "complete": "2026-11-09T15:40:16.115Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0026000000070780516,
+          "dispatching": 28.729999999981374,
+          "native_queued": 57.98710000002757,
+          "admitted": 59.912400000030175,
+          "sent": 21891.209999999963,
+          "headers": 21896.283199999947,
+          "first_byte": 21898.043000000063,
+          "visible_text": 21917.840199999977,
+          "tool_arguments": 24801.346900000004,
+          "complete": 25386.244600000093
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 21850,
+          "headers": 21850,
+          "first_byte": 21850,
+          "tool_arguments": 24758
+        }
+      }
+    },
+    {
+      "ordinal": 30,
+      "id": "8dcf86e3-ed8a-42d9-9667-cf676e70801c",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:40:16.236Z",
+      "completedAt": "2026-11-09T15:40:31.058Z",
+      "elapsedMs": 14822,
+      "toolName": "production.bundle",
+      "argumentBytes": 45,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55280,
+        "cachedInputTokens": 21783,
+        "outputTokens": 151,
+        "reasoningTokens": 23,
+        "totalTokens": 55431
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:40:16.236Z",
+        "dispatching": "2026-11-09T15:40:16.265Z",
+        "native_queued": "2026-11-09T15:40:16.296Z",
+        "admitted": "2026-11-09T15:40:16.298Z",
+        "sent": "2026-11-09T15:40:28.902Z",
+        "headers": "2026-11-09T15:40:28.907Z",
+        "first_byte": "2026-11-09T15:40:28.909Z",
+        "visible_text": "2026-11-09T15:40:28.911Z",
+        "tool_arguments": "2026-11-09T15:40:30.090Z",
+        "usage": "2026-11-09T15:40:31.052Z",
+        "complete": "2026-11-09T15:40:31.058Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.004100000020116568,
+          "dispatching": 28.894599999999627,
+          "native_queued": 58.929000000003725,
+          "admitted": 61.13400000007823,
+          "sent": 12663.32610000018,
+          "headers": 12669.679800000042,
+          "first_byte": 12672.779000000097,
+          "visible_text": 12674.77190000005,
+          "tool_arguments": 13853.71070000017,
+          "complete": 14820.402500000084
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 12622,
+          "headers": 12622,
+          "first_byte": 12622,
+          "tool_arguments": 13812
+        }
+      }
+    },
+    {
+      "ordinal": 31,
+      "id": "442b1a6d-54e7-4596-8d44-06b4da3fb871",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:40:31.194Z",
+      "completedAt": "2026-11-09T15:40:43.984Z",
+      "elapsedMs": 12790,
+      "toolName": "production.bundle",
+      "argumentBytes": 70,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55278,
+        "cachedInputTokens": 21741,
+        "outputTokens": 154,
+        "reasoningTokens": 21,
+        "totalTokens": 55432
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:40:31.194Z",
+        "dispatching": "2026-11-09T15:40:31.223Z",
+        "native_queued": "2026-11-09T15:40:31.253Z",
+        "admitted": "2026-11-09T15:40:31.255Z",
+        "sent": "2026-11-09T15:40:40.355Z",
+        "headers": "2026-11-09T15:40:40.360Z",
+        "first_byte": "2026-11-09T15:40:40.362Z",
+        "visible_text": "2026-11-09T15:40:40.547Z",
+        "tool_arguments": "2026-11-09T15:40:43.350Z",
+        "usage": "2026-11-09T15:40:43.981Z",
+        "complete": "2026-11-09T15:40:43.984Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0032999999821186066,
+          "dispatching": 29.01549999997951,
+          "native_queued": 59.46820000000298,
+          "admitted": 61.4765999999363,
+          "sent": 9158.793100000126,
+          "headers": 9166.358400000026,
+          "first_byte": 9168.783499999903,
+          "visible_text": 9351.066400000127,
+          "tool_arguments": 12155.528200000059,
+          "complete": 12790.746199999936
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 9116,
+          "headers": 9117,
+          "first_byte": 9117,
+          "tool_arguments": 12107
+        }
+      }
+    },
+    {
+      "ordinal": 32,
+      "id": "03890677-b71f-4d01-8683-42b55e90591f",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:40:44.106Z",
+      "completedAt": "2026-11-09T15:41:00.296Z",
+      "elapsedMs": 16190,
+      "toolName": "production.bundle",
+      "argumentBytes": 67,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55040,
+        "cachedInputTokens": 21666,
+        "outputTokens": 159,
+        "reasoningTokens": 19,
+        "totalTokens": 55199
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:40:44.106Z",
+        "dispatching": "2026-11-09T15:40:44.135Z",
+        "native_queued": "2026-11-09T15:40:44.164Z",
+        "admitted": "2026-11-09T15:40:44.166Z",
+        "sent": "2026-11-09T15:40:56.893Z",
+        "headers": "2026-11-09T15:40:56.907Z",
+        "first_byte": "2026-11-09T15:40:56.911Z",
+        "visible_text": "2026-11-09T15:40:56.913Z",
+        "tool_arguments": "2026-11-09T15:40:59.749Z",
+        "usage": "2026-11-09T15:41:00.291Z",
+        "complete": "2026-11-09T15:41:00.296Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0028000001329928637,
+          "dispatching": 29.070899999933317,
+          "native_queued": 58.01560000004247,
+          "admitted": 59.99179999995977,
+          "sent": 12784.310500000138,
+          "headers": 12800.05290000001,
+          "first_byte": 12804.785399999935,
+          "visible_text": 12807.230100000044,
+          "tool_arguments": 15643.365900000092,
+          "complete": 16190.241900000023
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 12743,
+          "headers": 12743,
+          "first_byte": 12743,
+          "tool_arguments": 15600
+        }
+      }
+    },
+    {
+      "ordinal": 33,
+      "id": "981474ee-80df-4bb3-be35-03724818f130",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:41:00.414Z",
+      "completedAt": "2026-11-09T15:41:13.740Z",
+      "elapsedMs": 13326,
+      "toolName": "production.bundle",
+      "argumentBytes": 67,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55422,
+        "cachedInputTokens": 21625,
+        "outputTokens": 165,
+        "reasoningTokens": 25,
+        "totalTokens": 55587
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:41:00.414Z",
+        "dispatching": "2026-11-09T15:41:00.443Z",
+        "native_queued": "2026-11-09T15:41:00.472Z",
+        "admitted": "2026-11-09T15:41:00.474Z",
+        "sent": "2026-11-09T15:41:09.929Z",
+        "headers": "2026-11-09T15:41:09.939Z",
+        "first_byte": "2026-11-09T15:41:09.944Z",
+        "visible_text": "2026-11-09T15:41:10.247Z",
+        "tool_arguments": "2026-11-09T15:41:12.962Z",
+        "usage": "2026-11-09T15:41:13.738Z",
+        "complete": "2026-11-09T15:41:13.740Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.002500000176951289,
+          "dispatching": 28.84429999999702,
+          "native_queued": 57.79980000015348,
+          "admitted": 59.92600000021048,
+          "sent": 9512.627200000221,
+          "headers": 9522.042100000195,
+          "first_byte": 9529.246000000043,
+          "visible_text": 9829.937800000189,
+          "tool_arguments": 12547.521700000158,
+          "complete": 13325.628700000001
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 9471,
+          "headers": 9472,
+          "first_byte": 9472,
+          "tool_arguments": 12504
+        }
+      }
+    },
+    {
+      "ordinal": 34,
+      "id": "87217f69-709c-4a47-9aae-1551aaab975e",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:41:13.861Z",
+      "completedAt": "2026-11-09T15:41:26.184Z",
+      "elapsedMs": 12323,
+      "toolName": "production.bundle",
+      "argumentBytes": 61,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55817,
+        "cachedInputTokens": 21639,
+        "outputTokens": 164,
+        "reasoningTokens": 21,
+        "totalTokens": 55981
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:41:13.861Z",
+        "dispatching": "2026-11-09T15:41:13.893Z",
+        "native_queued": "2026-11-09T15:41:13.922Z",
+        "admitted": "2026-11-09T15:41:13.925Z",
+        "sent": "2026-11-09T15:41:22.408Z",
+        "headers": "2026-11-09T15:41:22.413Z",
+        "first_byte": "2026-11-09T15:41:22.415Z",
+        "visible_text": "2026-11-09T15:41:22.418Z",
+        "tool_arguments": "2026-11-09T15:41:25.600Z",
+        "usage": "2026-11-09T15:41:26.154Z",
+        "complete": "2026-11-09T15:41:26.184Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0032999999821186066,
+          "dispatching": 31.76230000006035,
+          "native_queued": 60.967299999902025,
+          "admitted": 63.27139999996871,
+          "sent": 8544.611599999946,
+          "headers": 8551.655199999921,
+          "first_byte": 8554.100899999961,
+          "visible_text": 8556.31389999995,
+          "tool_arguments": 11737.600899999961,
+          "complete": 12322.520800000057
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 8500,
+          "headers": 8500,
+          "first_byte": 8500,
+          "tool_arguments": 11693
+        }
+      }
+    },
+    {
+      "ordinal": 35,
+      "id": "16b6c5e3-cef4-4d34-ba8d-98ad05e36e45",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:41:26.306Z",
+      "completedAt": "2026-11-09T15:41:36.916Z",
+      "elapsedMs": 10610,
+      "toolName": "production.bundle",
+      "argumentBytes": 67,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 56430,
+        "cachedInputTokens": 21639,
+        "outputTokens": 147,
+        "reasoningTokens": 16,
+        "totalTokens": 56577
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:41:26.306Z",
+        "dispatching": "2026-11-09T15:41:26.337Z",
+        "native_queued": "2026-11-09T15:41:26.371Z",
+        "admitted": "2026-11-09T15:41:26.373Z",
+        "sent": "2026-11-09T15:41:33.889Z",
+        "headers": "2026-11-09T15:41:33.893Z",
+        "first_byte": "2026-11-09T15:41:33.895Z",
+        "visible_text": "2026-11-09T15:41:33.987Z",
+        "tool_arguments": "2026-11-09T15:41:36.338Z",
+        "usage": "2026-11-09T15:41:36.913Z",
+        "complete": "2026-11-09T15:41:36.916Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0030999998562037945,
+          "dispatching": 30.934499999973923,
+          "native_queued": 64.61449999990873,
+          "admitted": 66.79329999978654,
+          "sent": 7580.624499999918,
+          "headers": 7586.590199999977,
+          "first_byte": 7588.88189999992,
+          "visible_text": 7678.978699999861,
+          "tool_arguments": 10031.296299999813,
+          "complete": 10609.98909999989
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 7533,
+          "headers": 7534,
+          "first_byte": 7534,
+          "tool_arguments": 9979
+        }
+      }
+    },
+    {
+      "ordinal": 36,
+      "id": "36dae596-a481-4ac0-a4c8-52e57ad46004",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:41:37.054Z",
+      "completedAt": "2026-11-09T15:41:59.754Z",
+      "elapsedMs": 22700,
+      "toolName": "production.bundle",
+      "argumentBytes": 68,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 55011,
+        "cachedInputTokens": 21639,
+        "outputTokens": 199,
+        "reasoningTokens": 69,
+        "totalTokens": 55210
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:41:37.054Z",
+        "dispatching": "2026-11-09T15:41:37.082Z",
+        "native_queued": "2026-11-09T15:41:37.113Z",
+        "admitted": "2026-11-09T15:41:37.115Z",
+        "sent": "2026-11-09T15:41:55.619Z",
+        "headers": "2026-11-09T15:41:55.624Z",
+        "first_byte": "2026-11-09T15:41:55.627Z",
+        "visible_text": "2026-11-09T15:41:55.813Z",
+        "tool_arguments": "2026-11-09T15:41:58.408Z",
+        "usage": "2026-11-09T15:41:59.748Z",
+        "complete": "2026-11-09T15:41:59.754Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0036000001709908247,
+          "dispatching": 28.8328000002075,
+          "native_queued": 59.16180000011809,
+          "admitted": 61.66950000007637,
+          "sent": 18562.522200000007,
+          "headers": 18569.524399999995,
+          "first_byte": 18573.224600000074,
+          "visible_text": 18758.02500000014,
+          "tool_arguments": 21353.74230000004,
+          "complete": 22699.696200000122
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 18520,
+          "headers": 18520,
+          "first_byte": 18520,
+          "tool_arguments": 21308
+        }
+      }
+    },
+    {
+      "ordinal": 37,
+      "id": "fea26964-7025-4ab4-90b4-8fcd7142b57f",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:41:59.892Z",
+      "completedAt": "2026-11-09T15:42:12.697Z",
+      "elapsedMs": 12805,
+      "toolName": "production.bundle",
+      "argumentBytes": 51,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 54252,
+        "cachedInputTokens": 21639,
+        "outputTokens": 170,
+        "reasoningTokens": 17,
+        "totalTokens": 54422
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:41:59.892Z",
+        "dispatching": "2026-11-09T15:41:59.922Z",
+        "native_queued": "2026-11-09T15:41:59.951Z",
+        "admitted": "2026-11-09T15:41:59.954Z",
+        "sent": "2026-11-09T15:42:08.180Z",
+        "headers": "2026-11-09T15:42:08.183Z",
+        "first_byte": "2026-11-09T15:42:08.187Z",
+        "visible_text": "2026-11-09T15:42:08.381Z",
+        "tool_arguments": "2026-11-09T15:42:11.838Z",
+        "usage": "2026-11-09T15:42:12.691Z",
+        "complete": "2026-11-09T15:42:12.697Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0031999999191612005,
+          "dispatching": 29.991799999959767,
+          "native_queued": 59.29080000007525,
+          "admitted": 61.824199999915436,
+          "sent": 8288.30520000006,
+          "headers": 8290.744699999923,
+          "first_byte": 8295.259799999883,
+          "visible_text": 8486.604300000006,
+          "tool_arguments": 11945.63639999996,
+          "complete": 12804.58850000007
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 8246,
+          "headers": 8246,
+          "first_byte": 8246,
+          "tool_arguments": 11902
+        }
+      }
+    },
+    {
+      "ordinal": 38,
+      "id": "11e462c3-32ad-49ed-af8b-6561227ee95e",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:42:12.817Z",
+      "completedAt": "2026-11-09T15:42:24.815Z",
+      "elapsedMs": 11998,
+      "toolName": "production.bundle",
+      "argumentBytes": 37,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 53751,
+        "cachedInputTokens": 21639,
+        "outputTokens": 154,
+        "reasoningTokens": 20,
+        "totalTokens": 53905
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:42:12.817Z",
+        "dispatching": "2026-11-09T15:42:12.848Z",
+        "native_queued": "2026-11-09T15:42:12.889Z",
+        "admitted": "2026-11-09T15:42:12.893Z",
+        "sent": "2026-11-09T15:42:21.507Z",
+        "headers": "2026-11-09T15:42:21.511Z",
+        "first_byte": "2026-11-09T15:42:21.513Z",
+        "visible_text": "2026-11-09T15:42:21.515Z",
+        "tool_arguments": "2026-11-09T15:42:24.081Z",
+        "usage": "2026-11-09T15:42:24.811Z",
+        "complete": "2026-11-09T15:42:24.815Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.0032999999821186066,
+          "dispatching": 30.796100000152364,
+          "native_queued": 71.500800000038,
+          "admitted": 75.62320000003092,
+          "sent": 8688.4347000001,
+          "headers": 8693.410499999998,
+          "first_byte": 8695.5168000001,
+          "visible_text": 8697.522800000152,
+          "tool_arguments": 11263.808500000043,
+          "complete": 11998.021300000139
+        },
+        "nativeFirstMs": {
+          "native_queued": 17,
+          "admitted": 17,
+          "sent": 8633,
+          "headers": 8633,
+          "first_byte": 8634,
+          "tool_arguments": 11208
+        }
+      }
+    },
+    {
+      "ordinal": 39,
+      "id": "113f3352-4120-43e6-b4fb-bbf7e5040fc8",
+      "status": "complete",
+      "createdAt": "2026-11-09T15:42:24.934Z",
+      "completedAt": "2026-11-09T15:42:44.243Z",
+      "elapsedMs": 19309,
+      "toolName": "production.bundle",
+      "argumentBytes": 11,
+      "finishReason": "tool_calls",
+      "usage": {
+        "inputTokens": 59054,
+        "cachedInputTokens": 52989,
+        "outputTokens": 153,
+        "reasoningTokens": 19,
+        "totalTokens": 59207
+      },
+      "firstSeen": {
+        "preparing": "2026-11-09T15:42:24.934Z",
+        "dispatching": "2026-11-09T15:42:24.965Z",
+        "native_queued": "2026-11-09T15:42:24.996Z",
+        "admitted": "2026-11-09T15:42:24.998Z",
+        "sent": "2026-11-09T15:42:41.065Z",
+        "headers": "2026-11-09T15:42:41.070Z",
+        "first_byte": "2026-11-09T15:42:41.086Z",
+        "visible_text": "2026-11-09T15:42:41.156Z",
+        "tool_arguments": "2026-11-09T15:42:43.625Z",
+        "usage": "2026-11-09T15:42:44.240Z",
+        "complete": "2026-11-09T15:42:44.243Z"
+      },
+      "timing": {
+        "workerFirstMs": {
+          "preparing": 0.003999999957159162,
+          "dispatching": 31.072799999965355,
+          "native_queued": 62.1964999998454,
+          "admitted": 64.35889999987558,
+          "sent": 16130.077099999879,
+          "headers": 16135.886899999809,
+          "first_byte": 16152.30439999979,
+          "visible_text": 16220.557499999879,
+          "tool_arguments": 18691.757099999813,
+          "complete": 19309.93109999993
+        },
+        "nativeFirstMs": {
+          "native_queued": 18,
+          "admitted": 18,
+          "sent": 16086,
+          "headers": 16086,
+          "first_byte": 16086,
+          "tool_arguments": 18643
+        }
+      }
+    }
+  ],
+  "rawEvidence": [
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/acceptance-evidence.json",
+      "sha256": "a585a498e369bc99e295088e885e4994ed97452ccf6d6f39eed8aa696bcc37d2"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/candidate-text.json",
+      "sha256": "d6d0335dc1051d5a07b832ab8782d0458508676714ae8b0d25a63f72a2ba1d28"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/content-checks.json",
+      "sha256": "58c378fc656f62b1256becc7f7d95073636e555ac6d42020b3e2460d267e1083"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/independent-candidate-review.json",
+      "sha256": "314e2aef4aa706a44c48440a5aad09b893cc4680fa0c02299c3107883e7fc4eb"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/identity-verification.json",
+      "sha256": "70c75fdd66e054b7d39871253ac691adf8b58da78b819376d29c87c9255c75cb"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/build-manifest.json",
+      "sha256": "c101f41cbd1c0437825c0e52a2db3df341130c7d1da5b2755d08346e39db8dbf"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/call-integrity.json",
+      "sha256": "86109c7184e5aae927e281c654c145167f5dbe6138af42c2aabf191464dc9a9d"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/app-data/terminal-export.json",
+      "sha256": "4c44741cc88d39de8f7eb5289be99c4a925c333c2516cb8e389b9e3f9eab5bfd"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/app-data/task-fixture.json",
+      "sha256": "3e3360631b45ce39ff10614e98d9e4bebe867453de73f5c55462109654dfcaff"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-bundle-real-20261109-2301/app-data/run-identity.json",
+      "sha256": "d873253d4dd77bbeea25601d7199649411e6af100439a2842b540088cf634ebb"
+    }
+  ],
+  "verification": {
+    "sourceAndBuildIdentityUnchanged": true,
+    "sqliteReopenedReadOnly": true,
+    "quickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "documentationChecks": {
+      "status": "passed",
+      "prettier": "Three changed documents passed explicit Prettier check",
+      "localLinksChecked": 22,
+      "sourceAnchorsChecked": 1,
+      "rawEvidenceHashesChecked": 10,
+      "parameterArchiveChecks": 8,
+      "reportConsistency": "passed; business acceptance remains failed",
+      "gitDiffCheck": "passed",
+      "newProductCodeChanges": false,
+      "offlineSuiteRerun": false
+    }
+  }
+}

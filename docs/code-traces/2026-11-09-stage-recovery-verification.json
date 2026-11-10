@@ -1,0 +1,703 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUtc": "2026-11-09T06:58:32.578Z",
+  "scope": "Incremental stage-argument recovery and production phase dispatch repair following the whole-conversation optimization implementation.",
+  "status": {
+    "sourceImplemented": true,
+    "finalAutomaticGatesPassed": true,
+    "isolatedBuiltValidationPassed": true,
+    "rootPnpmTestSucceededThisRepair": false,
+    "completePackageSuiteCoveragePassed": true,
+    "realModelQualityAccepted": false,
+    "pairedLatencyTargetsAccepted": false,
+    "runningDesktopUpdated": false,
+    "installed": false,
+    "committed": false,
+    "providerCallsInThisRepair": 0,
+    "userProjectWritesInThisRepair": 0,
+    "realTaskResumed": false
+  },
+  "repository": {
+    "root": "E:/p22/xlngaiforwindowsP22",
+    "head": "5ced12067bddd1e7478c4c5d89a676bebdf90f88",
+    "attribution": "Fingerprints describe the merged working tree, including prior and overlapping changes; this repair does not claim authorship of all changed bytes.",
+    "historicalVerificationPreserved": {
+      "path": "docs/code-traces/2026-11-09-conversation-optimization-verification.json",
+      "bytes": 69363,
+      "sha256": "efea0c13df8d8ba0f325f0b7d8a65faae7866a79895f2a75208b29062692706d",
+      "modifiedAtUtc": "2026-11-09T05:24:42.987Z"
+    },
+    "originalBaseline": {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-conversation-implementation-20261109/baseline.patch",
+      "bytes": 70869,
+      "sha256": "7f2b3c7f0ed754482580e7f295ef0327562f7d1940c8fb3518cf84121363687d",
+      "modifiedAtUtc": "2026-11-09T04:08:23.196Z"
+    },
+    "codeAndTestPathsTouchedByThisRepair": [
+      "apps/worker/src/agent-delivery-capabilities.ts",
+      "apps/worker/src/agent-prepared-arguments.ts",
+      "apps/worker/src/agent-provider-tool-gateway.ts",
+      "apps/worker/src/agent-tool-definitions.ts",
+      "apps/worker/src/agent-task-deliverables.ts",
+      "apps/worker/src/production-skill-validation.ts",
+      "apps/worker/src/agent-task-checkpoints.ts",
+      "apps/worker/src/agent-prepared-arguments.test.ts",
+      "apps/worker/src/production-skill-validation.test.ts",
+      "apps/worker/src/agent-provider-loop-service.test.ts",
+      "apps/desktop/src/ProductionPanel.scene-bindings.test.tsx",
+      "apps/desktop/src/ProductionPanel.test.tsx"
+    ]
+  },
+  "observation": {
+    "taskId": "9e38b8da-6aef-45d0-b50e-2dda343b3d11",
+    "generationId": "5871cbd6-3d7b-4e77-8031-7af92d8c66cb",
+    "taskFinalStatus": "failed",
+    "taskFinalError": "AGENT_TOOL_FAILURE_STALLED",
+    "completedAtUtc": "2026-11-09T06:35:09.064Z",
+    "completedAtBeijing": "2026-11-09 14:35:09 +08:00",
+    "stopOrigin": "Application ineffective-tool-retry protection; not stopped by this audit.",
+    "terminalRetry": {
+      "count": 4,
+      "operation": "partial",
+      "rejection": "TASK_REPAIR_REQUIRED",
+      "acceptedContentReviews": 0
+    },
+    "preservedSavedOutputs": {
+      "scenes": 4,
+      "shots": 12,
+      "qualityAccepted": false
+    },
+    "runtimeSkillRevision": 6,
+    "runtimeAndThenDistSceneSchemaSha256": "01e3f5ad0e12a03fe32e1d6e6d7af69ade776e3af1a664e3a74d8874241d9844",
+    "schemaEvidenceLimit": "Matching scene sub-schema and observed skill revision do not prove complete Native/Worker activation or exact provider wire equivalence.",
+    "latencyBaseline": {
+      "completedRequestsAtInitialSnapshot": 22,
+      "totalElapsedSeconds": 487.038,
+      "malformedArgumentsRequestSeconds": [48.379, 44.048],
+      "interpretation": "Request windows include model, transport and Native path; not pure inference or SQLite timing."
+    }
+  },
+  "replay": {
+    "frozenAtUtc": "2026-11-09T06:24:52.033Z",
+    "finalVerifiedAtUtc": "2026-11-09T06:51:17.060Z",
+    "oldFirstAction": "repair_outputs",
+    "newFirstAction": "read_outputs",
+    "durationConflicts": [
+      {
+        "sceneId": "9b4574ba-2c2f-4801-b85e-cf10ac12a083",
+        "sceneSeconds": 32,
+        "shotSeconds": 43
+      },
+      {
+        "sceneId": "b83b5318-78ff-4938-a8ac-ed05e237a0e4",
+        "sceneSeconds": 82,
+        "shotSeconds": 74
+      },
+      {
+        "sceneId": "004d4a58-0dad-42ed-896e-d8ecfdc7a6b6",
+        "sceneSeconds": 78,
+        "shotSeconds": 71
+      },
+      {
+        "sceneId": "195df6c7-19d9-4ed4-92d7-2a559f1e4f23",
+        "sceneSeconds": 24,
+        "shotSeconds": 28
+      }
+    ],
+    "repairs": [
+      {
+        "originalResultId": "22767f77-5c17-4a79-be47-a78c2113e4ea",
+        "originalArgumentsHash": "95b4ab5742ead4d3b674082530e0b86d9e87824ae28a40ee2189fe58c2e0803f",
+        "correctedArgumentsHash": "2281a514d68c67f7ba607189d0597a277f2fd70a77c71602e59853de8eb17996",
+        "irHash": "8cb593246ded7e9cac412925c0e9c01e004f6caabe67358c1aca85a36eb7c713",
+        "bodyUnchanged": true,
+        "rawSchemaAccepted": true,
+        "resolvedSchemaAccepted": true,
+        "originalCasPreserved": true,
+        "retryBytes": 222,
+        "originalBytes": 2612,
+        "candidateUnchanged": true
+      },
+      {
+        "originalResultId": "e5a8e500-9be2-45e5-9e81-ece972391423",
+        "originalArgumentsHash": "21a9f1dd023d1b1b912caee956450177936c2a5778e4fff9566804f162b73bc8",
+        "correctedArgumentsHash": "58dfab2a4efea6a71cf819eea392837b942886b3f0435a1d8c821f1bd1b0862c",
+        "irHash": "96bf91bcd2d5d749727c1f7377725fdec23627960d5bf16cf6d7e6f170272aab",
+        "bodyUnchanged": true,
+        "rawSchemaAccepted": true,
+        "resolvedSchemaAccepted": true,
+        "originalCasPreserved": true,
+        "retryBytes": 220,
+        "originalBytes": 2400,
+        "candidateUnchanged": true
+      }
+    ],
+    "finalBusinessBodyHash": "5c95bcc5be5c624d306f89cf52a39ca0e07bdfd9b50243d32b99fe2760e7f17e",
+    "businessBodiesUnchanged": true,
+    "frozenDatabaseCaveat": "Read-only online backup taken at 14:24:52 Beijing. Later old/new assessments wrote runtime state only on this copy. It is not an untouched byte-for-byte original; saved business body hashes remained unchanged.",
+    "savingsLimit": "Argument-byte reductions are offline examples, not a real-model latency experiment."
+  },
+  "tests": {
+    "finalPassedByPackage": {
+      "worker": 1555,
+      "desktop": 806,
+      "persistence": 101,
+      "generationAdapters": 80,
+      "context": 8,
+      "contracts": 48,
+      "llm": 32
+    },
+    "totalFinalPassed": 2630,
+    "counting": "Each package suite counted once. Root invocations failed at Desktop; Context, Contracts and LLM had passed before that failure. Other package suites subsequently passed individually. Focused, skipped and repeated runs are not added to the total.",
+    "domain": "No test files; configured --passWithNoTests, excluded from the count.",
+    "native": {
+      "rerunThisRepair": false,
+      "sourceChangedThisRepair": false,
+      "historicalPassed": 205,
+      "historicalIgnored": 6,
+      "evidence": "docs/code-traces/2026-11-09-conversation-optimization-verification.json"
+    }
+  },
+  "commandNotation": "Repository-root commands are normalized for reproduction; shell redirection and launch wrappers are omitted. The four-file and two-package selections are spelled out from captured test output. Logs retain the actual executed script output and results.",
+  "commands": [
+    {
+      "command": "pnpm --filter @ai-video/worker test --maxWorkers=2 --minWorkers=1",
+      "exitCode": 0,
+      "passed": 1555,
+      "filesPassed": 93,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-worker-final.log",
+        "bytes": 117031,
+        "sha256": "e40e287480a4189c8735241461f71a582d34114cf940647fd8aa33a45368d4ef",
+        "modifiedAtUtc": "2026-11-09T06:53:22.492Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/desktop test --maxWorkers=2 --minWorkers=1",
+      "exitCode": 0,
+      "passed": 806,
+      "filesPassed": 90,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-desktop-all.log",
+        "bytes": 34064,
+        "sha256": "1d524fe518d338a56aa8e1241177243068b5f571cdceb710358dfe8727a4a455",
+        "modifiedAtUtc": "2026-11-09T06:34:58.905Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/persistence --filter @ai-video/generation-adapters test --maxWorkers=2 --minWorkers=1",
+      "exitCode": 0,
+      "passed": 181,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-storage-adapters.log",
+        "bytes": 14266,
+        "sha256": "32f2bb7c6dae5564b3e5d329065fc7574be6c5657f446b15d8a937cdb5b4abd1",
+        "modifiedAtUtc": "2026-11-09T06:34:22.802Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker exec vitest run src/agent-prepared-arguments.test.ts src/agent-provider-tool-gateway.test.ts src/agent-task-deliverables.test.ts src/production-skill-validation.test.ts",
+      "exitCode": 0,
+      "passed": 136,
+      "note": "Four-file targeted selection; command spells out the captured selection.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-focused-latest.log",
+        "bytes": 982,
+        "sha256": "8de05586cd5b71e934fec3da26b0f0ee7ea2994740a8edd147a6abd7bcf0b60d",
+        "modifiedAtUtc": "2026-11-09T06:45:02.034Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker exec vitest run src/agent-provider-loop-service.test.ts -t \"persists targeted review and false-positive withdrawal\"",
+      "exitCode": 0,
+      "passed": 2,
+      "skipped": 176,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-protocol-review.log",
+        "bytes": 600,
+        "sha256": "dce3dd0c7626f2c41a7af6cea96996db1a14526f3639aff5c7790c8d99f74cf6",
+        "modifiedAtUtc": "2026-11-09T06:47:01.856Z"
+      }
+    },
+    {
+      "command": "pnpm typecheck",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-typecheck-acceptance.log",
+        "bytes": 812,
+        "sha256": "2a9b468da736120b337daa2049b21af7c223e6b98d69b8aafbf7c7e875fe4580",
+        "modifiedAtUtc": "2026-11-09T06:48:27.377Z"
+      }
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-lint-complete.log",
+        "bytes": 12,
+        "sha256": "cc5a0b39c7052d24c24888403c48018b4fcccc9d799f81be6c9c30c9e19c85fc",
+        "modifiedAtUtc": "2026-11-09T06:50:30.725Z"
+      }
+    },
+    {
+      "command": "pnpm format:check",
+      "exitCode": 0,
+      "note": "docs/ ignored by repository config; explicit check recorded separately.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-format-complete.log",
+        "bytes": 90,
+        "sha256": "0b95efe7a1df96aa81440f70658e5c8169546d284587f7ba2e8d268fd1aaea15",
+        "modifiedAtUtc": "2026-11-09T06:56:42.404Z"
+      }
+    },
+    {
+      "command": "pnpm exec prettier --check --ignore-path C:/Users/MSI/AppData/Local/Temp/p22-stage-empty-prettier-ignore docs/code-traces/2026-11-09-stage-recovery-and-phase-dispatch.md docs/AGENT-CONVERSATION-QUALITY-AND-EFFICIENCY-PLAN.md docs/PROJECT-LIBRARY-RETRIEVAL-IMPLEMENTATION-PLAN.md",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-docs-format-complete.log",
+        "bytes": 68,
+        "sha256": "f20510a9da4717c51c4cffee6d0dd88d6c9a723d0a83711d01216f5b48961283",
+        "modifiedAtUtc": "2026-11-09T06:56:33.588Z"
+      }
+    },
+    {
+      "command": "pnpm build",
+      "exitCode": 0,
+      "note": "Root build preceded final small Worker changes; final sidecar build recompiled Worker. Frontend production source did not change afterward. Existing large-chunk warning retained.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-build.log",
+        "bytes": 1351,
+        "sha256": "f7bbd573da52a3eb68a9fc28757417748bf2b92a2e6e7978ece99c1467a285b3",
+        "modifiedAtUtc": "2026-11-09T06:34:37.040Z"
+      }
+    },
+    {
+      "command": "pnpm worker:sidecar",
+      "exitCode": 0,
+      "note": "New executable built, not installed or loaded into the user application.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-sidecar-final.log",
+        "bytes": 931,
+        "sha256": "a7642af5f226d04843e1671cc615ee8fc3946d82b75c5d422062be9c3e1a806f",
+        "modifiedAtUtc": "2026-11-09T06:48:36.700Z"
+      }
+    },
+    {
+      "command": "node apps/worker/scripts/validate-conversation-quality.mjs",
+      "exitCode": 0,
+      "providerCalls": 0,
+      "semanticQualityEvaluation": false,
+      "note": "Both protocol configurations, real temporary SQLite projects and saved-body consumers; not a real-provider wire test.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-built-quality-final.log",
+        "bytes": 1222,
+        "sha256": "3b5819605a70e923519b20020d17e65f6a998e1e11049c0239c817c5f81db642",
+        "modifiedAtUtc": "2026-11-09T06:50:32.817Z"
+      }
+    },
+    {
+      "command": "node apps/worker/scripts/validate-worker-restart.mjs",
+      "exitCode": 0,
+      "providerCalls": 0,
+      "note": "New sidecar: correlated large-response rejection in 39 ms, old runtime scope rejected after restart, explicit reattach/read/write succeeds without replay.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-restart-final.log",
+        "bytes": 249,
+        "sha256": "862b6662133bd67503851f4dbdc69e0467fab543439763ff366aa2bb12167eb6",
+        "modifiedAtUtc": "2026-11-09T06:50:31.717Z"
+      }
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-diff-check-complete.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "modifiedAtUtc": "2026-11-09T06:56:32.822Z"
+      }
+    }
+  ],
+  "priorFailedRunsThisRepair": [
+    {
+      "command": "pnpm test",
+      "exitCode": 1,
+      "counts": {
+        "passed": 805,
+        "failed": 1,
+        "scope": "Desktop only; preceding package passes are not included in this subtotal."
+      },
+      "reason": "Voice selection was not yet reflected in saved audio instructions; corrected test synchronization. Root command stopped at Desktop.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-all-tests.log",
+        "bytes": 39257,
+        "sha256": "740e5b5ac6620c8778a26fd380551383790d9f7b94ae598ea22668f9bcd4ca4d",
+        "modifiedAtUtc": "2026-11-09T06:25:33.616Z"
+      }
+    },
+    {
+      "command": "pnpm test",
+      "exitCode": 1,
+      "counts": {
+        "passed": 805,
+        "failed": 1,
+        "scope": "Desktop only; preceding package passes are not included in this subtotal."
+      },
+      "reason": "Image submit button was not ready; test now waits for enabled state. Root command stopped at Desktop.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-all-tests-final.log",
+        "bytes": 58107,
+        "sha256": "04ebf5218ace050d994ff61e82b73a97a6d6ee4d338ea39857a0b55bfba86676",
+        "modifiedAtUtc": "2026-11-09T06:29:33.798Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker test --maxWorkers=2 --minWorkers=1",
+      "exitCode": 1,
+      "counts": {
+        "passed": 1551,
+        "failed": 3
+      },
+      "reason": "Two old protocol pending-action expectations plus missing evidence table in the minimal fixture.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-worker-all.log",
+        "bytes": 131466,
+        "sha256": "89b5184c165ca0e6eda341bb6d797efb94d26e3d066d6a6d23197707d45429d2",
+        "modifiedAtUtc": "2026-11-09T06:35:37.610Z"
+      }
+    },
+    {
+      "command": "pnpm --filter @ai-video/worker test --maxWorkers=2 --minWorkers=1",
+      "exitCode": 1,
+      "counts": {
+        "passed": 1553,
+        "failed": 2
+      },
+      "reason": "Two old protocol assertions still expected unready review to be hidden. Updated expectations preserve review readiness and original issues.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-worker-acceptance.log",
+        "bytes": 122237,
+        "sha256": "4f5abb2e9d942399b84736c9a37a592a7eb0005ae867b42e8107ac36507de6b7",
+        "modifiedAtUtc": "2026-11-09T06:45:40.110Z"
+      }
+    },
+    {
+      "command": "Worker four-file focused regression",
+      "exitCode": 1,
+      "counts": {
+        "passed": 135,
+        "failed": 1
+      },
+      "reason": "Minimal fixture lacked agent_context_evidence; table added.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-focused-final.log",
+        "bytes": 9034,
+        "sha256": "462228190fb08dbd7b8092df50e8f687eda57126f99a6609f13fc95b923dc872",
+        "modifiedAtUtc": "2026-11-09T06:38:32.817Z"
+      }
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 1,
+      "counts": {
+        "errors": 12
+      },
+      "reason": "Unsafe any in new test; typed fixture assertions added.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-lint.log",
+        "bytes": 1745,
+        "sha256": "9c8604f975b1ecb80c0d92eb8a7839af1afe71ae759965e9798eeef002e066b3",
+        "modifiedAtUtc": "2026-11-09T06:24:49.449Z"
+      }
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 1,
+      "counts": {
+        "errors": 1
+      },
+      "reason": "Unnecessary type assertion removed.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-lint-acceptance.log",
+        "bytes": 405,
+        "sha256": "6f201a37a9ff933a14726304d650eca71f115f6dd126a3ecaa6303bd2d9e41af",
+        "modifiedAtUtc": "2026-11-09T06:42:37.873Z"
+      }
+    },
+    {
+      "command": "node apps/worker/scripts/validate-conversation-quality.mjs",
+      "exitCode": 1,
+      "counts": null,
+      "reason": "Initial whole-scene projection gate overblocked independent shot review; scoped the defect to scene/whole-task acceptance while preserving shot evidence review.",
+      "log": {
+        "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-built-quality.log",
+        "bytes": 481,
+        "sha256": "9df6eb7135ef239271aa727668da5d227931493b7d698a1bf359dc980621998f",
+        "modifiedAtUtc": "2026-11-09T06:42:48.779Z"
+      }
+    }
+  ],
+  "evidenceFiles": [
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/snapshot.json",
+      "bytes": 8761063,
+      "sha256": "28c79fc22fe4eb1821e47d41548889a68d2c20bb5161bce01d4969520c8316f5",
+      "modifiedAtUtc": "2026-11-09T06:12:34.368Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/followup.json",
+      "bytes": 4218,
+      "sha256": "c6c9f156b825838e8c4386ac35fbd64fa34de7b9d7c8985feb6c3c2b54673fde",
+      "modifiedAtUtc": "2026-11-09T06:22:40.038Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/phase-before.json",
+      "bytes": 7381,
+      "sha256": "cbeb24845fdf408f67a694655851fb41d21800c994f2c89929b7133354e4adac",
+      "modifiedAtUtc": "2026-11-09T06:24:52.034Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/replay.json",
+      "bytes": 4185,
+      "sha256": "638c2067fde2f608efd50683b740aefac567fed075f7a9e8565b8c5f7946a359",
+      "modifiedAtUtc": "2026-11-09T06:31:56.908Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/replay-final.json",
+      "bytes": 4917,
+      "sha256": "0744ae00e3cb81d5333e8200960e7e0f2a2c6c6e36dbe11a2ef772f6458c737a",
+      "modifiedAtUtc": "2026-11-09T06:51:17.060Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/final-observation.json",
+      "bytes": 2045,
+      "sha256": "95e99527a03278897f31736d43c802e0dd512c2e79a3d5a865a4df20547767e8",
+      "modifiedAtUtc": "2026-11-09T06:49:05.897Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/terminal-errors.json",
+      "bytes": 536734,
+      "sha256": "668405ff83e3a2eb1a2625ebcabd1613da2f0a7eee8d7f82a08255d564cb895a",
+      "modifiedAtUtc": "2026-11-09T06:49:25.406Z"
+    },
+    {
+      "path": "C:/Users/MSI/AppData/Local/Temp/p22-stage-audit-20261109/frozen-project.sqlite",
+      "bytes": 39325696,
+      "sha256": "6c473e66415fd02578a3caac5335210b408073d5573e45a555e70dfb88d2721a",
+      "modifiedAtUtc": "2026-11-09T06:51:17.063Z"
+    }
+  ],
+  "fingerprints": {
+    "codeAndTests": [
+      {
+        "path": "apps/worker/src/agent-delivery-capabilities.ts",
+        "bytes": 2047,
+        "sha256": "c2ffd942be6b95dc492f32c94cda6b5c9611ca1198de14378b1f385891cbc848",
+        "modifiedAtUtc": "2026-11-09T06:18:09.879Z"
+      },
+      {
+        "path": "apps/worker/src/agent-prepared-arguments.ts",
+        "bytes": 7186,
+        "sha256": "cf43a7dba49fab3af0e1fcd5e8a0c360e1e8efca800f36227ec1992b74b103b0",
+        "modifiedAtUtc": "2026-11-09T06:22:57.706Z"
+      },
+      {
+        "path": "apps/worker/src/agent-provider-tool-gateway.ts",
+        "bytes": 31665,
+        "sha256": "452eb547a7990f7db0fef91789520e8f0464c6607c6b08122bdbbb87bd4785f3",
+        "modifiedAtUtc": "2026-11-09T06:18:49.711Z"
+      },
+      {
+        "path": "apps/worker/src/agent-tool-definitions.ts",
+        "bytes": 93991,
+        "sha256": "0e5fbc9dc02dd06cb5dcb1c0131e8e165e60d993e4b9d436aa0f8272728fb3a9",
+        "modifiedAtUtc": "2026-11-09T06:18:49.710Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-deliverables.ts",
+        "bytes": 57016,
+        "sha256": "7745a629c704e0417a963f7a0653eb05843dba1099ab6c4f350ed66a27f3d6d3",
+        "modifiedAtUtc": "2026-11-09T06:45:31.952Z"
+      },
+      {
+        "path": "apps/worker/src/production-skill-validation.ts",
+        "bytes": 38872,
+        "sha256": "d0e4a604a584d800ebd3395980f28fb6ac925723c4fa3b0c3019229746413071",
+        "modifiedAtUtc": "2026-11-09T06:44:42.335Z"
+      },
+      {
+        "path": "apps/worker/src/agent-task-checkpoints.ts",
+        "bytes": 19001,
+        "sha256": "74aec2cf595fc248f11f80e4dc9ae07bc6f477195be44e9c589bc81cd25606c9",
+        "modifiedAtUtc": "2026-11-09T06:19:45.469Z"
+      },
+      {
+        "path": "apps/worker/src/agent-prepared-arguments.test.ts",
+        "bytes": 13691,
+        "sha256": "667d5781c3fa1a31ebfceb91ca901cc8ad29273d759d838ff9dc7b62911083a1",
+        "modifiedAtUtc": "2026-11-09T06:27:24.417Z"
+      },
+      {
+        "path": "apps/worker/src/production-skill-validation.test.ts",
+        "bytes": 80123,
+        "sha256": "98bb2a2cd83a89c74a1f08e81611badad5868ba348113b0630167345467deb15",
+        "modifiedAtUtc": "2026-11-09T06:39:35.510Z"
+      },
+      {
+        "path": "apps/worker/src/agent-provider-loop-service.test.ts",
+        "bytes": 333755,
+        "sha256": "6f3f89db7c8feeda4900e7f617a8e0fcf09ee6f7b524d496e3477fa22091a356",
+        "modifiedAtUtc": "2026-11-09T06:48:41.832Z"
+      },
+      {
+        "path": "apps/desktop/src/ProductionPanel.scene-bindings.test.tsx",
+        "bytes": 46251,
+        "sha256": "6ae6a2fe85762aa279b3a5ec24c41ee506400ec1247c99879a53741e7f63aee9",
+        "modifiedAtUtc": "2026-11-09T06:27:05.730Z"
+      },
+      {
+        "path": "apps/desktop/src/ProductionPanel.test.tsx",
+        "bytes": 111458,
+        "sha256": "3c478d892b1e0145eb06450908c0e3ae859f0f841b969aaa06b3808dd0eabadd",
+        "modifiedAtUtc": "2026-11-09T06:30:42.343Z"
+      }
+    ],
+    "documentsExcludingThisRecord": [
+      {
+        "path": "docs/code-traces/2026-11-09-stage-recovery-and-phase-dispatch.md",
+        "bytes": 9964,
+        "sha256": "230259c280e5ed4081e9f7b02751c8d584b8a3bcc362c32a06aae632638f8080",
+        "modifiedAtUtc": "2026-11-09T06:56:01.845Z"
+      },
+      {
+        "path": "docs/AGENT-CONVERSATION-QUALITY-AND-EFFICIENCY-PLAN.md",
+        "bytes": 38418,
+        "sha256": "351101aa67e4eb5922ad2256c560a26f39590d6f6cd807c72f2bcb2e680240d0",
+        "modifiedAtUtc": "2026-11-09T06:55:33.973Z"
+      },
+      {
+        "path": "docs/PROJECT-LIBRARY-RETRIEVAL-IMPLEMENTATION-PLAN.md",
+        "bytes": 84075,
+        "sha256": "cf3aac5b7a9aba845c2cb2d62f21965fb715bd606aa533d1f2db47ca1141326e",
+        "modifiedAtUtc": "2026-11-09T06:55:33.973Z"
+      }
+    ],
+    "supportingValidation": [
+      {
+        "path": "apps/worker/scripts/validate-conversation-quality.mjs",
+        "bytes": 15586,
+        "sha256": "69acf29a770e40ed3331a80f2c43b4443738ea9e0b9926550da5a8d9f7a17a81",
+        "modifiedAtUtc": "2026-11-09T05:10:59.304Z"
+      },
+      {
+        "path": "apps/worker/scripts/validate-worker-restart.mjs",
+        "bytes": 7353,
+        "sha256": "c258e855e5733f89eb5c6b47db082d36ebed0dc636ce5c5edb15609dd3bc4dd6",
+        "modifiedAtUtc": "2026-10-27T02:01:21.006Z"
+      },
+      {
+        "path": "apps/worker/src/test-fixtures/conversation-quality-20261109.json",
+        "bytes": 39028,
+        "sha256": "d2d4b489b79a8cb943307fcaab528bbae5c6de7fe7df52e860357ada29b65871",
+        "modifiedAtUtc": "2026-11-09T04:42:17.298Z"
+      }
+    ],
+    "workerModules": [
+      {
+        "path": "apps/worker/dist/agent-delivery-capabilities.js",
+        "bytes": 1989,
+        "sha256": "7c65c768dbea9fd96629a29386391dc6a49a33918d5d6b63bbc36eb0c95e2dc1",
+        "modifiedAtUtc": "2026-11-09T06:48:33.902Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-prepared-arguments.js",
+        "bytes": 6875,
+        "sha256": "f55d2db0ec7c32ad9d74b134a4e9985e77ecaf09de2cf163dc37b4b8005a3ae6",
+        "modifiedAtUtc": "2026-11-09T06:48:33.972Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-provider-tool-gateway.js",
+        "bytes": 29274,
+        "sha256": "4c35e434ff0642d41c5b47627580d663e80f06d0a5c887b7f23e40527fdf85c4",
+        "modifiedAtUtc": "2026-11-09T06:48:34.154Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-tool-definitions.js",
+        "bytes": 102114,
+        "sha256": "c5f43fa8c571f45686c21072562c8d8be954a44c43fe2971630c0ee9246af081",
+        "modifiedAtUtc": "2026-11-09T06:48:33.969Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-deliverables.js",
+        "bytes": 56884,
+        "sha256": "fc6f2ff50e55547bc5531777d8088603c826c0663ecffc1a9d0016cac0693fe8",
+        "modifiedAtUtc": "2026-11-09T06:48:33.955Z"
+      },
+      {
+        "path": "apps/worker/dist/production-skill-validation.js",
+        "bytes": 38402,
+        "sha256": "097133a992e78303517763114c00cc0447854d11be90cebaa0bd892be2cac7d4",
+        "modifiedAtUtc": "2026-11-09T06:48:33.931Z"
+      },
+      {
+        "path": "apps/worker/dist/agent-task-checkpoints.js",
+        "bytes": 18889,
+        "sha256": "08bb115f755118cdbdf023d27680ad393953557ee5bd091a7be7150b9a6cd765",
+        "modifiedAtUtc": "2026-11-09T06:48:34.212Z"
+      }
+    ],
+    "sidecar": [
+      {
+        "path": "apps/worker/dist-sidecar/index.cjs",
+        "bytes": 4527390,
+        "sha256": "d5c57070b8313d93b3cd63e36d2f8757ff6cdce16225c9c2ffa20a7d2e0ea1f2",
+        "modifiedAtUtc": "2026-11-09T06:48:36.236Z"
+      },
+      {
+        "path": "apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+        "bytes": 77103294,
+        "sha256": "883047bdec784b37c9e1cff317e309ec8008ad96f7763287666fbf1c339ada4e",
+        "modifiedAtUtc": "2026-11-09T06:48:40.401Z"
+      }
+    ],
+    "frontend": [
+      {
+        "path": "apps/desktop/dist/index.html",
+        "bytes": 445,
+        "sha256": "42b5cbd5938a51fde34f064620cbf5a99d455f872c1f9d0b288af731c5be7529",
+        "modifiedAtUtc": "2026-11-09T06:34:36.970Z"
+      },
+      {
+        "path": "apps/desktop/dist/assets/brand-logo-Ba9QyOTc.png",
+        "bytes": 9297,
+        "sha256": "e201db8424ad81c375d77a1b0275b7e5e9875cd07c338791d6b5da45f9ca5245",
+        "modifiedAtUtc": "2026-11-09T06:34:36.965Z"
+      },
+      {
+        "path": "apps/desktop/dist/assets/index-CqGcZlAD.css",
+        "bytes": 224164,
+        "sha256": "809bf420e6e2095e324ac9616bd0e993fc4424f6b3f52f6398cb8d2b30104f35",
+        "modifiedAtUtc": "2026-11-09T06:34:36.970Z"
+      },
+      {
+        "path": "apps/desktop/dist/assets/index-D7YHADsn.js",
+        "bytes": 1336497,
+        "sha256": "f9490ebeb04ebf280819457bd2a4e6e2ec6b922cb76db19ff4618abd5fcac2e4",
+        "modifiedAtUtc": "2026-11-09T06:34:36.971Z"
+      },
+      {
+        "path": "apps/desktop/dist/assets/sync-CDcpEsQg.png",
+        "bytes": 13441,
+        "sha256": "5b58d00d12a953e352b4c0b5971016373e348d42f0a1eb4218c5dd9c854ca1fb",
+        "modifiedAtUtc": "2026-11-09T06:34:36.970Z"
+      }
+    ]
+  },
+  "exclusions": [
+    "This record intentionally has no self-fingerprint.",
+    "Full saved prompts, provider configuration and raw user project database are not copied into this repository record.",
+    "Previous verification retains its historical fingerprints and is superseded only for files rebuilt by this repair.",
+    "No installation, user-app restart, real-task continuation, commit, or real-provider generation was performed.",
+    "Actual model quality, full semantic compliance, live UI behavior and paired latency improvement remain unaccepted."
+  ]
+}

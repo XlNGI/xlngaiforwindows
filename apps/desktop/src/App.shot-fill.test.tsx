@@ -9,7 +9,6 @@ import {
 import { App } from './App';
 import { callWorker } from './worker-client';
 import { selectWorkerScope } from './worker-scope';
-
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => path }));
 vi.mock('@tauri-apps/api/window', () => ({
@@ -20,7 +19,6 @@ vi.mock('@tauri-apps/api/window', () => ({
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn().mockResolvedValue(null) }));
-
 afterEach(() => {
   cleanup();
   selectWorkerScope(undefined);
@@ -28,7 +26,6 @@ afterEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
 });
-
 it.each(['reference', 'first-frame'] as const)(
   'fills Seedance video from the shot button after saving default cast and a continuity %s',
   async (role) => {
@@ -49,7 +46,7 @@ it.each(['reference', 'first-frame'] as const)(
         contractId: contract.contractId,
         contractRevision: 2,
         apiVersion: 'contract-2',
-        schemaVersion: 1,
+        schemaVersion: 1 as const,
         endpoint: 'https://example.test/videos',
         documentationUrl: 'https://example.test/docs',
         credentialProvider: 'unicompapi',
@@ -106,18 +103,19 @@ it.each(['reference', 'first-frame'] as const)(
       title: '镜头一',
       position: 0,
       status: 'draft',
-      prompt: '雨夜里林澈回头',
+
       rowVersion: 0,
       createdAt: 'now',
       updatedAt: 'now',
       referenceBindings: {
         sceneBindings: [{ sourceDocumentId: location.id, assetId: sceneImage.id }],
       },
-      authoringIR: {
-        schemaVersion: 1,
-        kind: 'shot',
+      ...{
         prompt: '雨夜里林澈回头',
-        references: { characterDocumentIds: [cast.id], sceneDocumentIds: [location.id] },
+        bindings: {
+          schemaVersion: 1 as const,
+          ...{ characterDocumentIds: [cast.id], sceneDocumentIds: [location.id] },
+        },
       },
     };
     let finishSave: (() => void) | undefined;
@@ -240,8 +238,8 @@ it.each(['reference', 'first-frame'] as const)(
       if (method === 'production.read' || method === 'production.compile')
         return {
           target: params.target,
-          rowVersion: 0,
-          authoringIR: shot.authoringIR,
+
+          ...shot,
           parameters: {},
           issues: [],
         };
@@ -256,7 +254,6 @@ it.each(['reference', 'first-frame'] as const)(
       if (method === 'conversation.list' || method === 'task.log.list') return { items: [] };
       return [];
     }) as typeof callWorker);
-
     const { container } = render(<App />);
     const nav = () => within(screen.getByRole('navigation', { name: '项目导航' }));
     await waitFor(() => expect(nav().getByRole('button', { name: /场次与镜头/ })).toBeEnabled());

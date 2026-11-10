@@ -76,10 +76,8 @@ import {
   rebuildLibraryChunksForMediaTask,
   rebuildLibraryChunksForRecord,
 } from './project-library-chunks.js';
-
 export class SqliteProjectRepository implements ProjectRepository {
   constructor(private readonly database: Database.Database) {}
-
   get(): ProjectRecord {
     const row = this.database
       .prepare('SELECT id, name, created_at, updated_at FROM projects LIMIT 1')
@@ -87,22 +85,18 @@ export class SqliteProjectRepository implements ProjectRepository {
     if (!row) throw new Error('Project metadata is missing.');
     return mapProject(row);
   }
-
   touch(updatedAt: string): void {
     this.database.prepare('UPDATE projects SET updated_at = ?').run(updatedAt);
   }
 }
-
 export class SqliteNovelProfileRepository implements NovelProfileRepository {
   constructor(private readonly database: Database.Database) {}
-
   get(projectId: string): NovelProfileRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM novel_profiles WHERE project_id = ?')
       .get(projectId) as NovelProfileRow | undefined;
     return row ? mapNovelProfile(row) : undefined;
   }
-
   save(record: NovelProfileRecord, expectedRowVersion?: number): boolean {
     if (this.get(record.projectId)) {
       const result = this.database
@@ -135,7 +129,6 @@ export class SqliteNovelProfileRepository implements NovelProfileRepository {
     return true;
   }
 }
-
 interface NovelProfileRow {
   project_id: string;
   language: string;
@@ -144,7 +137,6 @@ interface NovelProfileRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapNovelProfile(row: NovelProfileRow): NovelProfileRecord {
   return {
     projectId: row.project_id,
@@ -155,16 +147,13 @@ function mapNovelProfile(row: NovelProfileRow): NovelProfileRecord {
     updatedAt: row.updated_at,
   };
 }
-
 export class SqliteNovelVolumeRepository implements NovelVolumeRepository {
   constructor(private readonly database: Database.Database) {}
-
   get(id: string): NovelVolumeRecord | undefined {
     const row = this.database.prepare('SELECT * FROM novel_volumes WHERE id = ?').get(id) as
       NovelVolumeRow | undefined;
     return row ? mapNovelVolume(row) : undefined;
   }
-
   listByProject(projectId: string, includeArchived = false): NovelVolumeRecord[] {
     const rows = this.database
       .prepare(
@@ -174,7 +163,6 @@ export class SqliteNovelVolumeRepository implements NovelVolumeRepository {
       .all(projectId) as NovelVolumeRow[];
     return rows.map(mapNovelVolume);
   }
-
   save(record: NovelVolumeRecord, expectedRowVersion?: number): boolean {
     if (this.get(record.id)) {
       const result = this.database
@@ -212,7 +200,6 @@ export class SqliteNovelVolumeRepository implements NovelVolumeRepository {
     return true;
   }
 }
-
 interface NovelVolumeRow {
   id: string;
   project_id: string;
@@ -223,7 +210,6 @@ interface NovelVolumeRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapNovelVolume(row: NovelVolumeRow): NovelVolumeRecord {
   return {
     id: row.id,
@@ -236,16 +222,13 @@ function mapNovelVolume(row: NovelVolumeRow): NovelVolumeRecord {
     updatedAt: row.updated_at,
   };
 }
-
 export class SqliteNovelChapterRepository implements NovelChapterRepository {
   constructor(private readonly database: Database.Database) {}
-
   get(id: string): NovelChapterRecord | undefined {
     const row = this.database.prepare('SELECT * FROM novel_chapters WHERE id = ?').get(id) as
       NovelChapterRow | undefined;
     return row ? mapNovelChapter(row) : undefined;
   }
-
   listByProject(projectId: string, includeArchived = false): NovelChapterRecord[] {
     const rows = this.database
       .prepare(
@@ -255,7 +238,6 @@ export class SqliteNovelChapterRepository implements NovelChapterRepository {
       .all(projectId) as NovelChapterRow[];
     return rows.map(mapNovelChapter);
   }
-
   save(record: NovelChapterRecord, expectedRowVersion?: number): boolean {
     if (this.get(record.id)) {
       const result = this.database
@@ -300,7 +282,6 @@ export class SqliteNovelChapterRepository implements NovelChapterRepository {
     return true;
   }
 }
-
 interface NovelChapterRow {
   id: string;
   project_id: string;
@@ -314,7 +295,6 @@ interface NovelChapterRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapNovelChapter(row: NovelChapterRow): NovelChapterRecord {
   return {
     id: row.id,
@@ -330,23 +310,19 @@ function mapNovelChapter(row: NovelChapterRow): NovelChapterRecord {
     updatedAt: row.updated_at,
   };
 }
-
 export class SqliteDocumentBindingRepository implements DocumentBindingRepository {
   constructor(private readonly database: Database.Database) {}
-
   get(id: string): DocumentBindingRecord | undefined {
     const row = this.database.prepare('SELECT * FROM document_bindings WHERE id = ?').get(id) as
       DocumentBindingRow | undefined;
     return row ? mapDocumentBinding(row) : undefined;
   }
-
   getByDocument(documentId: string): DocumentBindingRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM document_bindings WHERE document_id = ?')
       .get(documentId) as DocumentBindingRow | undefined;
     return row ? mapDocumentBinding(row) : undefined;
   }
-
   listByProject(projectId: string, includeNeedsReview = false): DocumentBindingRecord[] {
     const rows = this.database
       .prepare(
@@ -356,7 +332,6 @@ export class SqliteDocumentBindingRepository implements DocumentBindingRepositor
       .all(projectId) as DocumentBindingRow[];
     return rows.map(mapDocumentBinding);
   }
-
   save(record: DocumentBindingRecord, expectedRowVersion?: number): boolean {
     if (this.get(record.id)) {
       const result = this.database
@@ -407,7 +382,6 @@ export class SqliteDocumentBindingRepository implements DocumentBindingRepositor
     return true;
   }
 }
-
 interface DocumentBindingRow {
   id: string;
   project_id: string;
@@ -424,7 +398,6 @@ interface DocumentBindingRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapDocumentBinding(row: DocumentBindingRow): DocumentBindingRecord {
   return {
     id: row.id,
@@ -443,14 +416,12 @@ function mapDocumentBinding(row: DocumentBindingRow): DocumentBindingRecord {
     updatedAt: row.updated_at,
   };
 }
-
 interface ProjectRow {
   id: string;
   name: string;
   created_at: string;
   updated_at: string;
 }
-
 function mapProject(row: ProjectRow): ProjectRecord {
   return {
     id: row.id,
@@ -460,11 +431,9 @@ function mapProject(row: ProjectRow): ProjectRecord {
     updatedAt: row.updated_at,
   };
 }
-
 class ProjectScopedRepository {
   constructor(protected readonly database: Database.Database) {}
 }
-
 class SqliteDocumentRepository extends ProjectScopedRepository implements DocumentRepository {
   save(record: DocumentRecord): void {
     this.database
@@ -499,13 +468,11 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
         record.updatedAt,
       );
   }
-
   get(id: string): DocumentRecord | undefined {
     const row = this.database.prepare('SELECT * FROM documents WHERE id = ?').get(id) as
       DocumentRow | undefined;
     return row ? mapDocument(row) : undefined;
   }
-
   listByProject(projectId: string): DocumentRecord[] {
     return (
       this.database
@@ -513,25 +480,25 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
         .all(projectId) as DocumentRow[]
     ).map(mapDocument);
   }
-
   saveVersion(record: DocumentRecord, version: DocumentVersionRecord): void {
     this.database.transaction(() => {
       this.save(record);
       this.database
         .prepare(
           `INSERT INTO document_versions
-           (id, document_id, version, content_markdown, content_ir_json, state, base_version_id,
+           (id, document_id, version, content_markdown, bindings_json, sample_text, state, base_version_id,
             title_snapshot, scope_type_snapshot, scope_id_snapshot,
             author_type, author_id, source_task_id, source_message_id,
             context_snapshot_id, content_hash, state_updated_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           version.id,
           version.documentId,
           version.version,
           version.contentMarkdown,
-          version.contentIRJson ?? null,
+          version.bindingsJson ?? null,
+          version.sampleText ?? null,
           version.state ?? 'draft',
           version.baseVersionId ?? null,
           version.titleSnapshot ?? record.title,
@@ -558,13 +525,11 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
         .run(version.id, record.updatedAt, versionPublished ? 1 : 0, record.id);
     })();
   }
-
   getVersion(id: string): DocumentVersionRecord | undefined {
     const row = this.database.prepare('SELECT * FROM document_versions WHERE id = ?').get(id) as
       DocumentVersionRow | undefined;
     return row ? mapDocumentVersion(row) : undefined;
   }
-
   listVersions(documentId: string): DocumentVersionRecord[] {
     return (
       this.database
@@ -572,7 +537,6 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
         .all(documentId) as DocumentVersionRow[]
     ).map(mapDocumentVersion);
   }
-
   updatePublishedVersion(
     documentId: string,
     publishedVersionId: string,
@@ -593,7 +557,6 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
       .run(publishedVersionId, updatedAt, documentId, expectedRowVersion, publishedVersionId);
     return result.changes === 1;
   }
-
   updateVersionState(
     versionId: string,
     state: NonNullable<DocumentVersionRecord['state']>,
@@ -610,7 +573,6 @@ class SqliteDocumentRepository extends ProjectScopedRepository implements Docume
     return result.changes === 1;
   }
 }
-
 interface DocumentRow {
   id: string;
   project_id: string;
@@ -625,18 +587,15 @@ interface DocumentRow {
   created_at: string;
   updated_at: string;
 }
-
 function requireConversationScope(value: string): ConversationScopeType {
   if (value === 'project' || value === 'scene' || value === 'shot') return value;
   throw new Error(`Unsupported conversation scope: ${value}`);
 }
-
 function optionalConversationScope(
   value: string | null | undefined,
 ): ConversationScopeType | undefined {
   return value ? requireConversationScope(value) : undefined;
 }
-
 function mapDocument(row: DocumentRow): DocumentRecord {
   return {
     id: row.id,
@@ -653,8 +612,9 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     updatedAt: row.updated_at,
   };
 }
-
 interface DocumentVersionRow {
+  bindings_json: string | null;
+  sample_text: string | null;
   id: string;
   document_id: string;
   version: number;
@@ -674,13 +634,14 @@ interface DocumentVersionRow {
   state_version: number;
   created_at: string;
 }
-
 function mapDocumentVersion(row: DocumentVersionRow): DocumentVersionRecord {
   return {
     id: row.id,
     documentId: row.document_id,
     version: row.version,
     contentMarkdown: row.content_markdown,
+    bindingsJson: row.bindings_json ?? undefined,
+    sampleText: row.sample_text ?? undefined,
     state: row.state,
     baseVersionId: row.base_version_id ?? undefined,
     titleSnapshot: row.title_snapshot ?? undefined,
@@ -697,7 +658,6 @@ function mapDocumentVersion(row: DocumentVersionRow): DocumentVersionRecord {
     createdAt: row.created_at,
   };
 }
-
 class SqliteDocumentReviewRepository
   extends ProjectScopedRepository
   implements DocumentReviewRepository
@@ -739,20 +699,17 @@ class SqliteDocumentReviewRepository
         record.version,
       );
   }
-
   get(id: string): DocumentReviewRecord | undefined {
     const row = this.database.prepare('SELECT * FROM document_reviews WHERE id = ?').get(id) as
       DocumentReviewRow | undefined;
     return row ? mapDocumentReview(row) : undefined;
   }
-
   getByVersion(documentVersionId: string): DocumentReviewRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM document_reviews WHERE document_version_id = ?')
       .get(documentVersionId) as DocumentReviewRow | undefined;
     return row ? mapDocumentReview(row) : undefined;
   }
-
   listByDocument(documentId: string): DocumentReviewRecord[] {
     return (
       this.database
@@ -763,7 +720,6 @@ class SqliteDocumentReviewRepository
         .all(documentId) as DocumentReviewRow[]
     ).map(mapDocumentReview);
   }
-
   update(record: DocumentReviewRecord, expectedVersion: number): boolean {
     const result = this.database
       .prepare(
@@ -790,7 +746,6 @@ class SqliteDocumentReviewRepository
     return result.changes === 1;
   }
 }
-
 interface DocumentReviewRow {
   id: string;
   project_id: string;
@@ -807,7 +762,6 @@ interface DocumentReviewRow {
   comment: string | null;
   version: number;
 }
-
 function mapDocumentReview(row: DocumentReviewRow): DocumentReviewRecord {
   return {
     id: row.id,
@@ -826,7 +780,6 @@ function mapDocumentReview(row: DocumentReviewRow): DocumentReviewRecord {
     version: row.version,
   };
 }
-
 class SqliteDocumentPublicationRepository
   extends ProjectScopedRepository
   implements DocumentPublicationRepository
@@ -854,14 +807,12 @@ class SqliteDocumentPublicationRepository
         record.publishedAt,
       );
   }
-
   get(id: string): DocumentPublicationRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM document_publications WHERE id = ?')
       .get(id) as DocumentPublicationRow | undefined;
     return row ? mapDocumentPublication(row) : undefined;
   }
-
   listByDocument(documentId: string): DocumentPublicationRecord[] {
     return (
       this.database
@@ -873,7 +824,6 @@ class SqliteDocumentPublicationRepository
     ).map(mapDocumentPublication);
   }
 }
-
 interface DocumentPublicationRow {
   id: string;
   project_id: string;
@@ -887,7 +837,6 @@ interface DocumentPublicationRow {
   published_by_id: string | null;
   published_at: string;
 }
-
 function mapDocumentPublication(row: DocumentPublicationRow): DocumentPublicationRecord {
   return {
     id: row.id,
@@ -903,7 +852,6 @@ function mapDocumentPublication(row: DocumentPublicationRow): DocumentPublicatio
     publishedAt: row.published_at,
   };
 }
-
 class SqliteDocumentWorkflowAuditRepository
   extends ProjectScopedRepository
   implements DocumentWorkflowAuditRepository
@@ -934,10 +882,9 @@ class SqliteDocumentWorkflowAuditRepository
         record.createdAt,
       );
   }
-
   listByProject(projectId: string, limit = 100): DocumentWorkflowAuditRecord[] {
     const boundedLimit = Number.isFinite(limit)
-      ? Math.min(Math.max(Math.trunc(limit), 1), 1_000)
+      ? Math.min(Math.max(Math.trunc(limit), 1), 1000)
       : 100;
     return (
       this.database
@@ -948,10 +895,9 @@ class SqliteDocumentWorkflowAuditRepository
         .all(projectId, boundedLimit) as DocumentWorkflowAuditRow[]
     ).map(mapDocumentWorkflowAudit);
   }
-
   listByDocument(documentId: string, limit = 100): DocumentWorkflowAuditRecord[] {
     const boundedLimit = Number.isFinite(limit)
-      ? Math.min(Math.max(Math.trunc(limit), 1), 1_000)
+      ? Math.min(Math.max(Math.trunc(limit), 1), 1000)
       : 100;
     return (
       this.database
@@ -963,7 +909,6 @@ class SqliteDocumentWorkflowAuditRepository
     ).map(mapDocumentWorkflowAudit);
   }
 }
-
 interface DocumentWorkflowAuditRow {
   id: string;
   project_id: string;
@@ -980,7 +925,6 @@ interface DocumentWorkflowAuditRow {
   metadata_json: string;
   created_at: string;
 }
-
 function mapDocumentWorkflowAudit(row: DocumentWorkflowAuditRow): DocumentWorkflowAuditRecord {
   return {
     id: row.id,
@@ -999,7 +943,6 @@ function mapDocumentWorkflowAudit(row: DocumentWorkflowAuditRow): DocumentWorkfl
     createdAt: row.created_at,
   };
 }
-
 class SqliteAgentTaskDocumentVersionRepository
   extends ProjectScopedRepository
   implements AgentTaskDocumentVersionRepository
@@ -1019,7 +962,6 @@ class SqliteAgentTaskDocumentVersionRepository
         record.createdAt,
       );
   }
-
   listByTask(taskId: string): AgentTaskDocumentVersionRecord[] {
     return (
       this.database
@@ -1031,7 +973,6 @@ class SqliteAgentTaskDocumentVersionRepository
     ).map(mapAgentTaskDocumentVersion);
   }
 }
-
 interface AgentTaskDocumentVersionRow {
   task_id: string;
   document_id: string;
@@ -1039,7 +980,6 @@ interface AgentTaskDocumentVersionRow {
   operation: AgentTaskDocumentVersionRecord['operation'];
   created_at: string;
 }
-
 function mapAgentTaskDocumentVersion(
   row: AgentTaskDocumentVersionRow,
 ): AgentTaskDocumentVersionRecord {
@@ -1051,19 +991,19 @@ function mapAgentTaskDocumentVersion(
     createdAt: row.created_at,
   };
 }
-
 class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepository {
   save(record: SceneRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json, dialogue_audio_id, authoring_ir_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO scenes (id, project_id, title, position, created_at, updated_at, row_version, scene_document_id, video_prompt, material_bindings_json, dialogue_audio_id, bindings_json, timing_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
            scene_document_id = excluded.scene_document_id,
            video_prompt = excluded.video_prompt,
            material_bindings_json = excluded.material_bindings_json,
            dialogue_audio_id = excluded.dialogue_audio_id,
-           authoring_ir_json = excluded.authoring_ir_json,
+           bindings_json = excluded.bindings_json,
+           timing_json = excluded.timing_json,
            row_version = scenes.row_version + 1
          WHERE scenes.row_version = excluded.row_version`,
       )
@@ -1076,10 +1016,11 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
         record.updatedAt,
         record.rowVersion,
         record.sceneDocumentId ?? null,
-        record.videoPrompt ?? null,
+        record.prompt ?? null,
         record.materialBindingsJson ?? '[]',
         record.dialogueAudioId ?? null,
-        record.authoringIRJson ?? null,
+        record.bindingsJson ?? null,
+        record.timingJson ?? null,
       );
     if (result.changes !== 1) throw new Error('SCENE_ROW_VERSION_CONFLICT');
     rebuildLibraryChunksForRecord(
@@ -1123,13 +1064,11 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
       );
     }
   }
-
   get(id: string): SceneRecord | undefined {
     const row = this.database.prepare('SELECT * FROM scenes WHERE id = ?').get(id) as
       SceneRow | undefined;
     return row ? mapScene(row) : undefined;
   }
-
   listByProject(projectId: string, includeArchived = false): SceneRecord[] {
     return (
       this.database
@@ -1140,7 +1079,6 @@ class SqliteSceneRepository extends ProjectScopedRepository implements SceneRepo
     ).map(mapScene);
   }
 }
-
 interface SceneRow {
   id: string;
   project_id: string;
@@ -1150,13 +1088,13 @@ interface SceneRow {
   video_prompt: string | null;
   material_bindings_json: string;
   dialogue_audio_id: string | null;
-  authoring_ir_json: string | null;
+  bindings_json: string | null;
+  timing_json: string | null;
   position: number;
   created_at: string;
   updated_at: string;
   row_version: number;
 }
-
 function mapScene(row: SceneRow): SceneRecord {
   return {
     id: row.id,
@@ -1164,8 +1102,9 @@ function mapScene(row: SceneRow): SceneRecord {
     archivedAt: row.archived_at ?? undefined,
     title: row.title,
     sceneDocumentId: row.scene_document_id ?? undefined,
-    videoPrompt: row.video_prompt ?? undefined,
-    authoringIRJson: row.authoring_ir_json ?? undefined,
+    prompt: row.video_prompt ?? undefined,
+    bindingsJson: row.bindings_json ?? undefined,
+    timingJson: row.timing_json ?? undefined,
     materialBindingsJson: row.material_bindings_json || '[]',
     dialogueAudioId: row.dialogue_audio_id ?? undefined,
     position: row.position,
@@ -1174,17 +1113,17 @@ function mapScene(row: SceneRow): SceneRecord {
     updatedAt: row.updated_at,
   };
 }
-
 class SqliteShotRepository extends ProjectScopedRepository implements ShotRepository {
   save(record: ShotRecord): void {
     const result = this.database
       .prepare(
-        `INSERT INTO shots (id, scene_id, title, position, status, document_id, prompt, created_at, updated_at, row_version, authoring_ir_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO shots (id, scene_id, title, position, status, document_id, prompt, created_at, updated_at, row_version, bindings_json, timing_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title, status = excluded.status, document_id = excluded.document_id,
            prompt = excluded.prompt, updated_at = excluded.updated_at,
-           authoring_ir_json = excluded.authoring_ir_json,
+           bindings_json = excluded.bindings_json,
+           timing_json = excluded.timing_json,
            row_version = shots.row_version + 1
          WHERE shots.row_version = excluded.row_version`,
       )
@@ -1199,12 +1138,18 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
         record.createdAt,
         record.updatedAt,
         record.rowVersion,
-        record.authoringIRJson ?? null,
+        record.bindingsJson ?? null,
+        record.timingJson ?? null,
       );
     if (result.changes !== 1) throw new Error('SHOT_ROW_VERSION_CONFLICT');
     const scene = this.database
       .prepare('SELECT project_id, title FROM scenes WHERE id = ?')
-      .get(record.sceneId) as { project_id: string; title: string } | undefined;
+      .get(record.sceneId) as
+      | {
+          project_id: string;
+          title: string;
+        }
+      | undefined;
     if (scene) {
       rebuildLibraryChunksForRecord(
         this.database,
@@ -1223,20 +1168,17 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
       );
     }
   }
-
   get(id: string): ShotRecord | undefined {
     const row = this.database.prepare('SELECT * FROM shots WHERE id = ?').get(id) as
       ShotRow | undefined;
     return row ? mapShot(row) : undefined;
   }
-
   findByDocumentId(documentId: string): ShotRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM shots WHERE document_id = ?')
       .get(documentId) as ShotRow | undefined;
     return row ? mapShot(row) : undefined;
   }
-
   listByScene(sceneId: string, includeArchived = false): ShotRecord[] {
     return (
       this.database
@@ -1247,7 +1189,6 @@ class SqliteShotRepository extends ProjectScopedRepository implements ShotReposi
     ).map(mapShot);
   }
 }
-
 interface ShotRow {
   id: string;
   scene_id: string;
@@ -1257,12 +1198,12 @@ interface ShotRow {
   status: string;
   document_id: string | null;
   prompt: string | null;
-  authoring_ir_json: string | null;
+  bindings_json: string | null;
+  timing_json: string | null;
   created_at: string;
   updated_at: string;
   row_version: number;
 }
-
 function mapShot(row: ShotRow): ShotRecord {
   return {
     id: row.id,
@@ -1273,13 +1214,13 @@ function mapShot(row: ShotRow): ShotRecord {
     status: row.status,
     documentId: row.document_id ?? undefined,
     prompt: row.prompt ?? undefined,
-    authoringIRJson: row.authoring_ir_json ?? undefined,
+    bindingsJson: row.bindings_json ?? undefined,
+    timingJson: row.timing_json ?? undefined,
     rowVersion: row.row_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
-
 class SqliteConversationRepository
   extends ProjectScopedRepository
   implements ConversationRepository
@@ -1306,13 +1247,11 @@ class SqliteConversationRepository
         record.archivedAt ?? null,
       );
   }
-
   get(id: string): ConversationRecord | undefined {
     const row = this.database.prepare('SELECT * FROM conversations WHERE id = ?').get(id) as
       ConversationRow | undefined;
     return row ? mapConversation(row) : undefined;
   }
-
   listByProject(projectId: string): ConversationRecord[] {
     return (
       this.database
@@ -1322,14 +1261,12 @@ class SqliteConversationRepository
         .all(projectId) as ConversationRow[]
     ).map(mapConversation);
   }
-
   listPageByProject(
     projectId: string,
     options: import('@ai-video/domain').ConversationPageOptions,
   ): ConversationRecord[] {
     const conditions: string[] = ['project_id = ?'];
     const params: unknown[] = [projectId];
-
     if (options.scopeType) {
       conditions.push('scope_type = ?');
       params.push(options.scopeType);
@@ -1341,7 +1278,6 @@ class SqliteConversationRepository
     if (!options.includeArchived) {
       conditions.push('archived_at IS NULL');
     }
-
     if (options.cursor) {
       const cursorRow = this.database
         .prepare('SELECT updated_at, id FROM conversations WHERE id = ? AND project_id = ?')
@@ -1353,18 +1289,15 @@ class SqliteConversationRepository
         return [];
       }
     }
-
     const sql = `SELECT * FROM conversations
        WHERE ${conditions.join(' AND ')}
        ORDER BY updated_at DESC, id DESC
        LIMIT ?`;
     params.push(options.limit);
-
     const rows = this.database.prepare(sql).all(...params) as ConversationRow[];
     return rows.map(mapConversation);
   }
 }
-
 class SqliteConversationModelPreferenceRepository
   extends ProjectScopedRepository
   implements ConversationModelPreferenceRepository
@@ -1390,7 +1323,6 @@ class SqliteConversationModelPreferenceRepository
         record.updatedAt,
       );
   }
-
   get(
     conversationId: string,
     capability: ConversationModelPreferenceRecord['capability'],
@@ -1402,7 +1334,6 @@ class SqliteConversationModelPreferenceRepository
       .get(conversationId, capability) as ConversationModelPreferenceRow | undefined;
     return row ? mapConversationModelPreference(row) : undefined;
   }
-
   listByConversation(conversationId: string): ConversationModelPreferenceRecord[] {
     return (
       this.database
@@ -1412,7 +1343,6 @@ class SqliteConversationModelPreferenceRepository
         .all(conversationId) as ConversationModelPreferenceRow[]
     ).map(mapConversationModelPreference);
   }
-
   delete(
     conversationId: string,
     capability: ConversationModelPreferenceRecord['capability'],
@@ -1424,7 +1354,6 @@ class SqliteConversationModelPreferenceRepository
       .run(conversationId, capability);
   }
 }
-
 interface ConversationModelPreferenceRow {
   conversation_id: string;
   capability: string;
@@ -1433,7 +1362,6 @@ interface ConversationModelPreferenceRow {
   confirmed_at: string;
   updated_at: string;
 }
-
 function mapConversationModelPreference(
   row: ConversationModelPreferenceRow,
 ): ConversationModelPreferenceRecord {
@@ -1446,7 +1374,6 @@ function mapConversationModelPreference(
     updatedAt: row.updated_at,
   };
 }
-
 interface ConversationRow {
   id: string;
   project_id: string;
@@ -1457,7 +1384,6 @@ interface ConversationRow {
   updated_at: string;
   archived_at: string | null;
 }
-
 function mapConversation(row: ConversationRow): ConversationRecord {
   return {
     id: row.id,
@@ -1470,7 +1396,6 @@ function mapConversation(row: ConversationRow): ConversationRecord {
     archivedAt: row.archived_at ?? undefined,
   };
 }
-
 class SqliteChatMessageRepository extends ProjectScopedRepository implements ChatMessageRepository {
   save(record: ChatMessageRecord): void {
     this.database
@@ -1493,13 +1418,11 @@ class SqliteChatMessageRepository extends ProjectScopedRepository implements Cha
         record.createdAt,
       );
   }
-
   get(id: string): ChatMessageRecord | undefined {
     const row = this.database.prepare('SELECT * FROM chat_messages WHERE id = ?').get(id) as
       ChatMessageRow | undefined;
     return row ? mapChatMessage(row) : undefined;
   }
-
   listPage(conversationId: string, limit: number, before?: string): ChatMessageRecord[] {
     let rows: ChatMessageRow[];
     if (before) {
@@ -1534,7 +1457,6 @@ class SqliteChatMessageRepository extends ProjectScopedRepository implements Cha
     }
     return rows.map(mapChatMessage);
   }
-
   failStreamingByProject(
     projectId: string,
     failureMessage: string,
@@ -1555,7 +1477,6 @@ class SqliteChatMessageRepository extends ProjectScopedRepository implements Cha
     return result.changes;
   }
 }
-
 interface ChatMessageRow {
   id: string;
   conversation_id: string;
@@ -1565,7 +1486,6 @@ interface ChatMessageRow {
   status: ChatMessageRecord['status'];
   created_at: string;
 }
-
 function mapChatMessage(row: ChatMessageRow): ChatMessageRecord {
   return {
     id: row.id,
@@ -1577,7 +1497,6 @@ function mapChatMessage(row: ChatMessageRow): ChatMessageRecord {
     createdAt: row.created_at,
   };
 }
-
 class SqliteLlmGenerationAttemptRepository
   extends ProjectScopedRepository
   implements LlmGenerationAttemptRepository
@@ -1642,14 +1561,12 @@ class SqliteLlmGenerationAttemptRepository
         record.errorMessage ?? null,
       );
   }
-
   get(id: string): LlmGenerationAttemptRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM llm_generation_attempts WHERE id = ?')
       .get(id) as LlmGenerationAttemptRow | undefined;
     return row ? mapLlmGenerationAttempt(row) : undefined;
   }
-
   getByAssistantMessage(assistantMessageId: string): LlmGenerationAttemptRecord | undefined {
     const row = this.database
       .prepare(
@@ -1659,7 +1576,6 @@ class SqliteLlmGenerationAttemptRepository
       .get(assistantMessageId) as LlmGenerationAttemptRow | undefined;
     return row ? mapLlmGenerationAttempt(row) : undefined;
   }
-
   listByProject(projectId: string): LlmGenerationAttemptRecord[] {
     return (
       this.database
@@ -1672,7 +1588,6 @@ class SqliteLlmGenerationAttemptRepository
         .all(projectId) as LlmGenerationAttemptRow[]
     ).map(mapLlmGenerationAttempt);
   }
-
   failActiveByProject(
     projectId: string,
     completedAt: string,
@@ -1690,7 +1605,6 @@ class SqliteLlmGenerationAttemptRepository
       .run(completedAt, errorMessage, JSON.stringify(excludedGenerationIds), projectId).changes;
   }
 }
-
 class SqliteLlmGenerationRepository
   extends ProjectScopedRepository
   implements LlmGenerationRepository
@@ -1728,13 +1642,11 @@ class SqliteLlmGenerationRepository
         record.version,
       );
   }
-
   get(id: string): LlmGenerationRecord | undefined {
     const row = this.database.prepare('SELECT * FROM llm_generations WHERE id = ?').get(id) as
       LlmGenerationRow | undefined;
     return row ? mapLlmGeneration(row) : undefined;
   }
-
   getByIdempotencyKey(projectId: string, idempotencyKey: string): LlmGenerationRecord | undefined {
     const row = this.database
       .prepare(
@@ -1745,7 +1657,6 @@ class SqliteLlmGenerationRepository
       .get(projectId, idempotencyKey) as LlmGenerationRow | undefined;
     return row ? mapLlmGeneration(row) : undefined;
   }
-
   update(record: LlmGenerationRecord, expectedVersion: number): boolean {
     const result = this.database
       .prepare(
@@ -1773,7 +1684,6 @@ class SqliteLlmGenerationRepository
       );
     return result.changes === 1;
   }
-
   failActiveByProject(
     projectId: string,
     updatedAt: string,
@@ -1790,7 +1700,6 @@ class SqliteLlmGenerationRepository
       .run(errorMessage, updatedAt, projectId, JSON.stringify(excludedGenerationIds)).changes;
   }
 }
-
 interface LlmGenerationRow {
   id: string;
   project_id: string;
@@ -1813,7 +1722,6 @@ interface LlmGenerationRow {
   updated_at: string;
   version: number;
 }
-
 function mapLlmGeneration(row: LlmGenerationRow): LlmGenerationRecord {
   return {
     id: row.id,
@@ -1838,7 +1746,6 @@ function mapLlmGeneration(row: LlmGenerationRow): LlmGenerationRecord {
     version: row.version,
   };
 }
-
 class SqliteAgentTaskRepository extends ProjectScopedRepository implements AgentTaskRepository {
   save(record: AgentTaskRecord): void {
     this.database
@@ -1913,13 +1820,11 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
         record.archivedAt ?? null,
       );
   }
-
   get(id: string): AgentTaskRecord | undefined {
     const row = this.database.prepare('SELECT * FROM agent_tasks WHERE id = ?').get(id) as
       AgentTaskRow | undefined;
     return row ? mapAgentTask(row) : undefined;
   }
-
   getByIdempotencyKey(projectId: string, idempotencyKey: string): AgentTaskRecord | undefined {
     const row = this.database
       .prepare(
@@ -1930,7 +1835,6 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
       .get(projectId, idempotencyKey) as AgentTaskRow | undefined;
     return row ? mapAgentTask(row) : undefined;
   }
-
   listByProject(projectId: string): AgentTaskRecord[] {
     return (
       this.database
@@ -1941,7 +1845,6 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
         .all(projectId) as AgentTaskRow[]
     ).map(mapAgentTask);
   }
-
   update(record: AgentTaskRecord, expectedVersion: number): boolean {
     const result = this.database
       .prepare(
@@ -1989,7 +1892,6 @@ class SqliteAgentTaskRepository extends ProjectScopedRepository implements Agent
     return result.changes === 1;
   }
 }
-
 interface AgentTaskRow {
   id: string;
   project_id: string;
@@ -2022,7 +1924,6 @@ interface AgentTaskRow {
   lifecycle_status: 'active' | 'archived';
   archived_at: string | null;
 }
-
 function mapAgentTask(row: AgentTaskRow): AgentTaskRecord {
   return {
     id: row.id,
@@ -2057,7 +1958,6 @@ function mapAgentTask(row: AgentTaskRow): AgentTaskRecord {
     archivedAt: row.archived_at ?? undefined,
   };
 }
-
 class SqliteAgentTaskPlanRepository
   extends ProjectScopedRepository
   implements AgentTaskPlanRepository
@@ -2088,20 +1988,17 @@ class SqliteAgentTaskPlanRepository
         record.updatedAt,
       );
   }
-
   get(id: string): AgentTaskPlanRecord | undefined {
     const row = this.database.prepare('SELECT * FROM agent_task_plans WHERE id = ?').get(id) as
       AgentTaskPlanRow | undefined;
     return row ? mapAgentTaskPlan(row) : undefined;
   }
-
   getByTask(taskId: string): AgentTaskPlanRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM agent_task_plans WHERE task_id = ?')
       .get(taskId) as AgentTaskPlanRow | undefined;
     return row ? mapAgentTaskPlan(row) : undefined;
   }
-
   updateStatus(
     id: string,
     status: AgentTaskPlanRecord['status'],
@@ -2118,7 +2015,6 @@ class SqliteAgentTaskPlanRepository
     );
   }
 }
-
 interface AgentTaskPlanRow {
   id: string;
   task_id: string;
@@ -2136,7 +2032,6 @@ interface AgentTaskPlanRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapAgentTaskPlan(row: AgentTaskPlanRow): AgentTaskPlanRecord {
   return {
     id: row.id,
@@ -2156,7 +2051,6 @@ function mapAgentTaskPlan(row: AgentTaskPlanRow): AgentTaskPlanRecord {
     updatedAt: row.updated_at,
   };
 }
-
 class SqliteAgentTaskDeliverableRepository
   extends ProjectScopedRepository
   implements AgentTaskDeliverableRepository
@@ -2191,14 +2085,12 @@ class SqliteAgentTaskDeliverableRepository
         record.updatedAt,
       );
   }
-
   get(id: string): AgentTaskDeliverableRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM agent_task_deliverables WHERE id = ?')
       .get(id) as AgentTaskDeliverableRow | undefined;
     return row ? mapAgentTaskDeliverable(row) : undefined;
   }
-
   listByPlan(planId: string): AgentTaskDeliverableRecord[] {
     return (
       this.database
@@ -2206,7 +2098,6 @@ class SqliteAgentTaskDeliverableRepository
         .all(planId) as AgentTaskDeliverableRow[]
     ).map(mapAgentTaskDeliverable);
   }
-
   updateStatus(
     id: string,
     status: AgentTaskDeliverableRecord['status'],
@@ -2224,7 +2115,6 @@ class SqliteAgentTaskDeliverableRepository
     );
   }
 }
-
 interface AgentTaskDeliverableRow {
   id: string;
   plan_id: string;
@@ -2245,7 +2135,6 @@ interface AgentTaskDeliverableRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapAgentTaskDeliverable(row: AgentTaskDeliverableRow): AgentTaskDeliverableRecord {
   return {
     id: row.id,
@@ -2268,7 +2157,6 @@ function mapAgentTaskDeliverable(row: AgentTaskDeliverableRow): AgentTaskDeliver
     updatedAt: row.updated_at,
   };
 }
-
 class SqliteAgentTaskEventRepository
   extends ProjectScopedRepository
   implements AgentTaskEventRepository
@@ -2296,7 +2184,6 @@ class SqliteAgentTaskEventRepository
         record.createdAt,
       );
   }
-
   listByTask(taskId: string): AgentTaskEventRecord[] {
     return (
       this.database
@@ -2305,7 +2192,6 @@ class SqliteAgentTaskEventRepository
     ).map(mapAgentTaskEvent);
   }
 }
-
 interface AgentTaskEventRow {
   id: string;
   task_id: string;
@@ -2320,7 +2206,6 @@ interface AgentTaskEventRow {
   dedupe_key: string | null;
   created_at: string;
 }
-
 function mapAgentTaskEvent(row: AgentTaskEventRow): AgentTaskEventRecord {
   return {
     id: row.id,
@@ -2337,7 +2222,6 @@ function mapAgentTaskEvent(row: AgentTaskEventRow): AgentTaskEventRecord {
     createdAt: row.created_at,
   };
 }
-
 class SqliteAgentTaskGenerationRepository
   extends ProjectScopedRepository
   implements AgentTaskGenerationRepository
@@ -2351,7 +2235,6 @@ class SqliteAgentTaskGenerationRepository
       )
       .run(record.taskId, record.generationId, record.ordinal, record.purpose, record.createdAt);
   }
-
   listByTask(taskId: string): AgentTaskGenerationRecord[] {
     return (
       this.database
@@ -2363,7 +2246,6 @@ class SqliteAgentTaskGenerationRepository
     ).map(mapAgentTaskGeneration);
   }
 }
-
 interface AgentTaskGenerationRow {
   task_id: string;
   generation_id: string;
@@ -2371,7 +2253,6 @@ interface AgentTaskGenerationRow {
   purpose: string;
   created_at: string;
 }
-
 function mapAgentTaskGeneration(row: AgentTaskGenerationRow): AgentTaskGenerationRecord {
   return {
     taskId: row.task_id,
@@ -2381,7 +2262,6 @@ function mapAgentTaskGeneration(row: AgentTaskGenerationRow): AgentTaskGeneratio
     createdAt: row.created_at,
   };
 }
-
 class SqliteAgentToolCallRepository
   extends ProjectScopedRepository
   implements AgentToolCallRepository
@@ -2445,13 +2325,11 @@ class SqliteAgentToolCallRepository
         record.redactionState,
       );
   }
-
   get(id: string): AgentToolCallRecord | undefined {
     const row = this.database.prepare('SELECT * FROM agent_tool_calls WHERE id = ?').get(id) as
       AgentToolCallRow | undefined;
     return row ? mapAgentToolCall(row) : undefined;
   }
-
   getByProviderCallId(
     taskId: string,
     attemptId: string,
@@ -2467,7 +2345,6 @@ class SqliteAgentToolCallRepository
       .get(taskId, attemptId, providerStepId, providerCallId) as AgentToolCallRow | undefined;
     return row ? mapAgentToolCall(row) : undefined;
   }
-
   getByIdempotencyKey(taskId: string, idempotencyKey: string): AgentToolCallRecord | undefined {
     const row = this.database
       .prepare(
@@ -2478,7 +2355,6 @@ class SqliteAgentToolCallRepository
       .get(taskId, idempotencyKey) as AgentToolCallRow | undefined;
     return row ? mapAgentToolCall(row) : undefined;
   }
-
   listByTask(taskId: string): AgentToolCallRecord[] {
     return (
       this.database
@@ -2489,7 +2365,6 @@ class SqliteAgentToolCallRepository
         .all(taskId) as AgentToolCallRow[]
     ).map(mapAgentToolCall);
   }
-
   update(record: AgentToolCallRecord, expectedVersion: number): boolean {
     const result = this.database
       .prepare(
@@ -2528,7 +2403,6 @@ class SqliteAgentToolCallRepository
     return result.changes === 1;
   }
 }
-
 interface AgentToolCallRow {
   id: string;
   project_id: string;
@@ -2555,7 +2429,6 @@ interface AgentToolCallRow {
   version: number;
   redaction_state: 'native' | 'legacy_redacted';
 }
-
 function mapAgentToolCall(row: AgentToolCallRow): AgentToolCallRecord {
   return {
     id: row.id,
@@ -2584,7 +2457,6 @@ function mapAgentToolCall(row: AgentToolCallRow): AgentToolCallRecord {
     redactionState: row.redaction_state,
   };
 }
-
 class SqliteLlmProviderStepRepository
   extends ProjectScopedRepository
   implements LlmProviderStepRepository
@@ -2635,13 +2507,11 @@ class SqliteLlmProviderStepRepository
         record.errorMessage ?? null,
       );
   }
-
   get(id: string): LlmProviderStepRecord | undefined {
     const row = this.database.prepare('SELECT * FROM llm_provider_steps WHERE id = ?').get(id) as
       LlmProviderStepRow | undefined;
     return row ? mapLlmProviderStep(row) : undefined;
   }
-
   listByAttempt(attemptId: string): LlmProviderStepRecord[] {
     return (
       this.database
@@ -2650,7 +2520,6 @@ class SqliteLlmProviderStepRepository
     ).map(mapLlmProviderStep);
   }
 }
-
 interface LlmProviderStepRow {
   id: string;
   project_id: string;
@@ -2677,7 +2546,6 @@ interface LlmProviderStepRow {
   error_code: string | null;
   error_message: string | null;
 }
-
 function mapLlmProviderStep(row: LlmProviderStepRow): LlmProviderStepRecord {
   return {
     id: row.id,
@@ -2706,7 +2574,6 @@ function mapLlmProviderStep(row: LlmProviderStepRow): LlmProviderStepRecord {
     errorMessage: row.error_message ?? undefined,
   };
 }
-
 class SqliteAgentToolAuthorizationRepository
   extends ProjectScopedRepository
   implements AgentToolAuthorizationRepository
@@ -2751,14 +2618,12 @@ class SqliteAgentToolAuthorizationRepository
         record.createdAt,
       );
   }
-
   get(id: string): AgentToolAuthorizationRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM agent_tool_authorizations WHERE id = ?')
       .get(id) as AgentToolAuthorizationRow | undefined;
     return row ? mapAgentToolAuthorization(row) : undefined;
   }
-
   listByProviderStep(providerStepId: string): AgentToolAuthorizationRecord[] {
     return (
       this.database
@@ -2768,7 +2633,6 @@ class SqliteAgentToolAuthorizationRepository
         .all(providerStepId) as AgentToolAuthorizationRow[]
     ).map(mapAgentToolAuthorization);
   }
-
   update(record: AgentToolAuthorizationRecord, expectedRowVersion: number): boolean {
     const result = this.database
       .prepare(
@@ -2788,7 +2652,6 @@ class SqliteAgentToolAuthorizationRepository
     return result.changes === 1;
   }
 }
-
 interface AgentToolAuthorizationRow {
   id: string;
   project_id: string;
@@ -2814,7 +2677,6 @@ interface AgentToolAuthorizationRow {
   row_version: number;
   created_at: string;
 }
-
 function mapAgentToolAuthorization(row: AgentToolAuthorizationRow): AgentToolAuthorizationRecord {
   return {
     id: row.id,
@@ -2842,7 +2704,6 @@ function mapAgentToolAuthorization(row: AgentToolAuthorizationRow): AgentToolAut
     createdAt: row.created_at,
   };
 }
-
 interface LlmGenerationAttemptRow {
   id: string;
   generation_id: string;
@@ -2873,7 +2734,6 @@ interface LlmGenerationAttemptRow {
   error_code: string | null;
   error_message: string | null;
 }
-
 function mapLlmGenerationAttempt(row: LlmGenerationAttemptRow): LlmGenerationAttemptRecord {
   return {
     id: row.id,
@@ -2906,7 +2766,6 @@ function mapLlmGenerationAttempt(row: LlmGenerationAttemptRow): LlmGenerationAtt
     errorMessage: row.error_message ?? undefined,
   };
 }
-
 class SqliteContextSnapshotRepository
   extends ProjectScopedRepository
   implements ContextSnapshotRepository
@@ -2919,13 +2778,11 @@ class SqliteContextSnapshotRepository
       )
       .run(record.id, record.projectId, record.purpose, record.contentJson, record.createdAt);
   }
-
   get(id: string): ContextSnapshotRecord | undefined {
     const row = this.database.prepare('SELECT * FROM context_snapshots WHERE id = ?').get(id) as
       ContextSnapshotRow | undefined;
     return row ? mapContextSnapshot(row) : undefined;
   }
-
   listByProject(projectId: string, limit: number): ContextSnapshotRecord[] {
     return (
       this.database
@@ -2936,7 +2793,6 @@ class SqliteContextSnapshotRepository
         .all(projectId, limit) as ContextSnapshotRow[]
     ).map(mapContextSnapshot);
   }
-
   deleteUnreferencedOlderThan(projectId: string, cutoff: string, limit: number): number {
     const result = this.database
       .prepare(
@@ -2968,7 +2824,6 @@ class SqliteContextSnapshotRepository
     return result.changes;
   }
 }
-
 interface ContextSnapshotRow {
   id: string;
   project_id: string;
@@ -2976,7 +2831,6 @@ interface ContextSnapshotRow {
   content_json: string;
   created_at: string;
 }
-
 function mapContextSnapshot(row: ContextSnapshotRow): ContextSnapshotRecord {
   return {
     id: row.id,
@@ -2986,7 +2840,6 @@ function mapContextSnapshot(row: ContextSnapshotRow): ContextSnapshotRecord {
     createdAt: row.created_at,
   };
 }
-
 class ScopedContentRepository<T extends MemoryRecord> extends ProjectScopedRepository {
   constructor(
     database: Database.Database,
@@ -2994,7 +2847,6 @@ class ScopedContentRepository<T extends MemoryRecord> extends ProjectScopedRepos
   ) {
     super(database);
   }
-
   save(record: T): void {
     if (this.table === 'constraints') {
       const constraint = record as unknown as ConstraintRecord;
@@ -3038,13 +2890,11 @@ class ScopedContentRepository<T extends MemoryRecord> extends ProjectScopedRepos
         record.updatedAt,
       );
   }
-
   get(id: string): T | undefined {
     const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE id = ?`).get(id) as
       ScopedContentRow | undefined;
     return row ? this.map(row) : undefined;
   }
-
   listByProject(projectId: string): T[] {
     return (
       this.database
@@ -3052,7 +2902,6 @@ class ScopedContentRepository<T extends MemoryRecord> extends ProjectScopedRepos
         .all(projectId) as ScopedContentRow[]
     ).map((row) => this.map(row));
   }
-
   private map(row: ScopedContentRow): T {
     const base: MemoryRecord = {
       id: row.id,
@@ -3066,7 +2915,6 @@ class ScopedContentRepository<T extends MemoryRecord> extends ProjectScopedRepos
     return (this.table === 'constraints' ? { ...base, kind: row.kind ?? '' } : base) as T;
   }
 }
-
 interface ScopedContentRow {
   id: string;
   project_id: string;
@@ -3077,7 +2925,6 @@ interface ScopedContentRow {
   created_at: string;
   updated_at: string;
 }
-
 class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepository {
   save(record: AssetRecord): void {
     this.database
@@ -3114,13 +2961,11 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
       record.updatedAt ?? record.createdAt,
     );
   }
-
   get(id: string): AssetRecord | undefined {
     const row = this.database.prepare('SELECT * FROM assets WHERE id = ?').get(id) as
       AssetRow | undefined;
     return row ? mapAsset(row) : undefined;
   }
-
   listByProject(projectId: string): AssetRecord[] {
     return (
       this.database
@@ -3128,7 +2973,6 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         .all(projectId) as AssetRow[]
     ).map(mapAsset);
   }
-
   queryByProject(
     projectId: string,
     params: {
@@ -3157,14 +3001,12 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
       values.push(params.kind);
     }
     if (params.keyword?.trim()) {
-      where.push(
-        `(alias LIKE ? COLLATE NOCASE OR relative_path LIKE ? COLLATE NOCASE OR id IN (
+      where.push(`(alias LIKE ? COLLATE NOCASE OR relative_path LIKE ? COLLATE NOCASE OR id IN (
           SELECT assignment.asset_id
           FROM asset_tag_assignments assignment
           JOIN tags tag ON tag.id = assignment.tag_id
           WHERE tag.project_id = ? AND tag.name LIKE ? COLLATE NOCASE
-        ))`,
-      );
+        ))`);
       const q = `%${params.keyword.trim()}%`;
       values.push(q, q, projectId, q);
     }
@@ -3203,11 +3045,9 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         .all(...values) as AssetRow[]
     ).map(mapAsset);
   }
-
   delete(id: string): void {
     this.database.prepare('DELETE FROM assets WHERE id = ?').run(id);
   }
-
   listTags(projectId: string): AssetTagRecord[] {
     return (
       this.database
@@ -3244,7 +3084,9 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
         .prepare(
           'SELECT tag_id AS id FROM asset_tag_assignments WHERE asset_id = ? ORDER BY tag_id',
         )
-        .all(assetId) as Array<{ id: string }>
+        .all(assetId) as Array<{
+        id: string;
+      }>
     ).map((row) => row.id);
   }
   replaceTags(assetId: string, tagIds: string[], createdAt: string): void {
@@ -3265,7 +3107,9 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
          FROM generation_drafts, json_tree(generation_drafts.parameters_json)
          WHERE json_tree.type = 'text' AND json_tree.value = ?`,
       )
-      .get(assetId) as { count: number };
+      .get(assetId) as {
+      count: number;
+    };
     return row.count;
   }
   listGroups(projectId: string): AssetGroupRecord[] {
@@ -3333,7 +3177,6 @@ class SqliteAssetRepository extends ProjectScopedRepository implements AssetRepo
     });
   }
 }
-
 interface AssetTagRow {
   id: string;
   project_id: string;
@@ -3367,12 +3210,16 @@ function mapAssetGroup(database: Database.Database, row: AssetGroupRow): AssetGr
   const tagIds = (
     database
       .prepare('SELECT tag_id AS id FROM asset_group_tags WHERE group_id = ? ORDER BY tag_id')
-      .all(row.id) as Array<{ id: string }>
+      .all(row.id) as Array<{
+      id: string;
+    }>
   ).map((x) => x.id);
   const assetIds = (
     database
       .prepare('SELECT asset_id AS id FROM asset_group_assets WHERE group_id = ? ORDER BY asset_id')
-      .all(row.id) as Array<{ id: string }>
+      .all(row.id) as Array<{
+      id: string;
+    }>
   ).map((x) => x.id);
   return {
     id: row.id,
@@ -3386,7 +3233,6 @@ function mapAssetGroup(database: Database.Database, row: AssetGroupRow): AssetGr
     updatedAt: row.updated_at,
   };
 }
-
 interface AssetRow {
   id: string;
   project_id: string;
@@ -3401,7 +3247,6 @@ interface AssetRow {
   trash_relative_path: string | null;
   created_at: string;
 }
-
 function mapAsset(row: AssetRow): AssetRecord {
   return {
     id: row.id,
@@ -3418,7 +3263,6 @@ function mapAsset(row: AssetRow): AssetRecord {
     createdAt: row.created_at,
   };
 }
-
 class SqliteGenerationDraftRepository
   extends ProjectScopedRepository
   implements GenerationDraftRepository
@@ -3435,7 +3279,6 @@ class SqliteGenerationDraftRepository
       )
       .run(record.id, record.shotId, record.adapterKey, record.parametersJson, record.updatedAt);
   }
-
   get(shotId: string, adapterKey: string): GenerationDraftRecord | undefined {
     const row = this.database
       .prepare('SELECT * FROM generation_drafts WHERE shot_id = ? AND adapter_key = ?')
@@ -3443,7 +3286,6 @@ class SqliteGenerationDraftRepository
     return row ? mapGenerationDraft(row) : undefined;
   }
 }
-
 interface GenerationDraftRow {
   id: string;
   shot_id: string;
@@ -3451,7 +3293,6 @@ interface GenerationDraftRow {
   parameters_json: string;
   updated_at: string;
 }
-
 function mapGenerationDraft(row: GenerationDraftRow): GenerationDraftRecord {
   return {
     id: row.id,
@@ -3461,7 +3302,6 @@ function mapGenerationDraft(row: GenerationDraftRow): GenerationDraftRecord {
     updatedAt: row.updated_at,
   };
 }
-
 class SqliteJobRepository extends ProjectScopedRepository implements JobRepository {
   save(record: JobRecord): void {
     const mediaState = record.mediaState ?? inferMediaState(record.status, record.providerTaskId);
@@ -3510,13 +3350,11 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
       );
     rebuildLibraryChunksForMediaTask(this.database, record.projectId, record.id, record.updatedAt);
   }
-
   get(id: string): JobRecord | undefined {
     const row = this.database.prepare('SELECT * FROM generation_jobs WHERE id = ?').get(id) as
       JobRow | undefined;
     return row ? mapJob(row) : undefined;
   }
-
   listByProject(projectId: string): JobRecord[] {
     return (
       this.database
@@ -3525,7 +3363,6 @@ class SqliteJobRepository extends ProjectScopedRepository implements JobReposito
     ).map(mapJob);
   }
 }
-
 function inferMediaState(
   status: string,
   providerTaskId: string | undefined,
@@ -3548,7 +3385,6 @@ function inferMediaState(
       return providerTaskId ? 'polling' : 'draft';
   }
 }
-
 class SqliteGenerationJobEventRepository
   extends ProjectScopedRepository
   implements GenerationJobEventRepository
@@ -3558,7 +3394,9 @@ class SqliteGenerationJobEventRepository
       .prepare(
         'SELECT COALESCE(MAX(sequence), -1) + 1 AS value FROM generation_job_events WHERE job_id = ?',
       )
-      .get(record.jobId) as { value: number };
+      .get(record.jobId) as {
+      value: number;
+    };
     this.database
       .prepare(
         `INSERT INTO generation_job_events
@@ -3577,7 +3415,6 @@ class SqliteGenerationJobEventRepository
         record.createdAt,
       );
   }
-
   listByJob(jobId: string): GenerationJobEventRecord[] {
     return (
       this.database
@@ -3585,7 +3422,6 @@ class SqliteGenerationJobEventRepository
         .all(jobId) as GenerationJobEventRow[]
     ).map(mapGenerationJobEvent);
   }
-
   listByJobPage(jobId: string, afterSequence: number, limit: number): GenerationJobEventRecord[] {
     return (
       this.database
@@ -3596,7 +3432,6 @@ class SqliteGenerationJobEventRepository
     ).map(mapGenerationJobEvent);
   }
 }
-
 interface GenerationJobEventRow {
   id: string;
   job_id: string;
@@ -3608,7 +3443,6 @@ interface GenerationJobEventRow {
   details_json: string | null;
   created_at: string;
 }
-
 function mapGenerationJobEvent(row: GenerationJobEventRow): GenerationJobEventRecord {
   return {
     id: row.id,
@@ -3622,7 +3456,6 @@ function mapGenerationJobEvent(row: GenerationJobEventRow): GenerationJobEventRe
     createdAt: row.created_at,
   };
 }
-
 class SqliteGenerationResultRepository
   extends ProjectScopedRepository
   implements GenerationResultRepository
@@ -3643,7 +3476,6 @@ class SqliteGenerationResultRepository
         record.createdAt,
       );
   }
-
   listByJob(jobId: string): GenerationResultRecord[] {
     return (
       this.database
@@ -3651,17 +3483,19 @@ class SqliteGenerationResultRepository
         .all(jobId) as GenerationResultRow[]
     ).map(mapGenerationResult);
   }
-
   findJobIdByAsset(assetId: string): string | undefined {
     const row = this.database
       .prepare(
         'SELECT job_id AS id FROM generation_results WHERE asset_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
       )
-      .get(assetId) as { id: string } | undefined;
+      .get(assetId) as
+      | {
+          id: string;
+        }
+      | undefined;
     return row?.id;
   }
 }
-
 interface GenerationResultRow {
   id: string;
   job_id: string;
@@ -3669,7 +3503,6 @@ interface GenerationResultRow {
   provider_url: string | null;
   created_at: string;
 }
-
 function mapGenerationResult(row: GenerationResultRow): GenerationResultRecord {
   return {
     id: row.id,
@@ -3679,7 +3512,6 @@ function mapGenerationResult(row: GenerationResultRow): GenerationResultRecord {
     createdAt: row.created_at,
   };
 }
-
 interface JobRow {
   id: string;
   project_id: string;
@@ -3701,7 +3533,6 @@ interface JobRow {
   created_at: string;
   updated_at: string;
 }
-
 function mapJob(row: JobRow): JobRecord {
   return {
     id: row.id,
@@ -3726,7 +3557,6 @@ function mapJob(row: JobRow): JobRecord {
     updatedAt: row.updated_at,
   };
 }
-
 export function createRepositories(database: Database.Database): {
   projects: ProjectRepository;
   novelProfiles: NovelProfileRepository;

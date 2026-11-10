@@ -1,0 +1,103 @@
+{
+  "capturedAt": "2026-11-09T09:13:10.588Z",
+  "source": "Frozen consistent backup, readonly:true",
+  "summary": {
+    "available": true,
+    "observedAt": "2026-11-09T09:13:10.380Z",
+    "taskId": "4b089522-8131-4d8c-8aac-19c6739199e3",
+    "status": "cancelled",
+    "phase": "model_running",
+    "createdAt": "2026-11-09T07:01:22.454Z",
+    "completedAt": "2026-11-09T08:20:38.270Z",
+    "elapsedMs": 4755816,
+    "error": {
+      "code": "cancelled",
+      "message": "Provider generation cancelled."
+    },
+    "saved": {
+      "scenes": 4,
+      "shots": 13,
+      "materialDocuments": {},
+      "lastSavedAt": "2026-11-09T07:49:14.255Z"
+    },
+    "review": {
+      "available": true,
+      "readyToSubmit": true,
+      "approved": false,
+      "currentTargetCount": 17,
+      "acceptedTargetCount": 0,
+      "pendingTargetCount": 17,
+      "openIssueCount": 1
+    },
+    "nextAction": {
+      "kind": "review_outputs",
+      "toolName": "conversation.task.checkpoint",
+      "stateRead": {
+        "toolName": "conversation.task.checkpoint",
+        "arguments": {
+          "operation": "state",
+          "targetGenerationId": "03b54e88-0f17-4c2e-b116-ee4f509bd77f"
+        }
+      }
+    },
+    "calls": {
+      "total": 184,
+      "failed": 47,
+      "failureCategories": {
+        "AGENT_TOOL_ARGUMENTS_INVALID": 23,
+        "TASK_REPAIR_REQUIRED": 4,
+        "TASK_REVIEW_NOT_READY": 2,
+        "TASK_REVIEW_INVALID": 3,
+        "TASK_REVIEW_REQUIREMENTS_INVALID": 11,
+        "TASK_REVIEW_REQUIREMENT_COVERAGE_REQUIRED": 1,
+        "TASK_REVIEW_EVIDENCE_INVALID": 1,
+        "TASK_REVIEW_STALE": 1,
+        "TASK_REVIEW_EVIDENCE_UNRELATED": 1
+      },
+      "latestFailures": [
+        {
+          "tool": "conversation.task.checkpoint",
+          "code": "AGENT_TOOL_ARGUMENTS_INVALID",
+          "message": "deliverables[0].origin: confirmed user obligations and their requirement sources cannot be removed.",
+          "at": "2026-11-09T08:14:26.582Z"
+        },
+        {
+          "tool": "conversation.task.checkpoint",
+          "code": "AGENT_TOOL_ARGUMENTS_INVALID",
+          "message": "Cannot weaken registered deliverables. To correct a model-estimated quantity or document kind, reuse the same key and provide revisionReason. Include discovered targetIds; future IDs need not exist yet. Preserve requiredTexts, required references and all prior targets; original user requirements remain binding.",
+          "at": "2026-11-09T08:14:37.450Z"
+        },
+        {
+          "tool": "conversation.task.checkpoint",
+          "code": "TASK_REVIEW_REQUIREMENTS_INVALID",
+          "message": "TASK_REVIEW_REQUIREMENTS_INVALID: Cite a current original requirement and an assessed target with a valid verdict. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"90a61521-49c6-4056-a32d-cc8787945c74\",\"ready\":true},\"nextAction\":{\"kind\":\"review_outputs\",\"toolName\":\"conversation.task.checkpoint\",\"arguments\":{\"operation\":\"state\"}}}]",
+          "at": "2026-11-09T08:17:37.933Z"
+        },
+        {
+          "tool": "conversation.task.checkpoint",
+          "code": "TASK_REVIEW_INVALID",
+          "message": "TASK_REVIEW_INVALID: needs_revision requires a concrete content finding. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"90a61521-49c6-4056-a32d-cc8787945c74\",\"ready\":true},\"nextAction\":{\"kind\":\"review_outputs\",\"toolName\":\"conversation.task.checkpoint\",\"arguments\":{\"operation\":\"state\"}}}]",
+          "at": "2026-11-09T08:18:47.881Z"
+        },
+        {
+          "tool": "conversation.task.checkpoint",
+          "code": "TASK_REVIEW_EVIDENCE_UNRELATED",
+          "message": "TASK_REVIEW_EVIDENCE_UNRELATED: Repair evidence must cite the changed target; withdrawal evidence must cite the finding target or its original references. Current Worker actions: [{\"key\":\"skill:script-to-media:final-check\",\"semanticReview\":{\"reviewId\":\"90a61521-49c6-4056-a32d-cc8787945c74\",\"ready\":true},\"nextAction\":{\"kind\":\"review_outputs\",\"toolName\":\"conversation.task.checkpoint\",\"arguments\":{\"operation\":\"state\"}}}]",
+          "at": "2026-11-09T08:19:35.191Z"
+        }
+      ]
+    },
+    "usage": {
+      "turns": 211,
+      "inputTokens": 23503337,
+      "outputTokens": 184917,
+      "instruction": "Cumulative input includes repeated/cached input; it is not one context window or a cost estimate."
+    },
+    "instruction": "These are current task facts, independent of historical receipt pagination. Saved output and readyToSubmit do not mean accepted review or completion. Use elapsedMs for task duration; receipt timestamps cover only those operations. Do not infer who cancelled from the terminal status."
+  },
+  "summaryCharacters": 3894,
+  "legacyFailures": 19,
+  "firstStopAt": 4,
+  "beforeSha256": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2",
+  "afterSha256": "4adfad7a9974765d006b211b07b277e121a6cd72667cdf5d62b900f79d747ff2"
+}

@@ -10,7 +10,6 @@ import type {
 } from './index.js';
 import { productionAudioSupport, productionImageRoleSupport } from './production-schema.js';
 import { productionImageReference } from './production.js';
-
 const records = (
   value: AdapterParameterValue | undefined,
 ): Record<string, AdapterParameterValue>[] =>
@@ -21,18 +20,16 @@ const records = (
     : [];
 const tag = (value: AdapterParameterValue | undefined) => (typeof value === 'string' ? value : '');
 const canonical = (url: string) => url.replace(/^asset:\/\//u, 'project-asset://');
-
 export interface ProductionShotReferenceIds {
   characterDocumentIds: string[];
   sceneDocumentIds: string[];
   propDocumentIds: string[];
 }
-
 /** Resolve one shot's document relationships; scene-owned bindings are never inherited. */
 export function productionShotReferenceIds(
-  shot: Pick<ShotInfo, 'authoringIR' | 'referenceBindings'>,
+  shot: Pick<ShotInfo, 'bindings' | 'referenceBindings'>,
 ): ProductionShotReferenceIds {
-  const references = shot.authoringIR?.references;
+  const references = shot?.bindings;
   return {
     characterDocumentIds: [
       ...new Set(
@@ -53,7 +50,6 @@ export function productionShotReferenceIds(
     propDocumentIds: [...new Set(references?.propDocumentIds ?? [])],
   };
 }
-
 /**
  * Convert saved scene bindings into the ordered image selections consumed by
  * the production form and compiler. `prop`/`other` are generic references;
@@ -70,7 +66,6 @@ export function productionImageSelectionsFromBindings(
     ...(label ? { label } : {}),
   }));
 }
-
 export function productionImagesFromParameters(
   adapter: AdapterDescriptor,
   parameters: AdapterParameters,
@@ -120,7 +115,6 @@ export function productionImagesFromParameters(
       : []),
   ];
 }
-
 export interface ProductionImageBindingPromptEntry {
   imageIndex: number;
   role: ProductionImageSelection['role'];
@@ -128,7 +122,6 @@ export interface ProductionImageBindingPromptEntry {
   /** A saved frame binding deliberately changed to an ordinary reference in the form. */
   frameAsReference?: boolean;
 }
-
 /**
  * A character-to-image reference resolved from the final ordered request.
  *
@@ -141,7 +134,6 @@ export interface ProductionAudioImageBindingPromptEntry {
   characterDocumentId: string;
   imageReference: string;
 }
-
 function stripProductionPromptSection(prompt: string, marker: string): string {
   let result = prompt;
   let markerIndex = result.lastIndexOf(marker);
@@ -157,15 +149,12 @@ function stripProductionPromptSection(prompt: string, marker: string): string {
   }
   return result.trimEnd();
 }
-
 export function stripProductionImageBindingPrompt(prompt: string): string {
   return stripProductionPromptSection(prompt, '【输入图片说明】');
 }
-
 export function stripProductionAudioBindingPrompt(prompt: string): string {
   return stripProductionPromptSection(prompt, '【输入音频说明】');
 }
-
 export function productionImageBindingPrompt(
   prompt: string,
   imageCount: number,
@@ -174,7 +163,6 @@ export function productionImageBindingPrompt(
 ): string {
   const base = stripProductionImageBindingPrompt(prompt);
   if (!imageCount || !bindings.length) return base;
-
   const lines = bindings.map(({ imageIndex, role, label, frameAsReference }) => {
     const name = label?.trim();
     const description =
@@ -202,7 +190,6 @@ export function productionImageBindingPrompt(
   const section = `【输入图片说明】（本段传入${imageCount}张参考图）：\n${lines.join('\n')}`;
   return `${base}${base ? '\n\n' : ''}${section}`;
 }
-
 export function productionAudioBindingPrompt(
   prompt: string,
   voices: CharacterVoiceReferenceInfo[],
@@ -210,7 +197,6 @@ export function productionAudioBindingPrompt(
 ): string {
   const base = stripProductionAudioBindingPrompt(prompt);
   if (!voices.length) return base;
-
   const imageReferenceByCharacter = new Map(
     imageBindings.map((binding) => [binding.characterDocumentId, binding.imageReference]),
   );
@@ -223,7 +209,6 @@ export function productionAudioBindingPrompt(
   const section = `【输入音频说明】（本段传入${voices.length}段角色音色参考）：\n${lines.join('\n')}`;
   return `${base}${base ? '\n\n' : ''}${section}`;
 }
-
 /** Resolve character image references from the request's final image order. */
 export function productionAudioImageBindings(
   adapter: AdapterDescriptor,
@@ -252,7 +237,6 @@ export function productionAudioImageBindings(
     return [{ characterDocumentId: binding.sourceDocumentId, imageReference }];
   });
 }
-
 /** Keep role voice declarations visible in the authored prompt and the submitted request. */
 export function addProductionAudioBindings(
   adapter: AdapterDescriptor,
@@ -262,7 +246,6 @@ export function addProductionAudioBindings(
 ): AdapterParameters {
   const properties = adapter.parameterSchema.properties;
   if (!properties.prompt && !properties.content) return parameters;
-
   if (properties.content) {
     const content = records(parameters.content);
     const textIndex = content.findIndex((item) => item.type === 'text');
@@ -276,12 +259,10 @@ export function addProductionAudioBindings(
     else nextContent[textIndex] = { ...nextContent[textIndex]!, text: nextPrompt };
     return { ...parameters, content: nextContent };
   }
-
   const prompt = typeof parameters.prompt === 'string' ? parameters.prompt : '';
   const nextPrompt = productionAudioBindingPrompt(prompt, voices, imageBindings);
   return nextPrompt === prompt ? parameters : { ...parameters, prompt: nextPrompt };
 }
-
 /** Add role declarations from the bound asset IDs and the final model input order. */
 export function addProductionImageBindings(
   adapter: AdapterDescriptor,
@@ -290,7 +271,6 @@ export function addProductionImageBindings(
 ): AdapterParameters {
   const properties = adapter.parameterSchema.properties;
   if (!properties.prompt && !properties.content) return parameters;
-
   const images = productionImagesFromParameters(adapter, parameters);
   const indexesByUrl = new Map<string, number[]>();
   images.forEach(({ url }, index) => {
@@ -324,7 +304,6 @@ export function addProductionImageBindings(
   });
   const referenceForIndex = (index: number) =>
     productionImageReference(adapter, index) ?? `图片${index}`;
-
   if (properties.content) {
     const content = records(parameters.content);
     const textIndex = content.findIndex((item) => item.type === 'text');
@@ -342,12 +321,10 @@ export function addProductionImageBindings(
     else nextContent[textIndex] = { ...nextContent[textIndex]!, text: nextPrompt };
     return { ...parameters, content: nextContent };
   }
-
   const prompt = typeof parameters.prompt === 'string' ? parameters.prompt : '';
   const nextPrompt = productionImageBindingPrompt(prompt, images.length, mapped, referenceForIndex);
   return nextPrompt === prompt ? parameters : { ...parameters, prompt: nextPrompt };
 }
-
 /** One canonical model-input projector used by Desktop, Worker and Agent. */
 export function seedProductionInputs(
   adapter: AdapterDescriptor,
@@ -412,14 +389,17 @@ export function seedProductionInputs(
   }
   return next;
 }
-
 /** Conflict in the current form, rather than in the saved source bindings. */
 export function productionFrameInputConflict(
   adapter: AdapterDescriptor,
   parameters: AdapterParameters,
   bindings: ProductionImageSelection[] = [],
 ):
-  | { field: 'media' | 'content' | 'images'; canUseReferences: boolean; firstFrameIndex: number }
+  | {
+      field: 'media' | 'content' | 'images';
+      canUseReferences: boolean;
+      firstFrameIndex: number;
+    }
   | undefined {
   const properties = adapter.parameterSchema.properties;
   const field = properties.media ? 'media' : properties.content ? 'content' : 'images';
@@ -456,7 +436,6 @@ export function productionFrameInputConflict(
     firstFrameIndex: images.findIndex((image) => image.role === 'first-frame'),
   };
 }
-
 /** Explicit user choice; all other form fields and the source bindings are untouched. */
 export function resolveProductionFrameInputs(
   adapter: AdapterDescriptor,
@@ -493,7 +472,6 @@ export function resolveProductionFrameInputs(
   });
   return { ...parameters, [field]: items };
 }
-
 /** Selected local voices and image labels are projected once, after actual ordering is known. */
 export function addProductionRoleVoices(
   adapter: AdapterDescriptor,

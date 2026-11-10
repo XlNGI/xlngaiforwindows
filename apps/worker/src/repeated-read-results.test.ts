@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { RepeatedReadResults } from './repeated-read-results.js';
-
 function read(extra: Record<string, unknown> = {}) {
   return JSON.stringify({
     status: 'read',
@@ -17,7 +16,6 @@ function read(extra: Record<string, unknown> = {}) {
     ...extra,
   });
 }
-
 describe('RepeatedReadResults', () => {
   it('distinguishes production targets, views, versions and page ranges when reusing evidence', () => {
     const reuse = new RepeatedReadResults();
@@ -70,7 +68,6 @@ describe('RepeatedReadResults', () => {
     reuse.clear();
     expect(reuse.use('restored', original)).toBe(original);
   });
-
   it('invalidates only omitted full copies when other history is compacted', () => {
     const reuse = new RepeatedReadResults();
     reuse.use('retained', read());
@@ -80,12 +77,11 @@ describe('RepeatedReadResults', () => {
     expect(JSON.parse(reuse.use('again', read()))).toMatchObject({ fullResultCallId: 'retained' });
     expect(reuse.use('restored', other)).toBe(other);
   });
-
   it.each([
     { versionId: 'v2' },
     { startOffset: 3000, endOffset: 6000 },
     { sourceStatus: 'published' },
-    { contentIR: { data: { material: '冰' } } },
+    { bindings: { data: { material: '冰' } } },
     { content: '变化的正文'.repeat(900) },
     { readMode: 'chunk' },
   ])('does not conflate changed evidence %j', (change) => {
