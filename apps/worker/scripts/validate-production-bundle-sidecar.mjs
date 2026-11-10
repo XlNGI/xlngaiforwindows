@@ -7,10 +7,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { PRODUCTION_BUNDLE_SKILL_REVISION } from '@ai-video/contracts';
-import {
-  bundleSubmissionFixture,
-  bundleManifest,
-} from '../dist/test-fixtures/production-bundle-fixture.js';
+import { bundleSubmissionFixture } from '../dist/test-fixtures/production-bundle-fixture.js';
 import { readbackBundle } from '../dist/production-bundle-service.js';
 import { emptyModelCapabilities } from '../dist/provider-registry.js';
 
@@ -127,7 +124,10 @@ try {
       assert(output, `Missing actual tool output ${name}`);
       const result = JSON.parse(output.output);
       assert(!result.error, JSON.stringify(result));
-      if (result.externalized || result.status === 'active_skill_included') {
+      if (
+        result.externalized ||
+        ['active_skill_included', 'active_skill_reference'].includes(result.status)
+      ) {
         let offset = 0,
           content = '';
         for (;;) {
@@ -217,64 +217,39 @@ try {
       assert(!current.params.tools.some((t) => t.name === 'production.skill.read'));
       await call('production.bundle', { operation: 'begin', estimatedOutputTokens: 4000 });
       await call('production.bundle', { operation: 'source', documentId: source.id });
-      const { part, submission } = bundleSubmissionFixture();
+      const { submission } = bundleSubmissionFixture();
       // Exercise ordered multipart creation in the real packaged Runtime.
       await call('production.bundle.submit', {
         expectedRevision: 0,
         partKey: 'materials',
         prompts: submission.prompts.filter((p) => !['scene', 'shot'].includes(p.kind)),
       });
-      await call('production.bundle.submit', {
+      const finalSubmission = {
         expectedRevision: 1,
         partKey: 'shots',
         prompts: submission.prompts.filter((p) => ['scene', 'shot'].includes(p.kind)),
-        complete: bundleManifest(part).applicability,
+        complete: true,
+      };
+      const committed = await call('production.bundle.submit', finalSubmission);
+      assert.equal(committed.status, 'bundle_readback_verified', JSON.stringify(committed));
+      assert.equal(committed.verified, true);
+      assert.equal(committed.businessSaved, true);
+      assert.equal(committed.readbackVerified, true);
+      assert.equal(committed.objectCount, 8);
+      assert.deepEqual(committed.counts, {
+        character: 2,
+        voice: 2,
+        prop: 1,
+        scene: 1,
+        shot: 1,
+        plan: 0,
+        storyScene: 1,
       });
-      const targets = [...part.documents, ...part.scenes, ...part.shots];
-      const reads = await call('production.bundle', {
-        operation: 'read_many',
-        expectedRevision: 2,
-        items: targets.map((target) => ({ localKey: target.localKey })),
-      });
-      assert.deepEqual(reads.remaining, []);
-      assert.equal(reads.reads.length, targets.length);
-      const check = await call('production.bundle', { operation: 'check' });
-      assert.equal(check.semanticReview.ready, true);
-      assert.equal(check.semanticReview.approved, false);
-      // These assessments are synthetic and verify mechanics, not model quality.
-      const review = await call('conversation.task.checkpoint', {
-        operation: 'review',
-        reviewId: check.semanticReview.reviewId,
-        reviewedTargetIds: check.semanticReview.reviewScope,
-        conclusion: 'passed',
-        summary: 'Offline scripted assessment; not real semantic acceptance.',
-        issues: [],
-        requirementAssessments: [...part.documents, ...part.scenes, ...part.shots].map(
-          (target) => ({
-            requirementIds: check.semanticReview.requirementIds,
-            targetId: `candidate:${target.localKey}`,
-            verdict: 'satisfied',
-            reason: 'Offline fixture evidence only.',
-            evidence: [
-              {
-                referenceId: `candidate:${target.localKey}`,
-                quote: target.contentMarkdown ?? target.prompt ?? target.title,
-                field: 'contentMarkdown' in target ? 'contentMarkdown' : 'prompt',
-              },
-            ],
-          }),
-        ),
-      });
-      assert.equal(review.status, 'task_review_recorded');
-      const committed = await call('production.bundle', {
-        operation: 'commit',
-        expectedRevision: 2,
-      });
-      assert.equal(committed.status, 'bundle_committed');
-      assert.equal(committed.readbackVerified, false);
-      const replay = await call('production.bundle', { operation: 'commit', expectedRevision: 2 });
+      // Replay the final submission after a lost acknowledgement without duplicating objects.
+      const replay = await call('production.bundle.submit', finalSubmission);
+      assert.equal(replay.status, 'bundle_readback_verified', JSON.stringify(replay));
+      assert.equal(replay.verified, true);
       assert.equal(replay.mappingResultId, committed.mappingResultId);
-      assert.equal(replay.execution.replayed, true);
       assert.equal((await call('production.bundle', { operation: 'readback' })).verified, true);
       emit(current, { type: 'started' });
       emit(current, { type: 'text_delta', delta: '离线流程验证完成。' });
@@ -284,11 +259,10 @@ try {
         if (['failed', 'cancelled'].includes(d.task.status)) throw new Error(JSON.stringify(d));
         return d.task.status === 'completed' ? d : undefined;
       }, 'natural task completion');
-      assert.equal(detail.deliveryReview.state, 'verified');
+      assert.equal(detail.deliveryReview.state, 'unverified');
+      assert.equal(detail.deliveryReview.bundle.businessSaved, true);
+      assert.equal(detail.deliveryReview.bundle.readbackVerified, true);
       assert.equal(detail.documents.length, 6);
-      assert(
-        detail.savedProductionReceipts.receipts.some((r) => r.result.status === 'bundle_committed'),
-      );
       await rpc('project.runtime.unload', scope);
       const db = new Database(join(projectPath, 'project.sqlite'), {
         readonly: true,
@@ -297,6 +271,21 @@ try {
       try {
         const verified = readbackBundle(db, scope.projectId, prepared.agentTaskId);
         assert.equal(verified.verified, true);
+        assert.deepEqual(verified.counts, committed.counts);
+        const receipts = db
+          .prepare(
+            `SELECT r.result_json FROM agent_execution_commits c
+             JOIN agent_write_receipts r ON r.id=c.receipt_id
+             WHERE c.project_id=? AND c.task_id=? AND c.operation_key='production-bundle:commit'`,
+          )
+          .all(scope.projectId, prepared.agentTaskId);
+        assert.equal(receipts.length, 1);
+        const receipt = JSON.parse(receipts[0].result_json);
+        assert.equal(receipt.status, 'bundle_committed');
+        assert.equal(receipt.mappingResultId, committed.mappingResultId);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM documents').get().n, 7);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM scenes').get().n, 1);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM shots').get().n, 1);
         assert.equal(db.prepare('SELECT COUNT(*) n FROM generation_drafts').get().n, 0);
         assert.equal(db.prepare('SELECT COUNT(*) n FROM generation_jobs').get().n, 0);
         assert.equal(db.prepare('SELECT COUNT(*) n FROM audio_files').get().n, 0);
