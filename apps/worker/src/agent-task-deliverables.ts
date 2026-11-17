@@ -1257,6 +1257,26 @@ export function assessTaskCompletion(
     }
   | undefined {
   if (isBundleTask(db, taskId)) return { pending: bundleCompletion(db, projectId, taskId) };
+  const requested = db
+    .prepare(
+      `SELECT 1 FROM agent_context_results WHERE project_id=? AND task_id=? AND tool_name='prompt.generation.request'
+    UNION ALL SELECT 1 FROM agent_tool_calls WHERE project_id=? AND task_id=? AND tool_name='prompt.generation.request' LIMIT 1`,
+    )
+    .get(projectId, taskId, projectId, taskId);
+  if (requested)
+    return {
+      pending: [
+        {
+          key: 'prompt-generation-unprepared',
+          status: 'prompt_generation_not_prepared',
+          nextAction: {
+            tool: 'prompt.generation.request',
+            instruction:
+              'Correct the reported schema/source error and submit actual current source document/version IDs. An unsuccessful generation request is not a completed prompt generation; no creative result has been saved.',
+          },
+        },
+      ],
+    };
   const planned = assessTaskDeliverables(db, projectId, generationId, taskId);
   if (!planned) return undefined;
   const pending = planned.pending;

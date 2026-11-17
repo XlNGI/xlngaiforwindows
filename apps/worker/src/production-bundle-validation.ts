@@ -297,6 +297,16 @@ export function checkBundle(db: Database.Database, projectId: string, taskId: st
           reason: `Referenced scene localKey "${shot.sceneKey}" has not been submitted. Submit its complete scene prompt with that localKey, or correct this shot's sceneKey to an actual scene.`,
         });
     }
+    if (entry.kind === 'shot' && (item as ProductionBundleShot).image) {
+      const image = (item as ProductionBundleShot).image!;
+      for (const [field, kind] of [
+        ['characterDocumentIds', 'character'],
+        ['sceneDocumentIds', 'scene'],
+        ['propDocumentIds', 'prop'],
+      ] as const)
+        for (const r of image.bindings[field] ?? [])
+          ref(entry.key, 'image.bindings.' + field, r, kind);
+    }
     const bindings = item.bindings;
     for (const [field, kind] of [
       ['characterDocumentIds', 'character'],

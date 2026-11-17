@@ -253,11 +253,10 @@ function NovelProjectWorkspace({
                 : `打开章节 ${chapter.displayLabel} ${chapter.title}`
             }
             onClick={() => {
-              if (isSelected) setEditingTitleId(titleKey);
-              else {
-                setEditingTitleId(undefined);
-                void openChapter(chapter);
-              }
+              if (!isSelected) void openChapter(chapter);
+            }}
+            onDoubleClick={() => {
+              if (writable) setEditingTitleId(titleKey);
             }}
           >
             <FileText size={13} />
@@ -356,13 +355,13 @@ function NovelProjectWorkspace({
   }, [projectId, includeArchived, selected?.id, document]);
 
   const openReference = async (documentId: string) => {
+    setEditingTitleId(undefined);
     setBusy(true);
     try {
       const detail = await callWorker('document.get', { documentId });
       if (detail.domainScope !== 'novel') throw new Error('该文档不属于小说资料。');
       setSelected(undefined);
       setSelectedReferenceId(documentId);
-      setEditingTitleId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
@@ -376,13 +375,13 @@ function NovelProjectWorkspace({
   };
 
   const openChapter = async (chapter: NovelChapterInfo) => {
+    setEditingTitleId(undefined);
     setBusy(true);
     try {
       const detail = await callWorker('document.get', { documentId: chapter.documentId });
       setSelected(chapter);
       onChapterSelected?.(chapter);
       setSelectedReferenceId(undefined);
-      setEditingTitleId(undefined);
       setDocument(detail);
       setTitle(detail.title);
       setContent(detail.currentVersion?.contentMarkdown ?? '');
@@ -984,11 +983,10 @@ function NovelProjectWorkspace({
                             }
                             disabled={busy}
                             onClick={() => {
-                              if (isSelected) setEditingTitleId(titleKey);
-                              else {
-                                setEditingTitleId(undefined);
-                                void openReference(item.id);
-                              }
+                              if (!isSelected) void openReference(item.id);
+                            }}
+                            onDoubleClick={() => {
+                              if (writable) setEditingTitleId(titleKey);
                             }}
                           >
                             <FileText size={13} />

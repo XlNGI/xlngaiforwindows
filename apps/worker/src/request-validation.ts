@@ -2,6 +2,7 @@ import {
   validateProductionBundleSources,
   validateProductionRequestedAt,
   DOCUMENT_KINDS,
+  validatePromptTemplates,
 } from '@ai-video/contracts';
 import type {
   ChatMessageRole,
@@ -537,10 +538,94 @@ export function validateSessionRequestParams(
   method: WorkerMethod,
   input: unknown,
 ): Record<string, unknown> {
+  if (method === 'document.images.unbind') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['documentId', 'assetId']);
+    requireId(params, 'documentId');
+    requireId(params, 'assetId');
+    return params;
+  }
+  if (method === 'document.images.import') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['documentId', 'sourcePaths']);
+    requireId(params, 'documentId');
+    const paths = params.sourcePaths;
+    if (
+      !Array.isArray(paths) ||
+      !paths.length ||
+      paths.length > 12 ||
+      new Set(paths).size !== paths.length
+    )
+      throw new RequestValidationError('每次请选择 1–12 张不同的本地图片。');
+    for (const path of paths) requireString({ path }, 'path', 4096);
+    return params;
+  }
   if (method === 'project.rename') {
     const params = requireObject(input, 'params');
     rejectUnknown(params, ['name']);
     requireString(params, 'name', MAX_TITLE_LENGTH);
+    return params;
+  }
+  if (method === 'shot.prompt.preview') {
+    const params = requireObject(input, 'params');
+    rejectUnknown(params, ['shotId', 'kind', 'prompt', 'inputImages']);
+    requireId(params, 'shotId');
+    requireEnum(params, 'kind', new Set(['image', 'video']));
+    if (params.prompt !== undefined) requireString(params, 'prompt', 20000, true);
+    validateProductionImages(params);
+    return params;
+  }
+  if (
+    method === 'shot.image.get' ||
+    method === 'shot.image.save' ||
+    method === 'shot.videoImages.save'
+  ) {
+    const params = requireObject(input, 'params');
+    rejectUnknown(
+      params,
+      method === 'shot.image.get'
+        ? ['shotId']
+        : method === 'shot.image.save'
+          ? [
+              'shotId',
+              'expectedRowVersion',
+              'sourceToken',
+              'prompt',
+              'purpose',
+              'intent',
+              'bindings',
+            ]
+          : ['shotId', 'expectedRowVersion', 'selections'],
+    );
+    requireId(params, 'shotId');
+    if (method !== 'shot.image.get')
+      requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+    if (method === 'shot.image.save') {
+      requireString(params, 'prompt', 20000, true);
+      requireString(params, 'intent', 4000, true);
+      requireString(params, 'sourceToken', 64);
+      if (!/^[a-f0-9]{64}$/u.test(params.sourceToken as string))
+        throw new RequestValidationError('Invalid source token.');
+      requireEnum(params, 'purpose', new Set(['composition', 'first-frame', 'last-frame']));
+      if (params.bindings !== undefined) validatePromptBindings(params.bindings);
+    }
+    if (method === 'shot.videoImages.save') {
+      if (!Array.isArray(params.selections) || params.selections.length > 12)
+        throw new RequestValidationError('Select at most 12 images.');
+      const ids = new Set<string>();
+      let first = 0;
+      for (const raw of params.selections) {
+        const image = requireObject(raw, 'image');
+        rejectUnknown(image, ['assetId', 'role', 'label']);
+        requireId(image, 'assetId');
+        requireEnum(image, 'role', new Set(['reference', 'first-frame', 'character', 'scene']));
+        if (image.label !== undefined) requireString(image, 'label', 200, true);
+        if (ids.has(image.assetId as string)) throw new RequestValidationError('Duplicate image.');
+        ids.add(image.assetId as string);
+        if (image.role === 'first-frame') first++;
+      }
+      if (first > 1) throw new RequestValidationError('Select at most one first frame.');
+    }
     return params;
   }
   if (method.startsWith('shot.continuity.')) {
@@ -1324,10 +1409,17 @@ export function validateSessionRequestParams(
       requireId(params, 'conversationId');
       break;
     case 'conversation.promptTemplate.save':
-      rejectUnknown(params, ['conversationId', 'content', 'expectedRowVersion']);
+      rejectUnknown(params, ['conversationId', 'content', 'expectedRowVersion', 'templates']);
       requireId(params, 'conversationId');
       requireString(params, 'content', undefined, true);
       requireInteger(params, 'expectedRowVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (params.templates !== undefined) {
+        try {
+          validatePromptTemplates(params.templates);
+        } catch {
+          throw new RequestValidationError('Invalid scoped prompt templates.');
+        }
+      }
       break;
     case 'maintenance.contextSnapshots.cleanup':
       rejectUnknown(params, ['olderThanDays']);
@@ -1881,6 +1973,8 @@ export function validateSessionRequestParams(
         'conversationId',
         'budgetTokens',
         'prompt',
+        'promptTemplateVersion',
+        'promptWorkflow',
         'providerProfileId',
         'modelId',
         'idempotencyKey',
@@ -1898,6 +1992,20 @@ export function validateSessionRequestParams(
         'attachments',
       ]);
       requireId(params, 'conversationId');
+      optionalInteger(params, 'promptTemplateVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (params.promptWorkflow !== undefined)
+        requireEnum(
+          params,
+          'promptWorkflow',
+          new Set([
+            'general',
+            'character-image',
+            'scene-image',
+            'prop-image',
+            'shot-image',
+            'video-prompt',
+          ]),
+        );
       optionalInteger(params, 'budgetTokens', 1000, 200000);
       requireString(params, 'prompt');
       requireId(params, 'providerProfileId');
@@ -1934,6 +2042,8 @@ export function validateSessionRequestParams(
         'taskExecution',
         'conversationId',
         'prompt',
+        'promptTemplateVersion',
+        'promptWorkflow',
         'capability',
         'providerProfileId',
         'modelId',
@@ -1955,6 +2065,20 @@ export function validateSessionRequestParams(
         'productionRequestedAt',
       ]);
       requireId(params, 'conversationId');
+      optionalInteger(params, 'promptTemplateVersion', 0, Number.MAX_SAFE_INTEGER);
+      if (params.promptWorkflow !== undefined)
+        requireEnum(
+          params,
+          'promptWorkflow',
+          new Set([
+            'general',
+            'character-image',
+            'scene-image',
+            'prop-image',
+            'shot-image',
+            'video-prompt',
+          ]),
+        );
       optionalEnum(params, 'taskExecution', new Set(['ordered', 'parallel']));
       requireString(params, 'prompt');
       optionalEnum(

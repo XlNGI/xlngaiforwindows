@@ -22,6 +22,7 @@ import { callWorker } from './worker-client';
 import { selectWorkerScope } from './worker-scope';
 import * as llmClient from './llm-client';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { pickProjectDirectory } from './project-directory-client';
 import { readMarkdownDocument } from './markdown-import-client';
 const windowApi = vi.hoisted(() => ({
   close: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +31,13 @@ const windowApi = vi.hoisted(() => ({
   onResized: vi.fn().mockResolvedValue(() => undefined),
   toggleMaximize: vi.fn().mockResolvedValue(undefined),
 }));
+async function findConversation(title: string) {
+  return waitFor(() => {
+    const directory = screen.getByRole('combobox', { name: '会话目录' });
+    expect(directory).toHaveTextContent(title);
+    return directory;
+  });
+}
 describe('composeConversationPrompt', () => {
   it('attaches the editable conversation contract once and preserves an empty template', () => {
     expect(composeConversationPrompt('写一场雨夜追逐', '固定 1990 年代、冷色胶片风格')).toBe(
@@ -181,6 +189,9 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
+}));
+vi.mock('./project-directory-client', () => ({
+  pickProjectDirectory: vi.fn(),
 }));
 vi.mock('./worker-client', () => ({
   callWorker: vi.fn((method: string) =>
@@ -660,6 +671,7 @@ describe('App', () => {
       value: {},
     });
     vi.mocked(openDialog).mockResolvedValue(null);
+    vi.mocked(pickProjectDirectory).mockResolvedValue(null);
     windowApi.isMaximized.mockResolvedValue(false);
     windowApi.onResized.mockResolvedValue(() => undefined);
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
@@ -742,7 +754,7 @@ describe('App', () => {
       );
       const dispatched = vi.spyOn(window, 'dispatchEvent');
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       selectLlm('composer-profile', 'composer-model');
       fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
         target: { value: '生成完整分镜' },
@@ -810,7 +822,7 @@ describe('App', () => {
         return baseline(rpc as never, params as never);
       });
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
         target: { value: '生成内容' },
       });
@@ -871,7 +883,7 @@ describe('App', () => {
           detach: vi.fn(),
         }));
         render(<App />);
-        await screen.findByDisplayValue('输入草稿');
+        await findConversation('输入草稿');
         if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
         const composer = screen.getByRole('textbox', { name: '会话消息' });
         fireEvent.change(composer, { target: { value: '第一次请求' } });
@@ -935,7 +947,7 @@ describe('App', () => {
         },
       );
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       selectLlm('composer-profile', 'composer-model');
       fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
         target: { value: '生成内容' },
@@ -982,7 +994,7 @@ describe('App', () => {
     globalThis.fetch = mediaFetch;
     try {
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       const composer = screen.getByRole('textbox', { name: '会话消息' });
       fireEvent.change(composer, { target: { value: '分析这张图' } });
       const raw = JSON.stringify({
@@ -1045,7 +1057,7 @@ describe('App', () => {
     const toDataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(jpeg);
     try {
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       selectLlm('composer-profile', 'composer-model');
       const file = new File([new Uint8Array(2358559)], 'reference.png', { type: 'image/png' });
       fireEvent.change(document.querySelector('input[type="file"]')!, {
@@ -1155,7 +1167,7 @@ describe('App', () => {
       return baseline(method as never, params as never);
     }) as typeof callWorker);
     const mounted = render(<App />);
-    await screen.findByDisplayValue('输入草稿');
+    await findConversation('输入草稿');
     selectLlm('composer-profile', 'composer-model');
     const composer = screen.getByRole('textbox', { name: '会话消息' });
     fireEvent.change(composer, { target: { value: '暂不发送的想法' } });
@@ -1240,7 +1252,7 @@ describe('App', () => {
         return baseline(method as never, params as never);
       }) as typeof callWorker);
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       selectLlm('composer-profile', 'composer-model');
       const composer = screen.getByRole('textbox', { name: '会话消息' });
       fireEvent.change(composer, { target: { value: '另外一条未发送的想法' } });
@@ -1271,7 +1283,10 @@ describe('App', () => {
       };
       expect(params.capability).toBe('text');
       expect(params.productionSkillId).toBe(skillId);
-      expect(params.prompt).toContain(skillId);
+      if (skillId === 'script-to-media') {
+        expect(params.prompt).toContain('一次生成');
+        expect(params.prompt).not.toContain('production.skill.read');
+      } else expect(params.prompt).toContain(skillId);
       expect(params.prompt).toContain('source-version');
       expect(params.prompt).toContain(source.id);
       expect(params.prompt).not.toContain(source.currentVersion.contentMarkdown);
@@ -1308,7 +1323,7 @@ describe('App', () => {
       });
       mockComposerSend(method, response);
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
       const composer = screen.getByRole('textbox', { name: '会话消息' });
       fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
@@ -1342,7 +1357,7 @@ describe('App', () => {
       });
       const accepted = mockComposerSend(method, response);
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
       const composer = screen.getByRole('textbox', { name: '会话消息' });
       fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
@@ -1410,7 +1425,7 @@ describe('App', () => {
         return baselineWorker(method as never, params as never);
       }) as typeof callWorker);
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       selectLlm('composer-profile', 'composer-model');
       const composer = screen.getByRole('textbox', { name: '会话消息' });
       fireEvent.change(composer, { target: { value: '发送中的原始草稿' } });
@@ -1433,9 +1448,10 @@ describe('App', () => {
             prompt: string;
           }
         ).prompt;
-        expect(prompt.split('【本会话要求约束】')).toHaveLength(2);
+        expect(prompt).not.toContain('【本会话要求约束】');
+        expect(params).toHaveProperty('promptTemplateVersion', 1);
         expect(prompt.split('[附件：参考资料.bin]')).toHaveLength(2);
-        expect(prompt).toContain('固定清晨与冷色风格');
+        expect(prompt).not.toContain('固定清晨与冷色风格');
       }
       if (edit) fireEvent.change(composer, { target: { value: '等待期间编辑的新草稿' } });
       await act(async () => {
@@ -1446,7 +1462,7 @@ describe('App', () => {
     },
   );
   it.each(['agent.run', 'llm.generate', 'chat.message.save'] as const)(
-    'saves the latest editable requirements before %s receives the composed prompt',
+    'saves edited purpose templates before %s receives the original request',
     async (method) => {
       const accepted = mockComposerSend(method, Promise.resolve(null));
       const baseline = vi.mocked(callWorker).getMockImplementation()!;
@@ -1455,25 +1471,30 @@ describe('App', () => {
           return Promise.resolve({
             conversationId: 'composer-conversation',
             content: '旧要求',
+            templates: { 'character-image': '旧要求' },
             rowVersion: 4,
           });
         if (rpc === 'conversation.promptTemplate.save')
           return Promise.resolve({
             conversationId: 'composer-conversation',
-            content: '清晨、冷色风格；逐镜写明时间',
+            content: '旧要求',
+            templates: { 'character-image': '清晨、冷色风格；逐镜写明时间' },
             rowVersion: 5,
           });
         if (rpc === method) return Promise.resolve(accepted);
         return baseline(rpc as never, params as never);
       });
       render(<App />);
-      await screen.findByDisplayValue('输入草稿');
+      await findConversation('输入草稿');
       if (method === 'agent.run') selectLlm('composer-profile', 'composer-model');
-      fireEvent.click(screen.getByText('本会话要求约束'));
-      await waitFor(() => expect(screen.getByLabelText('本会话要求约束')).toHaveValue('旧要求'));
-      fireEvent.change(screen.getByLabelText('本会话要求约束'), {
+      fireEvent.click(screen.getByRole('button', { name: '本会话要求约束' }));
+      await waitFor(() =>
+        expect(screen.getByRole('textbox', { name: '本会话要求约束' })).toHaveValue('旧要求'),
+      );
+      fireEvent.change(screen.getByRole('textbox', { name: '本会话要求约束' }), {
         target: { value: '清晨、冷色风格；逐镜写明时间' },
       });
+      fireEvent.click(screen.getByRole('button', { name: '关闭约束编辑器' }));
       fireEvent.change(screen.getByRole('textbox', { name: '会话消息' }), {
         target: { value: '编排第一场' },
       });
@@ -1482,8 +1503,8 @@ describe('App', () => {
         expect(callWorker).toHaveBeenCalledWith(
           method,
           expect.objectContaining({
-            [method === 'chat.message.save' ? 'content' : 'prompt']:
-              '【本会话要求约束】\n清晨、冷色风格；逐镜写明时间\n\n【用户本次请求】\n编排第一场',
+            [method === 'chat.message.save' ? 'content' : 'prompt']: '编排第一场',
+            ...(method === 'agent.run' ? { promptTemplateVersion: 5 } : {}),
           }),
         ),
       );
@@ -1493,7 +1514,8 @@ describe('App', () => {
       );
       expect(callWorker).toHaveBeenCalledWith('conversation.promptTemplate.save', {
         conversationId: 'composer-conversation',
-        content: '清晨、冷色风格；逐镜写明时间',
+        content: '旧要求',
+        templates: { 'character-image': '清晨、冷色风格；逐镜写明时间' },
         expectedRowVersion: 4,
       });
     },
@@ -1710,7 +1732,7 @@ describe('App', () => {
       target: { value: '项目一素材' },
     });
     fireEvent.change(screen.getByLabelText('素材类型'), { target: { value: 'image' } });
-    vi.mocked(openDialog).mockResolvedValue(secondProject.rootPath);
+    vi.mocked(pickProjectDirectory).mockResolvedValue(secondProject.rootPath);
     const topbar = container.querySelector('.topbar') as HTMLElement;
     fireEvent.click(within(topbar).getByRole('button', { name: '选择项目' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /浏览项目目录/ }));
@@ -1899,21 +1921,66 @@ describe('App', () => {
     ).toBe(true);
   });
   it('selects a project directory with the native folder dialog before opening', async () => {
-    vi.mocked(openDialog).mockResolvedValue('D:\\Projects\\existing-project');
+    vi.mocked(pickProjectDirectory).mockResolvedValue('D:\\Projects\\existing-project');
     const { container } = render(<App />);
     const topbar = container.querySelector('.topbar') as HTMLElement;
     fireEvent.click(within(topbar).getByRole('button', { name: '选择项目' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /浏览项目目录/ }));
-    expect(openDialog).toHaveBeenCalledWith({
-      directory: true,
-      multiple: false,
-      title: '选择要打开的项目目录',
-    });
+    expect(pickProjectDirectory).toHaveBeenCalledWith(true);
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('project.runtime.attach', {
         rootPath: 'D:\\Projects\\existing-project',
       }),
     );
+  });
+  it('keeps the create form usable after a directory picker crash and allows retry', async () => {
+    vi.mocked(pickProjectDirectory)
+      .mockRejectedValueOnce(new Error('系统目录选择器异常退出。请重试或直接输入项目绝对目录。'))
+      .mockResolvedValueOnce('D:\\项目\\测试');
+    render(<App />);
+    const startup = await screen.findByRole('region', { name: '项目启动页' });
+    fireEvent.click(within(startup).getByRole('button', { name: '新建项目' }));
+    const dialog = screen.getByRole('dialog', { name: '新建项目' });
+    fireEvent.change(within(dialog).getByLabelText('项目名称'), {
+      target: { value: '保留项目名' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择项目目录' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('系统目录选择器异常退出');
+    expect(within(dialog).getByLabelText('项目名称')).toHaveValue('保留项目名');
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择项目目录' }));
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('项目绝对目录')).toHaveValue('D:\\项目\\测试'),
+    );
+    expect(pickProjectDirectory).toHaveBeenLastCalledWith(false);
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '创建项目' })).toBeEnabled();
+    expect(
+      vi.mocked(callWorker).mock.calls.some(([method]) => method === 'project.runtime.create'),
+    ).toBe(false);
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+  it('ignores repeated browse clicks and preserves the entered path when the picker is cancelled', async () => {
+    let cancelPicker!: (path: string | null) => void;
+    vi.mocked(pickProjectDirectory).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          cancelPicker = resolve;
+        }),
+    );
+    render(<App />);
+    const startup = await screen.findByRole('region', { name: '项目启动页' });
+    fireEvent.click(within(startup).getByRole('button', { name: '新建项目' }));
+    const dialog = screen.getByRole('dialog', { name: '新建项目' });
+    fireEvent.change(within(dialog).getByLabelText('项目绝对目录'), {
+      target: { value: 'D:\\Projects\\keep' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择项目目录' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择项目目录' }));
+    expect(pickProjectDirectory).toHaveBeenCalledTimes(1);
+    await act(() => Promise.resolve(cancelPicker(null)));
+    expect(within(dialog).getByLabelText('项目绝对目录')).toHaveValue('D:\\Projects\\keep');
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择项目目录' }));
+    await waitFor(() => expect(pickProjectDirectory).toHaveBeenCalledTimes(2));
   });
   it('creates and opens one initial conversation for a newly created project', async () => {
     const project = {
@@ -2010,7 +2077,7 @@ describe('App', () => {
       target: { value: project.rootPath },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: '创建项目' }));
-    expect(await screen.findByDisplayValue('新会话')).toBeInTheDocument();
+    expect(await findConversation('新会话')).toBeInTheDocument();
     expect(
       vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'conversation.create'),
     ).toHaveLength(1);
@@ -2109,12 +2176,90 @@ describe('App', () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '打开项目：Existing Project' }));
-    expect(await screen.findByDisplayValue('Existing Conversation')).toBeInTheDocument();
+    expect(await findConversation('Existing Conversation')).toBeInTheDocument();
     expect(
       vi.mocked(callWorker).mock.calls.some(([method]) => method === 'conversation.create'),
     ).toBe(false);
   });
-  it('imports a selected Markdown file as a versioned project document', async () => {
+  it.each([
+    ['全部', 'outline'],
+    ['计划', 'plan'],
+    ['约束', 'constraint'],
+  ] as const)('creates and saves a named script under %s', async (filter, kind) => {
+    await renderProjectWorkspace();
+    const baseline = vi.mocked(callWorker).getMockImplementation()!;
+    const saved = {
+      id: 'new-script',
+      projectId: 'workspace-project',
+      kind,
+      title: '雨夜重逢',
+      scopeType: 'project' as const,
+      lifecycleStatus: 'active' as const,
+      currentVersionId: 'new-script-v1',
+      rowVersion: 1,
+      createdAt: 'now',
+      updatedAt: 'now',
+      currentVersion: {
+        id: 'new-script-v1',
+        documentId: 'new-script',
+        version: 1,
+        contentMarkdown: '第一场\n小林：你好。',
+        state: 'draft' as const,
+        authorType: 'user' as const,
+        createdAt: 'now',
+      },
+    };
+    let persisted = false;
+    vi.mocked(callWorker).mockImplementation((method, params, scope) => {
+      if (method === 'document.draft.save') {
+        persisted = true;
+        return Promise.resolve(saved);
+      }
+      if (method === 'document.list') return Promise.resolve(persisted ? [saved] : []);
+      if (method === 'document.versions') return Promise.resolve([saved.currentVersion]);
+      return baseline(method, params, scope);
+    });
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: filter,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '新建' }));
+    const title = screen.getByRole('textbox', { name: '文档标题' });
+    expect(title).toHaveFocus();
+    expect(title).toHaveValue('未命名文档');
+    fireEvent.change(title, { target: { value: '' } });
+    expect(screen.getByRole('textbox', { name: '文档标题' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled();
+    fireEvent.change(title, { target: { value: saved.title } });
+    fireEvent.click(screen.getByRole('region', { name: '文档内容预览' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '文档内容' }), {
+      target: { value: saved.currentVersion.contentMarkdown },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存草稿' }));
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith(
+        'document.draft.save',
+        expect.objectContaining({
+          kind,
+          title: saved.title,
+          contentMarkdown: saved.currentVersion.contentMarkdown,
+        }),
+        expect.objectContaining({ projectId: saved.projectId }),
+      ),
+    );
+    expect(
+      await screen.findByRole('button', { name: `编辑文档标题 ${saved.title}` }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: '文档标题' })).not.toBeInTheDocument();
+    expect(screen.getByText('已保存草稿 v1')).toBeInTheDocument();
+  });
+  it.each([
+    ['md', '全部', 'outline'],
+    ['txt', '全部', 'outline'],
+    ['txt', '计划', 'plan'],
+    ['TXT', '约束', 'constraint'],
+  ] as const)('imports %s under %s as a visible %s draft', async (extension, filter, kind) => {
     const project = {
       id: 'project',
       name: 'Imported Novel',
@@ -2127,7 +2272,7 @@ describe('App', () => {
     const saved = {
       id: 'document-imported',
       projectId: project.id,
-      kind: 'note' as const,
+      kind,
       title: '第一章',
       scopeType: 'project' as const,
       currentVersionId: 'version-1',
@@ -2140,16 +2285,19 @@ describe('App', () => {
         id: 'version-1',
         documentId: 'document-imported',
         version: 1,
-        contentMarkdown: '# 第一章\n\n故事开始。',
+        contentMarkdown:
+          extension === 'md' ? '# 第一章\n\n故事开始。' : '第一场\r\n\r\n小林：你好。',
         state: 'draft' as const,
         authorType: 'import' as const,
         createdAt: 'now',
       },
     };
-    vi.mocked(openDialog).mockResolvedValue('D:\\Novels\\第一章.md');
+    const path = `D:\\Novels\\第一章.${extension}`;
+    let imported = false;
+    vi.mocked(openDialog).mockResolvedValue(path);
     vi.mocked(readMarkdownDocument).mockResolvedValue({
       title: '第一章',
-      contentMarkdown: '# 第一章\n\n故事开始。',
+      contentMarkdown: saved.currentVersion.contentMarkdown,
     });
     vi.mocked(callWorker).mockImplementation((method) => {
       if (method === 'conversation.promptTemplate.get')
@@ -2174,9 +2322,9 @@ describe('App', () => {
         });
       if (method === 'project.current') return Promise.resolve(project);
       if (method === 'conversation.list') return Promise.resolve({ items: [] });
+      if (method === 'document.list') return Promise.resolve(imported ? [saved] : []);
       if (
         method === 'project.recent' ||
-        method === 'document.list' ||
         method === 'scene.list' ||
         method === 'asset.list' ||
         method === 'video.generate.list' ||
@@ -2192,7 +2340,10 @@ describe('App', () => {
         });
       if (method === 'adapter.catalog')
         return Promise.resolve({ capabilities: [], providers: [], adapters: [] });
-      if (method === 'document.draft.save') return Promise.resolve(saved);
+      if (method === 'document.draft.save') {
+        imported = true;
+        return Promise.resolve(saved);
+      }
       if (method === 'document.versions') return Promise.resolve([saved.currentVersion]);
       if (method === 'novel.chapter.list') return Promise.resolve([]);
       if (method === 'production.compile' || method === 'production.read')
@@ -2207,31 +2358,58 @@ describe('App', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: '导入 Markdown' })).toBeEnabled(),
+    await waitFor(() => expect(screen.getByRole('button', { name: '导入剧本' })).toBeEnabled());
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: filter,
+      }),
     );
-    fireEvent.click(screen.getByRole('button', { name: '导入 Markdown' }));
+    fireEvent.click(screen.getByRole('button', { name: '导入剧本' }));
     await waitFor(() =>
       expect(openDialog).toHaveBeenCalledWith({
         directory: false,
         multiple: false,
-        title: '导入 Markdown 文档',
-        filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+        title: '导入剧本',
+        filters: [{ name: '剧本文档（TXT / Markdown）', extensions: ['txt', 'md', 'markdown'] }],
       }),
     );
-    expect(readMarkdownDocument).toHaveBeenCalledWith('D:\\Novels\\第一章.md');
+    expect(readMarkdownDocument).toHaveBeenCalledWith(path);
     await waitFor(() =>
       expect(callWorker).toHaveBeenCalledWith('document.draft.save', {
+        kind,
         title: '第一章',
-        contentMarkdown: '# 第一章\n\n故事开始。',
+        contentMarkdown: saved.currentVersion.contentMarkdown,
         authorType: 'import',
       }),
     );
     const importedPreview = await screen.findByRole('region', { name: '文档内容预览' });
-    expect(importedPreview).toHaveTextContent('故事开始。');
+    expect(importedPreview).toHaveTextContent(extension === 'md' ? '故事开始。' : '小林：你好。');
+    expect(screen.getByRole('button', { name: '编辑文档标题 第一章' })).toBeInTheDocument();
     fireEvent.click(importedPreview);
-    expect(await screen.findByLabelText('文档内容')).toHaveValue('# 第一章\n\n故事开始。');
+    expect(await screen.findByLabelText('文档内容')).toHaveValue(
+      saved.currentVersion.contentMarkdown.replace(/\r\n/g, '\n'),
+    );
     expect(screen.getByText('已导入为草稿 第一章 · 版本 v1')).toBeInTheDocument();
+  });
+  it('resets an incompatible character filter when creating a script', async () => {
+    await renderProjectWorkspace();
+    const projectNav = screen.getByRole('navigation', { name: '项目导航' });
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^角色与场景/ }));
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: '场景',
+      }),
+    );
+    fireEvent.click(within(projectNav).getByRole('button', { name: /^剧本/ }));
+    expect(
+      within(screen.getByRole('group', { name: '文档类型筛选' })).getByRole('button', {
+        name: '全部',
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: '新建' }));
+    expect(screen.getByRole('textbox', { name: '文档标题' })).toHaveValue('未命名文档');
+    expect(screen.getByText('大纲 · 未保存')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '文档内容预览' })).toBeInTheDocument();
   });
   it('expands production UI across the central workspace when a production mode is selected', async () => {
     const { container } = await renderProjectWorkspace();
@@ -2730,6 +2908,7 @@ describe('App', () => {
       await Promise.resolve();
     });
     expect(await screen.findByText('过期项目消息')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('combobox', { name: '会话目录' }));
     expect(screen.getByRole('option', { name: '旧项目会话' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: '场次会话' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '场次' })).not.toBeInTheDocument();
@@ -2888,7 +3067,7 @@ describe('App', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     render(<App />);
-    const conversationSelect = await screen.findByDisplayValue('会话 A');
+    const conversationSelect = await findConversation('会话 A');
     fireEvent.change(screen.getByLabelText('会话消息'), { target: { value: '生成内容' } });
     fireEvent.click(screen.getByTitle('发送消息'));
     expect(await screen.findByTitle('停止生成')).toBeInTheDocument();
@@ -2897,7 +3076,10 @@ describe('App', () => {
         vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'llm.generation.get'),
       ).toHaveLength(1),
     );
-    fireEvent.change(conversationSelect, { target: { value: conversationB.id } });
+    fireEvent.click(conversationSelect);
+    fireEvent.change(screen.getByRole('listbox', { name: '选择会话' }), {
+      target: { value: conversationB.id },
+    });
     expect(await screen.findByText('会话 B 当前消息')).toBeInTheDocument();
     expect(screen.getByTitle('发送消息')).toBeInTheDocument();
     await act(async () => {
@@ -3458,7 +3640,7 @@ describe('App', () => {
       throw new Error(`Unexpected method ${method}`);
     });
     render(<App />);
-    await screen.findByDisplayValue('Project conversation');
+    await findConversation('Project conversation');
     if (batchModelState === 'scene-proposal-open-page') {
       fireEvent.click(
         screen
@@ -3920,6 +4102,8 @@ describe('App', () => {
     );
     expect(screen.queryByLabelText('标题')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '编辑文档标题 角色设定' }));
+    expect(screen.queryByRole('textbox', { name: '文档标题' })).not.toBeInTheDocument();
+    fireEvent.doubleClick(screen.getByRole('button', { name: '编辑文档标题 角色设定' }));
     const characterTitleInput = screen.getByRole('textbox', { name: '文档标题' });
     fireEvent.change(characterTitleInput, { target: { value: '临时角色名' } });
     fireEvent.keyDown(characterTitleInput, { key: 'Escape' });
@@ -3990,6 +4174,10 @@ describe('App', () => {
       within(documentDirectory).queryByRole('button', { name: /新建/ }),
     ).not.toBeInTheDocument();
     fireEvent.click(
+      within(documentDirectory).getByRole('button', { name: '编辑文档标题 项目大纲' }),
+    );
+    expect(screen.queryByRole('textbox', { name: '文档标题' })).not.toBeInTheDocument();
+    fireEvent.doubleClick(
       within(documentDirectory).getByRole('button', { name: '编辑文档标题 项目大纲' }),
     );
     const titleInput = screen.getByRole('textbox', { name: '文档标题' });
@@ -4766,7 +4954,8 @@ describe('App', () => {
       } else {
         expect(screen.queryByText('角色声音')).not.toBeInTheDocument();
       }
-      expect(screen.getByRole('heading', { name: '已生成图片' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '绑定图片' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '添加图片' })).toBeEnabled();
       const generateLabel =
         kind === 'prop' ? '生成道具图' : kind === 'scene' ? '生成场景图' : '生成角色图';
       expect(screen.getByRole('button', { name: generateLabel })).toHaveClass(
@@ -5013,12 +5202,12 @@ describe('App', () => {
     render(<App />);
     await clickProjectNavigationItem(/场次与镜头/);
     fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
-    expect(await screen.findByRole('heading', { name: '镜头提示词' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '视频提示词' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '本镜角色绑定' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '修复绑定' })).toBeInTheDocument();
     fireEvent.click(screen.getByText('分镜说明 · 已保存'));
     expect(screen.getByRole('heading', { name: '分镜说明' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '填充本镜图片表单' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '本镜参考图' })).toBeInTheDocument();
     expect(await screen.findByLabelText('分镜标题')).toHaveValue('镜头一分镜');
     fireEvent.click(await screen.findByRole('region', { name: '分镜内容预览' }));
     expect(screen.getByLabelText('分镜内容')).toHaveValue('# 分镜\n\n1. 远景。');
@@ -5107,7 +5296,25 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
     };
+    const still = {
+      shotId: 'shot',
+      prompt: '开场静态画面',
+      purpose: 'composition' as const,
+      intent: '',
+      rowVersion: 0,
+      currentSourceToken: 'a'.repeat(64),
+      stale: false,
+      sourceStale: false,
+      inputImages: [],
+      assets: [],
+      videoImages: { shotId: 'shot', rowVersion: 0, selections: [], conflicts: [] },
+    };
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'shot.image.get') return Promise.resolve(still);
+      if (method === 'shot.image.save')
+        return Promise.resolve({ ...still, ...(params as object), rowVersion: 1 });
+      if (method === 'shot.prompt.preview')
+        return Promise.resolve({ prompt: still.prompt, inputImages: still.inputImages });
       if (method === 'conversation.promptTemplate.get')
         return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
       if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
@@ -5221,6 +5428,10 @@ describe('App', () => {
     expect(await screen.findByRole('textbox', { name: '镜头提示词' })).toHaveValue(
       '雨夜里林澈回头',
     );
+    fireEvent.click(screen.getByRole('tab', { name: '本镜参考图' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '填充本镜图片表单' })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole('button', { name: '填充本镜图片表单' }));
     await waitFor(() =>
       expect(container.querySelector('.app-shell')).toHaveAttribute(
@@ -5229,12 +5440,15 @@ describe('App', () => {
       ),
     );
     const productionPrompt = await screen.findByLabelText(/画面提示词/);
-    expect(productionPrompt).toHaveValue('雨夜里林澈回头');
+    expect(productionPrompt).toHaveValue('开场静态画面');
     fireEvent.change(productionPrompt, { target: { value: '右侧临时编辑' } });
     compilePrompt.value = '编译器返回旧提示词';
     fireEvent.click(screen.getByRole('button', { name: '填充本镜图片表单' }));
-    await waitFor(() => expect(productionPrompt).toHaveValue('雨夜里林澈回头'));
+    await waitFor(() => expect(productionPrompt).toHaveValue('开场静态画面'));
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'shot.save'),
+    ).toHaveLength(0);
     expect(
       vi
         .mocked(callWorker)
@@ -5362,7 +5576,25 @@ describe('App', () => {
       createdAt: 'now',
       updatedAt: 'now',
     };
+    const still = {
+      shotId: 'shot',
+      prompt: '开场静态画面',
+      purpose: 'composition' as const,
+      intent: '',
+      rowVersion: 0,
+      currentSourceToken: 'a'.repeat(64),
+      stale: false,
+      sourceStale: false,
+      inputImages: [{ assetId: characterAsset.id, role: 'character' as const }],
+      assets: [characterAsset],
+      videoImages: { shotId: 'shot', rowVersion: 0, selections: [], conflicts: [] },
+    };
     vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
+      if (method === 'shot.image.get') return Promise.resolve(still);
+      if (method === 'shot.image.save')
+        return Promise.resolve({ ...still, ...(params as object), rowVersion: 1 });
+      if (method === 'shot.prompt.preview')
+        return Promise.resolve({ prompt: still.prompt, inputImages: still.inputImages });
       if (method === 'conversation.promptTemplate.get')
         return Promise.resolve({ conversationId: 'conversation', content: '', rowVersion: 1 });
       if (method === 'project.runtime.list' || method === 'conversation.runtime.list')
@@ -5502,6 +5734,10 @@ describe('App', () => {
     expect(await screen.findByRole('textbox', { name: '镜头提示词' })).toHaveValue(
       '[角色:林澈] 雨夜里回头',
     );
+    fireEvent.click(screen.getByRole('tab', { name: '本镜参考图' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '填充本镜图片表单' })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole('button', { name: '填充本镜图片表单' }));
     await waitFor(() =>
       expect(container.querySelector('.app-shell')).toHaveAttribute(
@@ -5509,8 +5745,16 @@ describe('App', () => {
         'production',
       ),
     );
-    expect(await screen.findByLabelText(/画面提示词/)).toHaveValue('[角色:林澈] 雨夜里回头');
+    const imageFormPrompt = await screen.findByLabelText(/画面提示词/);
+    expect(
+      imageFormPrompt instanceof HTMLTextAreaElement
+        ? imageFormPrompt.value
+        : imageFormPrompt.textContent,
+    ).toContain('开场静态画面');
     expect(screen.getByLabelText('保存为')).toHaveValue('first-frame');
+    expect(
+      vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'shot.save'),
+    ).toHaveLength(0);
     expect(screen.queryByText('素材库图片')).not.toBeInTheDocument();
     expect(
       vi
@@ -5688,7 +5932,7 @@ describe('App', () => {
       throw new Error('Unexpected method ' + method);
     });
     render(<App />);
-    await screen.findByDisplayValue('付费提交');
+    await findConversation('付费提交');
     selectLlm(profile.id, model.id);
     fireEvent.change(screen.getByLabelText('会话消息'), {
       target: { value: '生成一张角色图' },

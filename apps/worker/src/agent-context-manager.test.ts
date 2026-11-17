@@ -17,6 +17,133 @@ import { AgentContextBudget } from './agent-context-budget.js';
 import { readProductionSkill } from './production-skill-service.js';
 import { modelResultReceipt, projectTaskStateResult } from './agent-context-results.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
+import { saveTaskPlan } from './agent-task-deliverables.js';
+import { AgentExecutionStore } from '@ai-video/persistence';
+import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
+import { outputSlotsDefinition } from './agent-output-slots.js';
+import {
+  preparedArgumentsDefinition,
+  resolvePreparedArguments,
+} from './agent-prepared-arguments.js';
+import { validateToolArguments } from '@earendil-works/pi-ai';
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'freezes the page authoring purpose before tool loading without restoring cleared templates (%s)',
+  async (protocol) => {
+    const f = await fixture();
+    const runtime = {
+      ...f.runtime,
+      protocol,
+      promptWorkflow: 'shot-image' as const,
+      promptTemplateSnapshot: {
+        conversationId: 'c',
+        content: '',
+        rowVersion: 7,
+        templates: { 'shot-image': '本会话静态图规则', 'video-prompt': '仅视频的动态规则' },
+      },
+    };
+    const manager = new AgentContextManager(f.projects, runtime, 'page-image', runtime.prompt);
+    const first = manager.prepare(runtime, { messages: [] }).request;
+    expect(first.prompt).toContain('本会话静态图规则');
+    expect(first.prompt).not.toContain('仅视频的动态规则');
+    manager.snapshot(runtime, { messages: [] }, 'document');
+    const restored = new AgentContextManager(f.projects, runtime, 'page-image', runtime.prompt);
+    const recovery = restored.recovery()!;
+    expect(restored.prepare(recovery.runtime, recovery).request.prompt).toContain(
+      '本会话静态图规则',
+    );
+    const cleared = {
+      ...runtime,
+      generationId: 'cleared-purpose',
+      promptTemplateSnapshot: {
+        ...runtime.promptTemplateSnapshot,
+        rowVersion: 8,
+        templates: { 'shot-image': '' },
+      },
+    };
+    const next = new AgentContextManager(
+      f.projects,
+      cleared,
+      'page-cleared',
+      cleared.prompt,
+    ).prepare(cleared, { messages: [] }).request;
+    expect(next.prompt).not.toContain('本会话静态图规则');
+    expect(next.prompt).not.toContain('写清实际人物');
+  },
+);
+it('keeps output schema stable across commits and repeated projection', () => {
+  const definition = SYSTEM_AGENT_TOOLS.find((t) => t.name === 'document.submit_draft')!;
+  const binding = {
+    outputId: 'stable',
+    planKey: 'characters',
+    toolName: definition.name,
+    quantity: 2,
+    committedIndices: [] as number[],
+  };
+  const first = outputSlotsDefinition(definition, [binding]);
+  expect(outputSlotsDefinition(first, [{ ...binding, committedIndices: [0] }])).toEqual(first);
+  expect(definition.parameters).not.toEqual(first.parameters);
+});
+it('keeps stable output slots in task state and creation schema after reconstruction', async () => {
+  const f = await fixture();
+  const id = f.projects.access(true, (db, p) =>
+    new AgentExecutionStore(db).registerOutput(
+      p.id,
+      'task',
+      'characters',
+      'document.submit_draft',
+      2,
+    ),
+  );
+  const runtime = {
+    ...f.runtime,
+    tools: [SYSTEM_AGENT_TOOLS.find((t) => t.name === 'document.submit_draft')!],
+  };
+  const restarted = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+  const request = restarted.prepare(runtime, { messages: [] }).request;
+  expect(request.prompt).toContain('"outputBindings"');
+  expect(request.prompt).toContain(id);
+  expect(JSON.stringify(request.tools?.[0]?.parameters.properties)).toContain('characters');
+});
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'compacts incrementally above a protected baseline without evicting loaded tools (%s)',
+  async (protocol) => {
+    const f = await fixture(1000000);
+    const runtime = {
+      ...f.runtime,
+      protocol,
+      prompt: '原始完整要求。'.repeat(12000),
+      tools: [
+        { name: 'tools.load', description: 'load', parameters: {} },
+        SYSTEM_AGENT_TOOLS.find((t) => t.name === 'document.submit_draft')!,
+      ],
+    };
+    const manager = new AgentContextManager(f.projects, runtime, 'incremental', runtime.prompt);
+    const context = tool('initial-error', '', '', 'none', 'document.submit_draft');
+    Object.assign(context.messages[1]!, {
+      isError: true,
+      content: [{ type: 'text', text: 'OUTPUT_IDENTITY_REQUIRED: choose a registered slot' }],
+    });
+    let request = manager.prepare(runtime, context).request;
+    for (let i = 0; i < 20; i++) {
+      const turn = tool(`increment-${i}`, 'v1', `已读正文${i}`, `source-${i}`);
+      const assistant = turn.messages[0]!;
+      if (assistant.role === 'assistant')
+        assistant.content.unshift({ type: 'text', text: '历史过程说明。'.repeat(240) });
+      context.messages.push(...turn.messages);
+      request = manager.prepare(runtime, context).request;
+    }
+    expect(request.tools?.map((t) => t.name)).toEqual(runtime.tools.map((t) => t.name));
+    expect(manager.lastInfo!.compactionCount).toBeLessThanOrEqual(3);
+    expect(JSON.stringify(request)).toContain('OUTPUT_IDENTITY_REQUIRED');
+    for (let i = 0; i < 20; i++) expect(JSON.stringify(request)).toContain(`已读正文${i}`);
+    manager.snapshot(runtime, context, 'document');
+    const restored = new AgentContextManager(f.projects, runtime, 'incremental', runtime.prompt);
+    const again = restored.prepare(runtime, restored.recovery()!).request;
+    expect(again.contextTurns).toHaveLength(request.contextTurns!.length);
+    expect(again.tools?.map((t) => t.name)).toEqual(runtime.tools.map((t) => t.name));
+    expect(again.prompt).toContain(runtime.prompt);
+  },
+);
 const cleanup: Array<() => Promise<void>> = [];
 it('keeps short loader validation errors inline so repairs do not need a result read', async () => {
   const f = await fixture();
@@ -45,6 +172,74 @@ it.each([
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((fn) => fn()));
 });
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'recognizes fresh immutable result pages as preparation progress after reconstruction (%s)',
+  async (protocol) => {
+    const f = await fixture();
+    const runtime = { ...f.runtime, protocol };
+    const source = f.store((store) =>
+      store.putResult(f.project.id, 'task', 'source', 'runtime.source', '完整资料'.repeat(200), {}),
+    );
+    const exchange = (id: string, name: string, args: Record<string, unknown>, result: unknown) => {
+      const context = tool(id, '', '', '', name, args);
+      const reply = context.messages[1]!;
+      if (reply.role === 'toolResult')
+        reply.content = [{ type: 'text', text: JSON.stringify(result) }];
+      return context;
+    };
+    const load = (id: string) =>
+      exchange(
+        id,
+        'tools.load',
+        { names: ['document.submit_draft'] },
+        {
+          status: 'tools_loaded',
+          loaded: ['document.submit_draft'],
+        },
+      );
+    for (let i = 0; i < 6; i++) {
+      const page = f.store((store) =>
+        store.readResult(f.project.id, 'task', source.id, i * 100, 100, source.contentHash),
+      );
+      const manager = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+      manager.observe(
+        exchange(
+          `page-${i}`,
+          'conversation.task.checkpoint',
+          {
+            operation: 'result',
+            resultId: source.id,
+            resultOffset: i * 100,
+          },
+          page,
+        ),
+      );
+      expect(() => manager.observe(load(`load-${i}`))).not.toThrow();
+    }
+    const restarted = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+    const repeatedPage = f.store((store) =>
+      store.readResult(f.project.id, 'task', source.id, 500, 100, source.contentHash),
+    );
+    for (let i = 0; i < 3; i++) {
+      restarted.observe(
+        exchange(
+          `repeat-${i}`,
+          'conversation.task.checkpoint',
+          {
+            operation: 'result',
+            resultId: source.id,
+            resultOffset: 500,
+          },
+          repeatedPage,
+        ),
+      );
+      const next = () => restarted.observe(load(`repeat-load-${i}`));
+      if (i === 2) expect(next).toThrow('AGENT_PREPARATION_STALLED');
+      else expect(next).not.toThrow();
+    }
+  },
+);
+
 it('retains repeated-read supervision after manager reconstruction and runtime instructions', async () => {
   const f = await fixture();
   for (let i = 0; i < 3; i++) f.manager.observe(tool('read-' + i, 'v1', '完整正文'));
@@ -108,6 +303,157 @@ it('retains read supervision while recognizing distinct accepted review progress
   expect(() => recovered.observe(tool('source-after-review', 'v1', '共同原文'))).not.toThrow();
   expect(() => recovered.recordExecutionDirective('没有新增事实')).toThrow('CONTINUATION_STALLED');
 });
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'projects only the selected frozen user template and retains it across recovery (%s)',
+  async (protocol) => {
+    const f = await fixture();
+    const runtime = {
+      ...f.runtime,
+      protocol,
+      promptTemplateSnapshot: {
+        conversationId: 'c',
+        content: '通用要求',
+        rowVersion: 4,
+        templates: {
+          'video-prompt': '本次视频自定义正文',
+          'character-image': '角色模板专属正文',
+          'prop-image': '',
+        },
+      },
+      tools: [
+        { name: 'tools.load', description: '', parameters: {} },
+        { name: 'scene.update_shot_prompts', description: '', parameters: {} },
+      ],
+    } satisfies LlmGenerationRuntimeRequest;
+    const load = (kind: string | undefined, id: string): Context =>
+      ({
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'toolCall',
+                id,
+                name: 'tools.load',
+                arguments: {
+                  names: kind ? ['scene.update_shot_prompts'] : ['library.read'],
+                  workflow: kind,
+                },
+              },
+            ],
+            timestamp: 1,
+          },
+          {
+            role: 'toolResult',
+            toolName: 'tools.load',
+            toolCallId: id,
+            isError: false,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  status: 'tools_loaded',
+                  names: kind ? ['scene.update_shot_prompts'] : ['library.read'],
+                  loaded: kind
+                    ? ['scene.update_shot_prompts']
+                    : ['scene.update_shot_prompts', 'library.read'],
+                  workflow: kind,
+                }),
+              },
+            ],
+            timestamp: 2,
+          },
+        ],
+      }) as Context;
+    const context = load('video-prompt', 'video-template');
+    const prepared = f.manager.prepare(runtime, context).request;
+    const wireText = JSON.stringify({
+      prompt: prepared.prompt,
+      context: prepared.context,
+      turns: prepared.contextTurns,
+      system: prepared.systemInstruction,
+    });
+    expect(wireText.split('本次视频自定义正文')).toHaveLength(2);
+    expect(wireText).not.toContain('角色模板专属正文');
+    expect(prepared.systemInstruction).not.toContain('本次视频自定义正文');
+    f.manager.snapshot(runtime, context, 'document');
+    const recovered = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+    const savedRuntime = recovered.recovery()!.runtime;
+    expect(savedRuntime.promptTemplateSnapshot).toEqual(runtime.promptTemplateSnapshot);
+    const restored = recovered.prepare(savedRuntime, { messages: [] }).request;
+    expect(restored.prompt).toContain('本次视频自定义正文');
+    const character = recovered.prepare(
+      runtime,
+      load('character-image', 'character-template'),
+    ).request;
+    const characterText = JSON.stringify({
+      prompt: character.prompt,
+      turns: character.contextTurns,
+      system: character.systemInstruction,
+    });
+    expect(characterText).toContain('角色模板专属正文');
+    expect(characterText).not.toContain('本次视频自定义正文');
+    const afterReadLoad = recovered.prepare(runtime, load(undefined, 'read-only-template')).request;
+    const afterReadText = JSON.stringify({
+      prompt: afterReadLoad.prompt,
+      turns: afterReadLoad.contextTurns,
+      system: afterReadLoad.systemInstruction,
+    });
+    expect(afterReadText).toContain('角色模板专属正文');
+    expect(afterReadText).not.toContain('本次视频自定义正文');
+    const empty = recovered.prepare(runtime, load('prop-image', 'empty-template')).request;
+    expect(
+      JSON.stringify({
+        prompt: empty.prompt,
+        turns: empty.contextTurns,
+        system: empty.systemInstruction,
+      }),
+    ).not.toContain('角色模板专属正文');
+  },
+);
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'waits for an explicit bundle purpose before supplying any scoped template (%s)',
+  async (protocol) => {
+    const f = await fixture();
+    const templates = {
+      'character-image': '整包角色模板独有文字',
+      'scene-image': '整包场景模板独有文字',
+      'prop-image': '整包道具模板独有文字',
+      'video-prompt': '整包视频模板独有文字',
+      'shot-image': '不适用的静态镜头模板',
+    };
+    const runtime = {
+      ...f.runtime,
+      protocol,
+      tools: [{ name: 'production.bundle.submit', description: '', parameters: {} }],
+      promptTemplateSnapshot: { conversationId: 'c', content: '', rowVersion: 2, templates },
+    } satisfies LlmGenerationRuntimeRequest;
+    const projected = f.manager.prepare(runtime, { messages: [] }).request;
+    for (const kind of ['character-image', 'scene-image', 'prop-image', 'video-prompt'] as const)
+      expect(projected.prompt).not.toContain(templates[kind]);
+    expect(projected.prompt).not.toContain(templates['shot-image']);
+    expect(projected.systemInstruction).not.toContain(templates['character-image']);
+    f.manager.snapshot(runtime, { messages: [] }, 'document');
+    const restored = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+    const saved = restored.recovery()!;
+    const recovered = restored.prepare(saved.runtime, saved).request;
+    expect(recovered.prompt).not.toContain(templates['scene-image']);
+    expect(recovered.prompt).not.toContain(templates['shot-image']);
+    const clearedRuntime = {
+      ...runtime,
+      generationId: 'cleared-bundle-generation',
+      promptTemplateSnapshot: { ...runtime.promptTemplateSnapshot, rowVersion: 3, templates: {} },
+    };
+    const next = new AgentContextManager(
+      f.projects,
+      clearedRuntime,
+      'cleared-bundle-task',
+      runtime.prompt,
+    );
+    const cleared = next.prepare(clearedRuntime, { messages: [] }).request;
+    for (const content of Object.values(templates)) expect(cleared.prompt).not.toContain(content);
+  },
+);
 async function fixture(window = 64000) {
   const directory = await mkdtemp(join(tmpdir(), 'context-manager-'));
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
@@ -191,6 +537,95 @@ function tool(
   } as Context;
 }
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'retains explicitly read working bodies for an unnamed request after soft compaction and restart (%s)',
+  async (protocol) => {
+    const f = await fixture(1000000);
+    const runtime = { ...f.runtime, protocol, prompt: '生成对应的场景与镜头的提示词' };
+    const manager = new AgentContextManager(f.projects, runtime, 'unnamed', runtime.prompt);
+    const unread = new ContentService(f.projects).saveDocument({
+      title: '未被选取的资料',
+      contentMarkdown: '未读正文不能自动进入请求',
+    });
+    f.manager.observe(tool('other-task-read', 'v1', '其他任务的已读正文'));
+    const bodies = [
+      '剧本对白'.repeat(1750),
+      '角色甲设定',
+      '角色乙设定',
+      '场景一设定',
+      '场景二设定',
+    ];
+    const context: Context = {
+      messages: bodies.flatMap((body, i) => tool(`read-${i}`, 'v1', body, `source-${i}`).messages),
+    };
+    for (let i = 0; i < 8; i++) {
+      const turn = tool(`navigation-${i}`, 'v1', '', 'none', 'library.search');
+      const assistant = turn.messages[0]!;
+      if (assistant.role === 'assistant')
+        assistant.content.unshift({ type: 'text', text: '旧过程说明'.repeat(12000) });
+      context.messages.push(...turn.messages);
+    }
+    const request = manager.prepare(runtime, context).request;
+    expect(request.contextTurns!.length).toBeLessThan(13);
+    for (const body of bodies) expect(JSON.stringify(request).split(body)).toHaveLength(2);
+    expect(JSON.stringify(request)).not.toContain(unread.currentVersion!.contentMarkdown);
+    expect(JSON.stringify(request)).not.toContain('其他任务的已读正文');
+    expect(request.systemInstruction).not.toContain(bodies[0]);
+    manager.snapshot(runtime, context, 'document');
+    const restarted = new AgentContextManager(f.projects, runtime, 'unnamed', runtime.prompt);
+    const restored = restarted.prepare(runtime, { messages: [] }).request;
+    for (const body of bodies) expect(restored.prompt.split(body)).toHaveLength(2);
+    // Neither restart nor context recovery may turn an explicitly read body into only a receipt.
+    expect(restarted.recoverContextOverflow()).toBe(true);
+    for (const body of bodies)
+      expect(restarted.prepare(runtime, { messages: [] }).request.prompt).toContain(body);
+  },
+);
+it('keeps current requirement IDs usable by the plan contract while deduplicating their text', async () => {
+  const f = await fixture();
+  const constraints = '所有镜头必须保留原始对白。'.repeat(600);
+  const prompt = `【本会话要求约束】\n${constraints}\n\n【用户本次请求】\n生成对应的场景与镜头的提示词`;
+  const runtime = { ...f.runtime, prompt };
+  const manager = new AgentContextManager(f.projects, runtime, 'requirement-ids', prompt);
+  const request = manager.prepare(runtime, { messages: [] }).request;
+  const { taskState: state } = JSON.parse(request.prompt.split('\n').at(-1)!) as {
+    taskState: { userRequirements: Array<{ id: string; alreadyIncluded?: string }> };
+  };
+  expect(state.userRequirements).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: 'original', alreadyIncluded: 'current_user_request' }),
+      expect.objectContaining({
+        id: 'session-constraints',
+        alreadyIncluded: 'active_user_requirements',
+      }),
+    ]),
+  );
+  expect(request.prompt.split(constraints)).toHaveLength(2);
+  const original = state.userRequirements.find((r) => r.id === 'original')!;
+  expect(() =>
+    f.projects.access(true, (db, project) =>
+      saveTaskPlan(
+        db,
+        project.id,
+        runtime.generationId,
+        [
+          {
+            key: 'scenes',
+            toolName: 'scene.submit_structure',
+            minimumCount: 1,
+            intent: 'create',
+            origin: 'user_requirement',
+            sourceRequirementIds: [original.id],
+          },
+        ],
+        manager.taskId,
+      ),
+    ),
+  ).not.toThrow();
+  expect(manager.taskState.userRequirements.find((r) => r.id === 'session-constraints')?.text).toBe(
+    constraints,
+  );
+});
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'archives older turns for latency while preserving the latest batch and unlimited input (%s)',
   async (protocol) => {
     const f = await fixture(512000);
@@ -206,7 +641,10 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
     const projected = f.manager.prepare(f.runtime, { messages }).request;
     expect(projected.contextTurns!.length).toBeLessThan(10);
     expect(projected.contextTurns!.at(-1)!.calls[0]!.id).toBe('history-9');
-    expect(projected.contextTurns!.at(-1)!.outputs[0]!.output).toContain('完整源稿9');
+    expect(projected.contextTurns!.at(-1)!.outputs[0]!.output).toContain(
+      'selected_source_included',
+    );
+    expect(JSON.stringify(projected).split('完整源稿9')).toHaveLength(2);
     expect(f.manager.lastInfo?.limitEnforcement).toBe('advisory_fallback');
     const first = f.store((s) => s.resultForCall(f.project.id, 'task', 'history-0'))!;
     expect(first.content).toContain('完整源稿0');
@@ -438,7 +876,7 @@ describe('AgentContextManager durable lifecycle', () => {
     const restored = new AgentContextManager(f.projects, f.runtime, 'task', f.runtime.prompt);
     expect(restored.taskState.generatedArtifacts.map((a) => a.callId)).toEqual(['committed']);
   });
-  it('retains explicitly selected source content once across cleared history and restart without injecting unrelated sources', async () => {
+  it('retains the named source and explicitly read supporting material once across cleared history and restart', async () => {
     const f = await fixture();
     const runtime = { ...f.runtime, prompt: '依据 document-selected 完成所有制作草稿' };
     const manager = new AgentContextManager(f.projects, runtime, 'selected-task', runtime.prompt);
@@ -452,7 +890,7 @@ describe('AgentContextManager durable lifecycle', () => {
     const restarted = new AgentContextManager(f.projects, runtime, 'selected-task', runtime.prompt);
     const restored = restarted.prepare(runtime, { messages: [] }).request;
     expect(restored.prompt).toContain('当前选择的原始剧情事实');
-    expect(restored.prompt).not.toContain('其他资料仅按需读取');
+    expect(restored.prompt).toContain('其他资料仅按需读取');
     expect(restored.systemInstruction).not.toContain('当前选择的原始剧情事实');
     const updated = tool('updated', 'v2', '当前选择的新版本剧情事实', 'document-selected');
     const latest = restarted.prepare(runtime, updated).request;
@@ -715,73 +1153,78 @@ describe('AgentContextManager durable lifecycle', () => {
     });
     expect(restored.taskState.taskGoal).toBe(f.runtime.prompt);
   });
-  it('keeps an explicitly read skill once after clearing history, compaction and restart', async () => {
-    const f = await fixture();
-    const context = tool('skill', 'v1', '', 'none', 'production.skill.read', {
-      skillId: 'script-to-media',
-    });
-    const declaration = readProductionSkill({ skillId: 'script-to-media' });
-    (
-      context.messages[1] as {
-        content: unknown;
-      }
-    ).content = [{ type: 'text', text: JSON.stringify(declaration) }];
-    f.manager.snapshot(f.runtime, context, 'document');
-    const request = f.manager.prepare(f.runtime, context).request;
-    expect(JSON.stringify(request).split(declaration.instructions.split('。')[0]!)).toHaveLength(1);
-    const restarted = new AgentContextManager(f.projects, f.runtime, 'task', f.runtime.prompt);
-    const cleared = restarted.prepare(f.runtime, { messages: [] }).request;
-    expect(cleared.prompt).not.toContain(JSON.stringify(declaration.instructions).slice(1, -1));
-    expect(cleared.prompt).toContain('"skillId":"script-to-media"');
-    const skillResultId = f.store((s) => s.resultForCall(f.project.id, 'task', 'skill')?.id);
-    expect(skillResultId).toBeDefined();
-    expect(cleared.prompt).toContain(`"resultId":"${skillResultId}"`);
-    expect(cleared.systemInstruction).not.toContain(declaration.instructions);
-    expect(f.store((s) => s.evidence(f.project.id, 'task'))).toEqual([
-      expect.objectContaining({
-        sourceKey: 'skill:script-to-media',
-        sourceVersion: String(declaration.revision),
-      }),
-    ]);
-    expect(f.store((s) => s.resultForCall(f.project.id, 'task', 'skill'))?.content).toBe(
-      JSON.stringify(declaration),
-    );
-    const update = tool('skill-update', 'v2', '', 'none', 'production.skill.read');
-    (
-      update.messages[1] as {
-        content: unknown;
-      }
-    ).content = [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          ...declaration,
-          revision: String(declaration.revision + 1),
-          instructions: '新的有效任务声明',
+  it.each(['script-to-media', 'chapters-to-script'])(
+    'keeps an explicitly read %s declaration once after clearing history, compaction and restart',
+    async (skillId) => {
+      const f = await fixture();
+      const context = tool('skill', 'v1', '', 'none', 'production.skill.read', {
+        skillId,
+      });
+      const declaration = readProductionSkill({ skillId });
+      (
+        context.messages[1] as {
+          content: unknown;
+        }
+      ).content = [{ type: 'text', text: JSON.stringify(declaration) }];
+      f.manager.snapshot(f.runtime, context, 'document');
+      const request = f.manager.prepare(f.runtime, context).request;
+      const firstSentence = declaration.instructions.split('。')[0]!;
+      expect(JSON.stringify(request).split(firstSentence)).toHaveLength(2);
+      const restarted = new AgentContextManager(f.projects, f.runtime, 'task', f.runtime.prompt);
+      const cleared = restarted.prepare(f.runtime, { messages: [] }).request;
+      expect(cleared.prompt).toContain(JSON.stringify(declaration.instructions).slice(1, -1));
+      expect(JSON.stringify(cleared).split(firstSentence)).toHaveLength(2);
+      expect(cleared.prompt).toContain(`"skillId":"${skillId}"`);
+      const skillResultId = f.store((s) => s.resultForCall(f.project.id, 'task', 'skill')?.id);
+      expect(skillResultId).toBeDefined();
+      expect(cleared.prompt).toContain(`"resultId":"${skillResultId}"`);
+      expect(cleared.systemInstruction).not.toContain(declaration.instructions);
+      expect(f.store((s) => s.evidence(f.project.id, 'task'))).toEqual([
+        expect.objectContaining({
+          sourceKey: `skill:${skillId}`,
+          sourceVersion: String(declaration.revision),
         }),
-      },
-    ];
-    restarted.observe(update);
-    const latest = restarted.prepare(f.runtime, {
-      messages: [...context.messages, ...update.messages],
-    }).request;
-    const updatedSkillId = f.store(
-      (s) => s.resultForCall(f.project.id, 'task', 'skill-update')?.id,
-    );
-    expect(updatedSkillId).toBeDefined();
-    expect(f.store((s) => s.evidence(f.project.id, 'task'))).toEqual([
-      expect.objectContaining({
-        sourceVersion: String(declaration.revision + 1),
-        resultId: updatedSkillId,
-      }),
-    ]);
-    expect(JSON.stringify(latest.contextTurns)).toContain(updatedSkillId!);
-    expect(JSON.stringify(latest)).not.toContain('新的有效任务声明');
-    expect(JSON.stringify(latest)).not.toContain(declaration.instructions);
-    expect(f.store((s) => s.resultForCall(f.project.id, 'task', 'skill'))!.content).toBe(
-      JSON.stringify(declaration),
-    );
-  });
+      ]);
+      expect(f.store((s) => s.resultForCall(f.project.id, 'task', 'skill'))?.content).toBe(
+        JSON.stringify(declaration),
+      );
+      const update = tool('skill-update', 'v2', '', 'none', 'production.skill.read');
+      (
+        update.messages[1] as {
+          content: unknown;
+        }
+      ).content = [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            ...declaration,
+            revision: String(declaration.revision + 1),
+            instructions: '新的有效任务声明',
+          }),
+        },
+      ];
+      restarted.observe(update);
+      const latest = restarted.prepare(f.runtime, {
+        messages: [...context.messages, ...update.messages],
+      }).request;
+      const updatedSkillId = f.store(
+        (s) => s.resultForCall(f.project.id, 'task', 'skill-update')?.id,
+      );
+      expect(updatedSkillId).toBeDefined();
+      expect(f.store((s) => s.evidence(f.project.id, 'task'))).toEqual([
+        expect.objectContaining({
+          sourceVersion: String(declaration.revision + 1),
+          resultId: updatedSkillId,
+        }),
+      ]);
+      expect(JSON.stringify(latest.contextTurns)).toContain(updatedSkillId!);
+      expect(JSON.stringify(latest).split('新的有效任务声明')).toHaveLength(2);
+      expect(JSON.stringify(latest)).not.toContain(firstSentence);
+      expect(f.store((s) => s.resultForCall(f.project.id, 'task', 'skill'))!.content).toBe(
+        JSON.stringify(declaration),
+      );
+    },
+  );
   it('uses native segment feedback for planning, resets recovery after success and recalculates on model switch', async () => {
     const f = await fixture();
     const runtime = { ...f.runtime, systemInstruction: '策略'.repeat(3000) };
@@ -855,13 +1298,9 @@ describe('AgentContextManager durable lifecycle', () => {
     f.manager.snapshot(f.runtime, restored, 'document');
     const request = f.manager.prepare(f.runtime, restored).request;
     const archived = JSON.parse(request.contextTurns![0]!.calls[0]!.argumentsJson) as {
-      resultId: string;
-      read: {
-        resultView: string;
-        expectedHash: string;
-      };
+      preparedArguments: { resultId: string };
     };
-    expect(archived.read.resultView).toBe('arguments');
+    expect(archived.preparedArguments.resultId).toBeDefined();
     let body = '',
       offset: number | null = 0;
     while (offset !== null) {
@@ -869,10 +1308,10 @@ describe('AgentContextManager durable lifecycle', () => {
         s.readResult(
           f.project.id,
           'task',
-          archived.resultId,
+          archived.preparedArguments.resultId,
           offset!,
           4096,
-          archived.read.expectedHash,
+          undefined,
           'arguments',
         ),
       );
@@ -881,6 +1320,74 @@ describe('AgentContextManager durable lifecycle', () => {
     }
     expect(JSON.parse(body)).toEqual(args);
   });
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    'projects reusable submission arguments as valid references across restart (%s)',
+    async (protocol) => {
+      const f = await fixture();
+      const runtime = { ...f.runtime, protocol };
+      const args = {
+        partKey: 'retained',
+        expectedRevision: 7,
+        prompts: [
+          {
+            localKey: 'hero',
+            kind: 'character',
+            title: '沈砚舟',
+            prompt: '  哈哈110\r\n\n'.repeat(600),
+          },
+        ],
+      };
+      const context = tool(
+        'retained-submit',
+        'v1',
+        'binding error',
+        'none',
+        'production.bundle.submit',
+        args,
+      );
+      Object.assign(context.messages[1]!, { isError: true });
+      f.manager.snapshot(runtime, context, 'document');
+      const restarted = new AgentContextManager(f.projects, runtime, 'task', runtime.prompt);
+      const recovered = restarted.recovery()!;
+      const request = restarted.prepare(runtime, recovered).request;
+      const call = request.contextTurns![0]!.calls[0]!;
+      const reference = JSON.parse(call.argumentsJson) as Record<string, unknown>;
+      expect(reference).toHaveProperty('preparedArguments.resultId');
+      expect(reference).not.toHaveProperty('archivedArguments');
+      const definition = preparedArgumentsDefinition(
+        SYSTEM_AGENT_TOOLS.find((t) => t.name === call.name)!,
+      );
+      expect(() => {
+        validateToolArguments(definition, {
+          type: 'toolCall',
+          id: call.id,
+          name: call.name,
+          arguments: reference,
+        });
+      }).not.toThrow();
+      const resolved = f.store((s) =>
+        resolvePreparedArguments(s, f.project.id, 'task', call.name, reference),
+      );
+      expect(resolved).toEqual(args);
+      // Existing snapshots still contain the old history-only marker.
+      for (const message of recovered.messages) {
+        if (message.role !== 'assistant') continue;
+        for (const part of message.content) {
+          if (part.type !== 'toolCall') continue;
+          part.arguments = {
+            archivedArguments: true,
+            resultId: (reference.preparedArguments as { resultId: string }).resultId,
+            read: { operation: 'result', resultView: 'arguments' },
+          };
+        }
+      }
+      restarted.snapshot(runtime, recovered, 'document');
+      expect(
+        restarted.prepare(runtime, { messages: restarted.compactHistory(recovered) }).request
+          .contextTurns![0]!.calls[0]!.argumentsJson,
+      ).toBe(call.argumentsJson);
+    },
+  );
   it('tracks real navigation revisions across three updates instead of schema version 1', async () => {
     const f = await fixture();
     const history: Context = { messages: [] };
@@ -1196,6 +1703,41 @@ it('restores the latest visual working set after snapshot projection and restart
     expect.objectContaining({ dataUrl: 'data:image/png;base64,aW1hZ2U=' }),
   ]);
   expect(f.runtime.attachments).toBeUndefined();
+});
+it('replaces inherited session templates with the new submission while retaining explicit user intent', async () => {
+  const f = await fixture();
+  const parent = new AgentContextManager(
+    f.projects,
+    { ...f.runtime, generationId: 'template-parent-generation' },
+    'template-parent-task',
+    '【本会话要求约束】\n旧模板已废弃\n\n【用户本次请求】\n创作镜头',
+  );
+  expect(parent.taskState.userRequirements.map((r) => r.text)).toContain('旧模板已废弃');
+  parent.recordUserRequirement('明确保留原始对白', 'dialogue');
+  parent.finish('completed');
+  const runtime = {
+    ...f.runtime,
+    generationId: 'new',
+    prompt: '【本会话要求约束】\n新模板要求\n\n【用户本次请求】\n继续',
+  };
+  const next = new AgentContextManager(f.projects, runtime, 'new-task', runtime.prompt);
+  const route = tool('replace-template-route', 'v1', '', 'none', 'conversation.task.route');
+  const result = route.messages[1]!;
+  if (result.role !== 'toolResult') throw new Error('fixture');
+  result.content = [
+    {
+      type: 'text',
+      text: JSON.stringify({
+        status: 'routed',
+        decision: 'follow_up',
+        targetGenerationId: 'template-parent-generation',
+      }),
+    },
+  ];
+  next.observe(route);
+  expect(next.taskState.userRequirements.map((r) => r.text)).toContain('明确保留原始对白');
+  expect(next.taskState.userRequirements.map((r) => r.text)).not.toContain('旧模板已废弃');
+  expect(next.prepare(runtime, { messages: [] }).request.prompt).toContain('新模板要求');
 });
 it('inherits earlier user requirements only through an explicit successful follow-up route', async () => {
   const f = await fixture();

@@ -910,6 +910,8 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     'inferenceSettings',
     'modelCapabilities',
     'contextTurns',
+    'toolCallMode',
+    'requiredTool',
     'attemptId',
     'projectId',
     'projectSessionId',
@@ -926,6 +928,17 @@ function validateStartParams(params: NativeProviderStreamStartParams): void {
     'tools',
     'continuation',
   ]);
+  if (
+    params.toolCallMode !== undefined &&
+    !['single', 'parallel-readonly'].includes(params.toolCallMode)
+  )
+    throw new Error('Invalid tool call mode.');
+  if (
+    params.requiredTool !== undefined &&
+    (typeof params.requiredTool !== 'string' ||
+      !params.tools?.some((tool) => tool.name === params.requiredTool))
+  )
+    throw new Error('Required output tool must be present in the authorized tool list.');
   if (params.contextTurns) {
     if (params.continuation)
       throw new Error('Cannot combine rebuilt context turns and provider continuation.');

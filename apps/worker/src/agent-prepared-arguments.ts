@@ -21,6 +21,98 @@ export type PreparedArgumentsRef = {
     value?: unknown;
   }>;
 };
+/** Older history snapshots used this storage-only marker in place of tool arguments. */
+export function isArchivedArguments(input: unknown): input is Record<string, unknown> {
+  return (
+    !!input &&
+    typeof input === 'object' &&
+    !Array.isArray(input) &&
+    (input as Record<string, unknown>).archivedArguments === true &&
+    Object.keys(input).every((key) => ['archivedArguments', 'resultId', 'read'].includes(key))
+  );
+}
+export class ArchivedArgumentsError extends Error {}
+function rejectArchivedArguments(
+  store: AgentContextStore,
+  projectId: string,
+  taskId: string,
+  tool: string,
+  input: unknown,
+): void {
+  if (!isArchivedArguments(input)) return;
+  const result =
+    typeof input.resultId === 'string'
+      ? store.result(projectId, taskId, input.resultId)
+      : undefined;
+  const read = result
+    ? JSON.stringify({
+        operation: 'result',
+        resultId: result.id,
+        resultView:
+          result.toolName === tool && result.status !== 'completed' ? 'arguments' : 'content',
+      })
+    : undefined;
+  const original = result?.arguments;
+  const retry =
+    result?.toolName === tool &&
+    result.status !== 'completed' &&
+    original &&
+    typeof original === 'object' &&
+    !Array.isArray(original) &&
+    Object.keys(original).length &&
+    !isArchivedArguments(original) &&
+    !Object.hasOwn(original, 'preparedArguments')
+      ? JSON.stringify({ preparedArguments: { resultId: result.id } })
+      : undefined;
+  throw new ArchivedArgumentsError(
+    [
+      'ARCHIVED_ARGUMENTS_NOT_EXECUTABLE: archivedArguments/resultId/read is a history storage pointer, not prompt content or tool arguments. No write occurred; this pointer was not retained as a retry candidate.',
+      result?.toolName === 'production.bundle.submission'
+        ? 'The referenced result is a saved bundle receipt and has no original submission arguments. Do not resubmit it or wrap it in preparedArguments.'
+        : result?.status === 'completed'
+          ? 'The referenced operation already completed. Inspect its receipt; do not replay a completed write.'
+          : undefined,
+      retry
+        ? `Retry ${tool} with ${retry}, adding only explicit corrections. Original schema, authorization, partKey and CAS still apply.`
+        : undefined,
+      read
+        ? `Read the referenced record using conversation.task.checkpoint ${read}.`
+        : 'The reference is unavailable in this task. Use a result ID returned by this task; never invent one.',
+      tool === 'production.bundle.submit'
+        ? 'Use production.bundle operation=state for current revision, purpose and candidate manifest; continue missing work. A new submission requires real partKey, expectedRevision and ordinary prompts, or a same-tool preparedArguments reference to actual arguments.'
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+}
+export function isNewDocumentDraftArguments(
+  tool: string | undefined,
+  input: unknown,
+): input is Record<string, unknown> {
+  return (
+    tool === 'document.submit_draft' &&
+    input !== null &&
+    typeof input === 'object' &&
+    !Array.isArray(input) &&
+    !Object.hasOwn(input, 'documentId') &&
+    ['workspace:documents', 'workspace:characters', 'workspace:novel'].includes(
+      String((input as Record<string, unknown>).resourceId),
+    )
+  );
+}
+/** Canonicalize only a redundant null on an unambiguous create, never target CAS. */
+export function normalizeDraftCreationArguments(tool: string, input: unknown): unknown {
+  if (
+    !isNewDocumentDraftArguments(tool, input) ||
+    Object.hasOwn(input, 'expectedDocumentRowVersion') ||
+    input.baseVersionId !== null
+  )
+    return input;
+  const normalized = { ...input };
+  delete normalized.baseVersionId;
+  return normalized;
+}
 export function preparedArgumentsDefinition(definition: LlmToolDefinition): LlmToolDefinition {
   if (!PREPARED_ARGUMENT_TOOLS.has(definition.name)) return definition;
   const deletableFields = preparedDeletableFields(definition.name);
@@ -103,6 +195,7 @@ export function preservePreparedArguments(
 ): PreparedArgumentsRef {
   if (!PREPARED_ARGUMENT_TOOLS.has(tool))
     throw new Error('Tool does not support prepared arguments.');
+  rejectArchivedArguments(store, projectId, taskId, tool, args);
   const argumentsHash = contextContentHash(JSON.stringify(args));
   const callId = `prepared:${tool}:${argumentsHash}`;
   const result = store.putResult(
@@ -123,13 +216,14 @@ export function resolvePreparedArguments(
   tool: string,
   input: unknown,
 ): unknown {
+  rejectArchivedArguments(store, projectId, taskId, tool, input);
   if (
     !input ||
     typeof input !== 'object' ||
     Array.isArray(input) ||
     !('preparedArguments' in input)
   )
-    return input;
+    return normalizeDraftCreationArguments(tool, input);
   if (!PREPARED_ARGUMENT_TOOLS.has(tool))
     throw new Error('Tool does not support prepared arguments.');
   const { preparedArguments, ...corrections } = input as Record<string, unknown>;
@@ -168,6 +262,8 @@ export function resolvePreparedArguments(
     throw new Error('PREPARED_ARGUMENTS_INTEGRITY_FAILED');
   if (!result.arguments || typeof result.arguments !== 'object' || Array.isArray(result.arguments))
     throw new Error('Stored arguments must be an object.');
+  // Older versions could retain the pointer itself after rejecting it. Never rewrap it.
+  rejectArchivedArguments(store, projectId, taskId, tool, result.arguments);
   const merged = structuredClone(result.arguments) as Record<string, unknown>;
   if (
     tool === 'production.bundle.submit' &&
@@ -245,7 +341,7 @@ export function resolvePreparedArguments(
       );
     patchBundleArguments(merged, ref.patches, submission);
   }
-  return { ...merged, ...corrections };
+  return normalizeDraftCreationArguments(tool, { ...merged, ...corrections });
 }
 /** Apply only model-supplied corrections, never infer missing creative content. */
 function patchBundleArguments(

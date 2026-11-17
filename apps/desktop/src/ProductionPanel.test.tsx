@@ -949,7 +949,7 @@ describe('ProductionPanel', () => {
     const view = render(<ProductionPanel {...props} />);
     expect(await screen.findByText('首帧与尾帧')).toBeInTheDocument();
     view.rerender(<ProductionPanel {...props} capability="REFERENCE_TO_IMAGE" />);
-    expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
     expect(screen.queryByText('首帧与尾帧')).not.toBeInTheDocument();
   });
   it('seeds the image prompt and asset kind from a character document', async () => {
@@ -1641,12 +1641,11 @@ describe('ProductionPanel', () => {
     );
     expect(await screen.findByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
     rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={1} writable />);
-    const profileSelect = await screen.findByLabelText('供应商连接');
+    await waitFor(() => expect(modelListCalls).toBe(1));
     expect(
-      await screen.findByRole('option', { name: 'UniCompAPI A · UniCompAPI' }),
-    ).toBeInTheDocument();
-    fireEvent.change(profileSelect, { target: { value: unicompProfile.id } });
-    expect(await screen.findByText('当前连接没有兼容模型')).toBeInTheDocument();
+      screen.queryByRole('option', { name: 'UniCompAPI A · UniCompAPI' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '没有可用连接' })).toBeInTheDocument();
     rerender(<ProductionPanel capability="TEXT_TO_IMAGE" providerSettingsRevision={2} writable />);
     expect(await screen.findByRole('option', { name: 'qwen-image' })).toBeInTheDocument();
   });
@@ -2445,6 +2444,40 @@ describe('ProductionPanel', () => {
     ).toBeInTheDocument();
     expect(callWorker).toHaveBeenCalledWith('media.task.cancel', { jobId: 'video-job' });
   });
+  it('offers query recovery for a legacy parser failure without submitting a new video', async () => {
+    const failed = videoJob('failed');
+    failed.error = 'Native Provider error is invalid.';
+    failed.metadata.failureKind = 'transport';
+    mockWorker((method) => {
+      if (method === 'adapter.catalog') return Promise.resolve(videoCatalog);
+      if (method === 'adapter.resolve') return Promise.resolve(videoDescriptor);
+      if (method === 'generation.draft.get') return Promise.resolve(null);
+      if (method === 'video.generate.resume') return Promise.resolve(videoJob('polling'));
+      throw new Error(`Unexpected method ${method}`);
+    });
+    render(
+      <ProductionPanel
+        projectId="project"
+        shotId="shot"
+        writable
+        assets={[]}
+        videoJobs={[failed]}
+      />,
+    );
+    const recovery = await screen.findByRole('button', { name: '恢复查询' });
+    expect(screen.getByText(/查询已停止，服务端可能仍在处理或已完成/)).toBeInTheDocument();
+    expect(screen.queryByText(/无法连接生成服务/)).not.toBeInTheDocument();
+    fireEvent.click(recovery);
+    await waitFor(() =>
+      expect(callWorker).toHaveBeenCalledWith('video.generate.resume', { jobId: failed.id }),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith(
+      'media.generation.requestSubmission',
+      expect.anything(),
+    );
+    expect(callWorker).not.toHaveBeenCalledWith('video.generate.prepare', expect.anything());
+  });
+
   it('opens the asset library when a completed video task is selected', async () => {
     const onOpenAssetLibrary = vi.fn();
     const completed = {

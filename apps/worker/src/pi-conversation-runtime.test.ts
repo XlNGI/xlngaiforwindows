@@ -1409,33 +1409,20 @@ describe('PiConversationRuntime', () => {
 });
 
 describe('appendAssistantText', () => {
-  it('does not duplicate a completed turn when responseId arrives after streaming', () => {
+  it('refreshes cumulative snapshots without trimming text', () => {
     const accumulator: AssistantTextAccumulator = { aggregate: '', segment: '' };
-    appendAssistantText(accumulator, fauxAssistantMessage('I will search the library.'));
-    appendAssistantText(
-      accumulator,
-      fauxAssistantMessage('I will search the library.', { responseId: 'resp-1' }),
-    );
-    expect(accumulator.aggregate).toBe('I will search the library.');
-    expect(accumulator.responseId).toBe('resp-1');
+    for (const text of ['\n', '\n哈', '\n哈哈110\n\n']) {
+      appendAssistantText(accumulator, fauxAssistantMessage(text, { responseId: 'turn-1' }));
+    }
+    expect(accumulator.aggregate).toBe('\n哈哈110\n\n');
+    appendAssistantText(accumulator, fauxAssistantMessage('修订\n', { responseId: 'turn-1' }));
+    expect(accumulator.aggregate).toBe('修订\n');
   });
-
-  it('keeps later tool-round text without replaying the previous paragraph', () => {
+  it('preserves identical text from different responses', () => {
     const accumulator: AssistantTextAccumulator = { aggregate: '', segment: '' };
-    appendAssistantText(accumulator, fauxAssistantMessage('I will search the library.'));
-    appendAssistantText(
-      accumulator,
-      fauxAssistantMessage('I will search the library.', { responseId: 'resp-1' }),
-    );
-    appendAssistantText(
-      accumulator,
-      fauxAssistantMessage('\n\nI will search the library.', { responseId: 'resp-1' }),
-    );
-    appendAssistantText(accumulator, fauxAssistantMessage('Search hit 3 results.'));
-    appendAssistantText(
-      accumulator,
-      fauxAssistantMessage('Search hit 3 results.', { responseId: 'resp-2' }),
-    );
-    expect(accumulator.aggregate).toBe('I will search the library.\n\nSearch hit 3 results.');
+    appendAssistantText(accumulator, fauxAssistantMessage('哈哈', { responseId: 'turn-1' }));
+    appendAssistantText(accumulator, fauxAssistantMessage('哈哈', { responseId: 'turn-2' }));
+    appendAssistantText(accumulator, fauxAssistantMessage('哈哈110', { responseId: 'turn-2' }));
+    expect(accumulator.aggregate).toBe('哈哈\n\n哈哈110');
   });
 });

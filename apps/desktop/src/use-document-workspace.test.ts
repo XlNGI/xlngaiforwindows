@@ -4,6 +4,8 @@ import type { DocumentDetail } from '@ai-video/contracts';
 import { useDocumentWorkspace } from './use-document-workspace';
 import { callWorker } from './worker-client';
 import { selectWorkerScope } from './worker-scope';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readMarkdownDocument } from './markdown-import-client';
 vi.mock('./worker-client', () => ({ callWorker: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 vi.mock('./markdown-import-client', () => ({ readMarkdownDocument: vi.fn() }));
@@ -38,6 +40,8 @@ describe('useDocumentWorkspace close', () => {
     openDocumentWorkspace.mockReset();
     syncDetachedPanel.mockReset();
     vi.mocked(callWorker).mockReset();
+    vi.mocked(openDialog).mockReset();
+    vi.mocked(readMarkdownDocument).mockReset();
   });
   const renderWorkspace = () =>
     renderHook(() =>
@@ -48,6 +52,79 @@ describe('useDocumentWorkspace close', () => {
         closeDocumentPanel,
       }),
     );
+  it('preserves unsaved text when new or import is requested', async () => {
+    const { result } = renderWorkspace();
+    act(() => {
+      result.current.setDocumentTitle('未保存剧本');
+      result.current.setDocumentContent('第一场\n甲：等等。');
+    });
+    act(() => expect(result.current.newDocument('plan')).toBe(false));
+    await act(async () => result.current.importMarkdownDocument('plan'));
+    expect(result.current.documentTitle).toBe('未保存剧本');
+    expect(result.current.documentContent).toBe('第一场\n甲：等等。');
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(callWorker).not.toHaveBeenCalledWith('document.draft.save', expect.anything());
+  });
+  it.each(['cancel', 'read-error', 'dialog-error'] as const)(
+    'keeps the selected document after import %s',
+    async (outcome) => {
+      vi.mocked(callWorker).mockImplementation((method) =>
+        Promise.resolve(
+          method === 'document.get'
+            ? savedDocument
+            : method === 'document.list'
+              ? [savedDocument]
+              : [],
+        ),
+      );
+      const { result } = renderWorkspace();
+      await act(async () => result.current.selectDocument(savedDocument));
+      if (outcome === 'dialog-error')
+        vi.mocked(openDialog).mockRejectedValue(new Error('文件选择失败'));
+      else vi.mocked(openDialog).mockResolvedValue(outcome === 'cancel' ? null : 'D:\\剧本.txt');
+      vi.mocked(readMarkdownDocument).mockRejectedValue(new Error('文件读取失败'));
+      await act(async () => result.current.importMarkdownDocument('plan'));
+      expect(result.current.contentBusy).toBe(false);
+      expect(result.current.document?.id).toBe(savedDocument.id);
+      expect(result.current.documentContent).toBe('# draft');
+      expect(callWorker).not.toHaveBeenCalledWith('document.draft.save', expect.anything());
+      if (outcome !== 'cancel')
+        expect(result.current.contentMessage).toBe(
+          outcome === 'dialog-error' ? '文件选择失败' : '文件读取失败',
+        );
+    },
+  );
+  it('does not import a file into a previous project after switching during file selection', async () => {
+    selectWorkerScope({ projectId: 'A', projectSessionId: 'A-epoch' });
+    let finish!: (value: string) => void;
+    vi.mocked(openDialog).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { result, rerender } = renderWorkspace();
+    let importing!: Promise<void>;
+    act(() => {
+      importing = result.current.importMarkdownDocument('outline');
+    });
+    expect(result.current.contentBusy).toBe(true);
+    act(() => expect(result.current.newDocument()).toBe(false));
+    selectWorkerScope({ projectId: 'B', projectSessionId: 'B-epoch' });
+    rerender();
+    act(() => {
+      result.current.setDocumentTitle('B 剧本');
+      result.current.setContentBusy(true);
+    });
+    await act(async () => {
+      finish('D:\\A.txt');
+      await importing;
+    });
+    expect(readMarkdownDocument).not.toHaveBeenCalled();
+    expect(result.current.documentTitle).toBe('B 剧本');
+    expect(result.current.contentBusy).toBe(true);
+    selectWorkerScope(undefined);
+  });
   it('loads and saves a character voice inline, includes it in close protection, and reopens it', async () => {
     const character: DocumentDetail = {
       ...savedDocument,

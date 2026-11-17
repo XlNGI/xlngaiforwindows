@@ -2,6 +2,7 @@ import { tmpdir } from 'node:os';
 import { AgentInputService } from './agent-input-service.js';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { resolveSceneMedia } from './scene-media-service.js';
+import { LocalMediaImportService } from './local-media-import-service.js';
 import { ProductionService } from './production-service.js';
 import { ImageThumbnailService } from './image-thumbnail-service.js';
 import { ShotContinuityService } from './shot-continuity-service.js';
@@ -110,6 +111,7 @@ import {
   type WorkerRequest,
   type WorkerResponse,
   inferUnifiedAgentCapabilityHint,
+  modelSupportsGenerationAdapter,
 } from '@ai-video/contracts';
 import { LlmProviderError, OpenAIResponsesProvider } from '@ai-video/llm';
 import {
@@ -263,17 +265,16 @@ function resolveMediaSelectionForRequest(
     if (!adapter.capability.endsWith('TO_IMAGE')) {
       throw new ProviderProfileValidationError('The selected adapter is not an image generator.');
     }
-    const supportsImage =
-      adapter.capability === 'REFERENCE_TO_IMAGE'
-        ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration === true
-        : model.capabilities.imageGeneration === true;
-    if (!supportsImage) {
+    if (!modelSupportsGenerationAdapter(model, adapter)) {
       throw new ProviderProfileValidationError(
         'The selected model does not support this image adapter.',
       );
     }
   } else {
-    if (!adapter.capability.endsWith('TO_VIDEO') || model.capabilities.videoGeneration !== true) {
+    if (
+      !adapter.capability.endsWith('TO_VIDEO') ||
+      !modelSupportsGenerationAdapter(model, adapter)
+    ) {
       throw new ProviderProfileValidationError(
         'The selected model does not support this video adapter.',
       );
@@ -387,7 +388,7 @@ export function modelMatchesUnifiedAgentRequest(
     };
   },
   providerType: string,
-  adapters: readonly { provider: string; model: string; capability: string }[],
+  adapters: readonly { provider: string; model: string; capability: string; apiVersion?: string }[],
   hasImageAttachment: boolean,
 ): boolean {
   if (!model.enabled || model.unavailableAt) return false;
@@ -405,13 +406,12 @@ export function modelMatchesUnifiedAgentRequest(
         parameterTemplateKey: model.parameterTemplateKey,
         contractStatus: model.contractStatus,
       }) &&
+      modelSupportsGenerationAdapter(model, adapter) &&
       (capability === 'image'
         ? adapter.capability === 'REFERENCE_TO_IMAGE'
         : adapter.capability === 'IMAGE_TO_VIDEO' || adapter.capability === 'REFERENCE_TO_VIDEO'),
   );
-  return capability === 'image'
-    ? model.capabilities.imageEditing === true || providerSupportsReference
-    : providerSupportsReference;
+  return providerSupportsReference;
 }
 
 function adapterMatchesCapability(
@@ -421,11 +421,11 @@ function adapterMatchesCapability(
     remoteModelId: string;
     parameterTemplateKey?: string;
     contractStatus?: string;
-    capabilities: { imageGeneration: boolean };
+    capabilities: { imageGeneration: boolean; imageEditing?: boolean; videoGeneration?: boolean };
   },
   capability: UnifiedAgentCapability | undefined,
 ): boolean {
-  if (adapter.model === 'openai-images' && model.capabilities.imageGeneration !== true) {
+  if (!modelSupportsGenerationAdapter(model, adapter)) {
     return false;
   }
   if (
@@ -685,6 +685,10 @@ const methods = new Set<WorkerMethod>([
   'production.read',
   'production.compile',
   'shot.continuity.get',
+  'shot.image.get',
+  'shot.prompt.preview',
+  'shot.image.save',
+  'shot.videoImages.save',
   'shot.continuity.assets',
   'shot.continuity.import',
   'shot.continuity.probe',
@@ -767,6 +771,8 @@ const methods = new Set<WorkerMethod>([
   'task.schedule.create',
   'task.schedule.cancel',
   'asset.list',
+  'document.images.import',
+  'document.images.unbind',
   'scene.media.resolve',
   'asset.thumbnail',
   'asset.preview',
@@ -951,11 +957,18 @@ function createProjectRuntimeServices() {
     undefined,
     executionPool,
   );
+  const localMediaImportService = new LocalMediaImportService(
+    projectService,
+    imageGenerationService,
+    undefined,
+    executionPool,
+  );
   const shotContinuityService = new ShotContinuityService(
     projectService,
     imageGenerationService,
     undefined,
     executionPool,
+    localMediaImportService,
   );
   const taskScheduleService = new TaskScheduleService(projectService, {
     enabled: process.env.AI_VIDEO_TASK_SCHEDULER_ENABLED !== '0',
@@ -1147,6 +1160,7 @@ function createProjectRuntimeServices() {
     generationService,
     mediaPreparationService,
     shotContinuityService,
+    localMediaImportService,
     roughCutService,
     taskScheduleService,
     mediaOrchestrationService,
@@ -1631,6 +1645,7 @@ async function handleRequestCore(
     dubbingService,
     agentProviderLoopService,
     shotContinuityService,
+    localMediaImportService,
     piConversationRuntime,
     roughCutService,
     novelBatchService,
@@ -1774,6 +1789,35 @@ async function handleRequestCore(
             params.target as import('@ai-video/contracts').ProductionTarget,
           );
           break;
+        case 'shot.prompt.preview': {
+          const input =
+            params as unknown as import('@ai-video/contracts').WorkerMethodMap['shot.prompt.preview']['params'];
+          result = new ProductionService(projectService).promptPreview(
+            input.shotId,
+            input.kind,
+            input.inputImages,
+            input.prompt,
+          );
+          break;
+        }
+        case 'shot.image.get':
+          result = shotContinuityService.imageContext(requireString(params, 'shotId'));
+          break;
+        case 'shot.image.save':
+          result = shotContinuityService.saveImage(
+            params as unknown as import('@ai-video/contracts').ShotImageSaveParams,
+          );
+          break;
+        case 'shot.videoImages.save': {
+          const input =
+            params as unknown as import('@ai-video/contracts').WorkerMethodMap['shot.videoImages.save']['params'];
+          result = shotContinuityService.saveVideoImages(
+            input.shotId,
+            input.expectedRowVersion,
+            input.selections,
+          );
+          break;
+        }
         case 'shot.continuity.get':
           result = shotContinuityService.get(requireString(params, 'shotId'));
           break;
@@ -2465,6 +2509,7 @@ async function handleRequestCore(
             {
               conversationId: agentParams.conversationId,
               prompt: agentParams.prompt,
+              promptTemplateVersion: agentParams.promptTemplateVersion,
               taskExecution: agentParams.taskExecution ?? ('parallel' as const),
               providerProfileId: selected.providerProfileId,
               modelId: selected.modelId,
@@ -2480,6 +2525,7 @@ async function handleRequestCore(
               productionWorkflowVersion: agentParams.productionWorkflowVersion,
               productionSources: agentParams.productionSources,
               productionRequestedAt: agentParams.productionRequestedAt,
+              promptWorkflow: agentParams.promptWorkflow,
               ...(novelIntent ? { novelIntent } : {}),
             },
             undefined,
@@ -3114,6 +3160,18 @@ async function handleRequestCore(
                 ).length,
             };
           }
+          break;
+        case 'document.images.unbind':
+          result = localMediaImportService.unbindImage(
+            requireString(params, 'documentId'),
+            requireString(params, 'assetId'),
+          );
+          break;
+        case 'document.images.import':
+          result = await localMediaImportService.importFiles(
+            { documentId: requireString(params, 'documentId') },
+            params.sourcePaths as string[],
+          );
           break;
         case 'asset.list':
           result = imageGenerationService.listAssets({

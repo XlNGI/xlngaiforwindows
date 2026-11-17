@@ -1,8 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   Check,
   ChevronDown,
+  ChevronUp,
   ExternalLink,
   FolderOpen,
   Circle,
@@ -33,6 +43,7 @@ import type {
 } from '@ai-video/contracts';
 import { projectWorker, workerMediaUrl } from '../worker-scope';
 import { ImagePreview } from '../ImagePreview';
+import { preserveInlineDetailPosition } from '../inline-detail-position';
 import { RoughCutExportStatus } from '../rough-cut/RoughCutExportStatus';
 import { dispatchAssetPointerDrag, serializeAssetDrag } from './asset-pointer-drag';
 
@@ -117,6 +128,12 @@ export function AssetLibraryView({
   const [selectedIds, setSelectedIds] = useState<string[]>(
     selectedAssetId ? [selectedAssetId] : [],
   );
+  const [expandedAssetId, setExpandedAssetId] = useState(selectedAssetId);
+  const [gridColumns, setGridColumns] = useState(1);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const cardRefs = useRef(new Map<string, HTMLDivElement>());
+  const detailId = useId();
   const [mediaSourceById, setMediaSourceById] = useState<Record<string, AssetMediaSourceInfo>>({});
   const [groupAssets, setGroupAssets] = useState<Record<string, AssetInfo[]>>({});
   const [message, setMessage] = useState('');
@@ -150,7 +167,30 @@ export function AssetLibraryView({
   const [aliasSavedId, setAliasSavedId] = useState<string | null>(null);
 
   const kind = mediaFilter === 'all' ? undefined : mediaFilter;
-  const selected = assets.find((asset) => asset.id === selectedIds.at(-1));
+  const selected = assets.find((asset) => asset.id === expandedAssetId);
+  const expandedIndex = assets.findIndex((asset) => asset.id === expandedAssetId);
+  const detailRow = Math.floor(expandedIndex / gridColumns) + 2;
+
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const measureColumns = () => {
+      const tracks = window.getComputedStyle(grid).gridTemplateColumns;
+      setGridColumns(tracks && tracks !== 'none' ? tracks.split(/\s+/).length : 1);
+    };
+    measureColumns();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measureColumns);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, []);
+
+  const closeAssetDetails = () => {
+    const card = expandedAssetId ? cardRefs.current.get(expandedAssetId) : undefined;
+    preserveInlineDetailPosition(contentRef.current, card);
+    setExpandedAssetId(undefined);
+    window.requestAnimationFrame(() => card?.focus({ preventScroll: true }));
+  };
 
   useLayoutEffect(() => {
     setTagDraft('');
@@ -199,6 +239,9 @@ export function AssetLibraryView({
             return direction * (a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
           });
         setAssets(filtered);
+        setExpandedAssetId((current) =>
+          filtered.some((asset) => asset.id === current) ? current : undefined,
+        );
         setHasMore(false);
         if (!append)
           setSelectedIds((current) =>
@@ -225,6 +268,9 @@ export function AssetLibraryView({
       setAssets((current) => (append ? [...current, ...result] : result));
       setHasMore(result.length === PAGE_SIZE);
       if (!append) {
+        setExpandedAssetId((current) =>
+          result.some((asset) => asset.id === current) ? current : undefined,
+        );
         setSelectedIds((current) => {
           const preferred = current.at(-1);
           const next =
@@ -239,6 +285,7 @@ export function AssetLibraryView({
   useEffect(() => {
     if (!selectedAssetId) return;
     setSelectedIds([selectedAssetId]);
+    setExpandedAssetId(selectedAssetId);
     setMediaFilter('all');
     setShowTrash(false);
     setKeyword('');
@@ -451,6 +498,10 @@ export function AssetLibraryView({
 
   const selectAsset = (event: React.MouseEvent, asset: AssetInfo) => {
     event.preventDefault();
+    if (!hasSelectionModifier(event)) {
+      preserveInlineDetailPosition(contentRef.current, cardRefs.current.get(asset.id));
+      setExpandedAssetId((current) => (current === asset.id ? undefined : asset.id));
+    }
     const additive = event.altKey || event.ctrlKey || event.metaKey;
     const anchor = assets.some((item) => item.id === selectionAnchor.current)
       ? selectionAnchor.current
@@ -596,9 +647,233 @@ export function AssetLibraryView({
     setSelectedGroupId('');
   };
 
+  const assetDetails = selected ? (
+    <section
+      className="asset-inspector asset-inline-detail"
+      id={detailId}
+      aria-label="素材详情"
+      style={{ gridRow: detailRow }}
+    >
+      <div className="inline-detail-header">
+        <span>素材详情</span>
+        <button type="button" className="inline-detail-collapse" onClick={closeAssetDetails}>
+          <ChevronUp size={14} /> 收起
+        </button>
+      </div>
+      <div className="asset-inline-detail-body">
+        <div className="asset-inspector-preview">
+          {selected.kind.includes('video') ? (
+            mediaSourceById[selected.id] ? (
+              <video
+                src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)}
+                controls
+                preload="metadata"
+              />
+            ) : (
+              <Video size={32} />
+            )
+          ) : mediaSourceById[selected.id] ? (
+            <ImagePreview
+              key={selected.id}
+              src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)!}
+              alt={displayName(selected)}
+            />
+          ) : (
+            <Image size={32} />
+          )}
+        </div>
+        <div className="asset-inline-detail-fields">
+          <label>
+            <span className="asset-inspector-label-row">
+              <span>别名</span>
+              {aliasSavedId === selected.id && (
+                <span className="asset-save-success opt-save-badge">
+                  <Check size={11} /> 已保存
+                </span>
+              )}
+            </span>
+            <input
+              key={`${selected.id}-${selected.alias}`}
+              defaultValue={selected.alias}
+              maxLength={120}
+              disabled={!writable || showTrash}
+              onBlur={(event) => {
+                const nextAlias = event.target.value.trim();
+                if (nextAlias !== (selected.alias ?? '')) {
+                  void callWorker('asset.alias.update', {
+                    assetId: selected.id,
+                    alias: nextAlias,
+                  })
+                    .then(() => {
+                      setAliasSavedId(selected.id);
+                      window.setTimeout(
+                        () => setAliasSavedId((curr) => (curr === selected.id ? null : curr)),
+                        2000,
+                      );
+                      return reloadCurrent();
+                    })
+                    .catch((error) => setMessage(String(error)));
+                }
+              }}
+            />
+          </label>
+          {!showTrash && (
+            <fieldset className="asset-tag-editor">
+              <legend>
+                <span>标签</span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="管理标签"
+                  onClick={() => setTagManagerOpen(true)}
+                >
+                  <Pencil size={13} />
+                </button>
+              </legend>
+              <input
+                className="asset-tag-input"
+                aria-label="添加标签"
+                placeholder="输入标签并按 Enter"
+                maxLength={120}
+                value={tagDraft}
+                disabled={!writable}
+                onChange={(event) => setTagDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return;
+                  event.preventDefault();
+                  void addTagToSelectedAsset().catch((error) => setMessage(String(error)));
+                }}
+                onBlur={() =>
+                  void addTagToSelectedAsset().catch((error) => setMessage(String(error)))
+                }
+              />
+              <div className="asset-tag-options">
+                {tags.map((tag) => (
+                  <label key={tag.id}>
+                    <input
+                      type="checkbox"
+                      disabled={!writable}
+                      checked={selected.tags?.some((item) => item.id === tag.id) ?? false}
+                      onChange={() => {
+                        const tagIds = selected.tags?.map((item) => item.id) ?? [];
+                        const next = tagIds.includes(tag.id)
+                          ? tagIds.filter((id) => id !== tag.id)
+                          : [...tagIds, tag.id];
+                        void callWorker('asset.tags.replace', {
+                          assetIds: [selected.id],
+                          tagIds: next,
+                        })
+                          .then(reloadCurrent)
+                          .catch((error) => setMessage(String(error)));
+                      }}
+                    />
+                    <span>{tag.name}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          )}
+          <details className="asset-file-details">
+            <summary>文件信息</summary>
+            <dl>
+              <dt>类型</dt>
+              <dd>{selected.kind.includes('video') ? '视频' : '图片'}</dd>
+              <dt>大小</dt>
+              <dd>{(selected.sizeBytes / 1024).toFixed(1)} KiB</dd>
+              <dt>创建</dt>
+              <dd>{new Date(selected.createdAt).toLocaleString()}</dd>
+              <dt>路径</dt>
+              <dd>{selected.relativePath}</dd>
+            </dl>
+          </details>
+          <div className="asset-inspector-actions">
+            <button
+              type="button"
+              aria-label="打开位置"
+              title="打开位置"
+              onClick={() => void callWorker('asset.reveal', { assetId: selected.id })}
+            >
+              <FolderOpen size={15} />
+              <span>打开位置</span>
+            </button>
+            {!showTrash && (
+              <button
+                type="button"
+                aria-label="查看来源任务"
+                title="查看来源任务"
+                onClick={() =>
+                  void callWorker('asset.source.locate', { assetId: selected.id })
+                    .then((source) => onOpenSource?.(source))
+                    .catch((error) => setMessage(String(error)))
+                }
+              >
+                <ExternalLink size={15} />
+                <span>来源任务</span>
+              </button>
+            )}
+            {showTrash ? (
+              <>
+                <button
+                  type="button"
+                  aria-label="恢复素材"
+                  title="恢复素材"
+                  disabled={!writable}
+                  onClick={() =>
+                    void callWorker('asset.restore', { assetId: selected.id })
+                      .then(reloadCurrent)
+                      .catch((error) => setMessage(String(error)))
+                  }
+                >
+                  <RotateCcw size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  aria-label="彻底删除"
+                  title="彻底删除"
+                  disabled={!writable}
+                  onClick={() => {
+                    if (window.confirm('彻底删除后无法恢复，确认继续？'))
+                      void callWorker('asset.purge', {
+                        assetId: selected.id,
+                        confirm: true,
+                      })
+                        .then(reloadCurrent)
+                        .catch((error) => setMessage(String(error)));
+                  }}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="danger"
+                aria-label="移到回收站"
+                title="移到回收站"
+                disabled={!writable}
+                onClick={() =>
+                  void deleteAsset(selected).catch((error) => setMessage(String(error)))
+                }
+              >
+                <Trash2 size={15} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  ) : null;
+
   return (
     <div
       className={`asset-library-shell asset-library-opt-theme${selectedIds.length > 1 ? ' has-multiple-selection' : ''}`}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && selected) {
+          event.stopPropagation();
+          closeAssetDetails();
+        }
+      }}
     >
       <section className="asset-library-main">
         <div className="asset-filter-bar opt-subbar">
@@ -1155,167 +1430,181 @@ export function AssetLibraryView({
           </div>
         )}
 
-        <div className="asset-library-content">
-          <div className="asset-grid" role="listbox" aria-label="素材" aria-multiselectable="true">
+        <div ref={contentRef} className="asset-library-content">
+          <div
+            ref={gridRef}
+            className="asset-grid"
+            role="listbox"
+            aria-label="素材"
+            aria-multiselectable="true"
+          >
             {assets.map((asset, index) => {
               const isSelected = selectedIds.includes(asset.id);
               const dragItems = isSelected && selectedAssets.length > 1 ? selectedAssets : [asset];
               return (
-                <div
-                  role="option"
-                  tabIndex={0}
-                  aria-selected={isSelected}
-                  aria-label={
-                    asset.alias?.trim() ||
-                    `${asset.kind.includes('video') ? '视频' : '图片'}素材 ${index + 1}`
-                  }
-                  draggable={!asset.deletedAt && !groupEditor}
-                  onDragStart={(event) =>
-                    beginDrag(event, dragItems, dragItems.length > 1 ? 'selection' : 'asset')
-                  }
-                  key={asset.id}
-                  className={`${isSelected ? 'asset-card selected' : 'asset-card'}${groupEditor ? ' group-drag-enabled' : ''}${pointerDraggingIds.includes(asset.id) ? ' is-pointer-dragging' : ''}`}
-                  onPointerDownCapture={(event) => beginPointerGroupDrag(event, dragItems)}
-                  onPointerMove={updatePointerGroupDrag}
-                  onPointerUp={finishPointerGroupDrag}
-                  onPointerCancel={resetPointerDrag}
-                  onLostPointerCapture={resetPointerDrag}
-                  onMouseEnter={() => {
-                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
-                  }}
-                  onMouseLeave={() => {
-                    setActiveVideoControlsId((current) =>
-                      current === asset.id ? undefined : current,
-                    );
-                  }}
-                  onFocusCapture={() => {
-                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
-                  }}
-                  onBlurCapture={(event) => {
-                    if (
-                      event.relatedTarget instanceof Node &&
-                      event.currentTarget.contains(event.relatedTarget)
-                    )
-                      return;
-                    setActiveVideoControlsId((current) =>
-                      current === asset.id ? undefined : current,
-                    );
-                  }}
-                  onTouchStart={() => {
-                    if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
-                  }}
-                  onClickCapture={(event) => {
-                    if (
-                      event.target instanceof HTMLVideoElement &&
-                      !isVideoControlStrip(event.target, event.clientY)
-                    ) {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      selectCardAsset(event, asset);
+                <Fragment key={asset.id}>
+                  <div
+                    ref={(node) => {
+                      if (node) cardRefs.current.set(asset.id, node);
+                      else cardRefs.current.delete(asset.id);
+                    }}
+                    role="option"
+                    tabIndex={0}
+                    aria-selected={isSelected}
+                    aria-expanded={expandedAssetId === asset.id}
+                    aria-controls={expandedAssetId === asset.id ? detailId : undefined}
+                    aria-label={
+                      asset.alias?.trim() ||
+                      `${asset.kind.includes('video') ? '视频' : '图片'}素材 ${index + 1}`
                     }
-                  }}
-                  onClick={(event) => selectCardAsset(event, asset)}
-                  onKeyDown={(event) => {
-                    if (event.target !== event.currentTarget) return;
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      selectAsset(event as unknown as React.MouseEvent, asset);
+                    draggable={!asset.deletedAt && !groupEditor}
+                    onDragStart={(event) =>
+                      beginDrag(event, dragItems, dragItems.length > 1 ? 'selection' : 'asset')
                     }
-                  }}
-                >
-                  <div className="asset-thumb opt-card-thumb">
-                    <button
-                      type="button"
-                      className="asset-card-select-toggle opt-card-check"
-                      aria-label={isSelected ? '取消选择' : '选择'}
-                      aria-pressed={isSelected}
-                      title={isSelected ? '取消选择此素材' : '选择此素材，可多选后一起拖入粗剪'}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (e.shiftKey) {
-                          selectAsset(e, asset);
-                          return;
-                        }
-                        selectionAnchor.current = asset.id;
-                        setSelectedIds((curr) =>
-                          curr.includes(asset.id)
-                            ? curr.filter((id) => id !== asset.id)
-                            : [...curr, asset.id],
-                        );
-                      }}
-                    >
-                      {isSelected ? (
-                        <CircleCheck size={17} strokeWidth={1.7} />
-                      ) : (
-                        <Circle size={17} strokeWidth={1.5} />
-                      )}
-                    </button>
-                    <span className="asset-card-type-badge opt-type-pill">
-                      {asset.kind.includes('video') ? (
-                        <Video size={10} style={{ color: '#60a5fa' }} />
-                      ) : (
-                        <Image size={10} style={{ color: '#34d399' }} />
-                      )}
-                      {asset.kind.includes('video') ? '视频' : '图片'}
-                    </span>
-                    {!asset.kind.includes('video') && mediaSourceById[asset.id] ? (
-                      <img
-                        src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
-                        alt=""
-                        draggable={false}
-                      />
-                    ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
-                      <>
-                        {!asset.deletedAt && <span className="asset-video-drag-surface" />}
-                        <video
-                          src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
-                          controls={alwaysShowVideoControls || activeVideoControlsId === asset.id}
-                          draggable={false}
-                          preload="metadata"
-                          onLoadedMetadata={(event) => {
-                            const video = event.currentTarget;
-                            if (
-                              video.duration > 0 &&
-                              video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-                            ) {
-                              video.currentTime = Math.min(1 / 30, video.duration / 2);
-                            }
-                          }}
-                          onClick={(event) => event.stopPropagation()}
-                        />
-                      </>
-                    ) : asset.kind.includes('video') ? (
-                      <Video size={30} />
-                    ) : (
-                      <Image size={30} />
-                    )}
-                  </div>
-                  <div className="asset-card-info">
-                    {asset.alias?.trim() && (
-                      <strong title={asset.alias.trim()} className="opt-card-title">
-                        {asset.alias.trim()}
-                      </strong>
-                    )}
-                    {!!asset.tags?.length && (
-                      <div className="asset-card-tags opt-card-tags">
-                        {asset.tags.slice(0, 2).map((tag) => (
-                          <span key={tag.id} className="opt-tag-mini">
-                            {tag.name}
-                          </span>
-                        ))}
-                        {asset.tags.length > 2 && (
-                          <span className="opt-tag-mini">+{asset.tags.length - 2}</span>
+                    className={`${isSelected ? 'asset-card selected' : 'asset-card'}${groupEditor ? ' group-drag-enabled' : ''}${pointerDraggingIds.includes(asset.id) ? ' is-pointer-dragging' : ''}`}
+                    onPointerDownCapture={(event) => beginPointerGroupDrag(event, dragItems)}
+                    onPointerMove={updatePointerGroupDrag}
+                    onPointerUp={finishPointerGroupDrag}
+                    onPointerCancel={resetPointerDrag}
+                    onLostPointerCapture={resetPointerDrag}
+                    onMouseEnter={() => {
+                      if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
+                    }}
+                    onMouseLeave={() => {
+                      setActiveVideoControlsId((current) =>
+                        current === asset.id ? undefined : current,
+                      );
+                    }}
+                    onFocusCapture={() => {
+                      if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
+                    }}
+                    onBlurCapture={(event) => {
+                      if (
+                        event.relatedTarget instanceof Node &&
+                        event.currentTarget.contains(event.relatedTarget)
+                      )
+                        return;
+                      setActiveVideoControlsId((current) =>
+                        current === asset.id ? undefined : current,
+                      );
+                    }}
+                    onTouchStart={() => {
+                      if (asset.kind.includes('video')) setActiveVideoControlsId(asset.id);
+                    }}
+                    onClickCapture={(event) => {
+                      if (
+                        event.target instanceof HTMLVideoElement &&
+                        !isVideoControlStrip(event.target, event.clientY)
+                      ) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        selectCardAsset(event, asset);
+                      }
+                    }}
+                    onClick={(event) => selectCardAsset(event, asset)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        selectAsset(event as unknown as React.MouseEvent, asset);
+                      }
+                    }}
+                  >
+                    <div className="asset-thumb opt-card-thumb">
+                      <button
+                        type="button"
+                        className="asset-card-select-toggle opt-card-check"
+                        aria-label={isSelected ? '取消选择' : '选择'}
+                        aria-pressed={isSelected}
+                        title={isSelected ? '取消选择此素材' : '选择此素材，可多选后一起拖入粗剪'}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (e.shiftKey) {
+                            selectAsset(e, asset);
+                            return;
+                          }
+                          selectionAnchor.current = asset.id;
+                          setSelectedIds((curr) =>
+                            curr.includes(asset.id)
+                              ? curr.filter((id) => id !== asset.id)
+                              : [...curr, asset.id],
+                          );
+                        }}
+                      >
+                        {isSelected ? (
+                          <CircleCheck size={17} strokeWidth={1.7} />
+                        ) : (
+                          <Circle size={17} strokeWidth={1.5} />
                         )}
-                      </div>
-                    )}
-                    <div className="asset-card-footer opt-card-meta-line">
-                      <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
-                      <span className="asset-card-size">
-                        {(asset.sizeBytes / 1024).toFixed(0)} KB
+                      </button>
+                      <span className="asset-card-type-badge opt-type-pill">
+                        {asset.kind.includes('video') ? (
+                          <Video size={10} style={{ color: '#60a5fa' }} />
+                        ) : (
+                          <Image size={10} style={{ color: '#34d399' }} />
+                        )}
+                        {asset.kind.includes('video') ? '视频' : '图片'}
                       </span>
+                      {!asset.kind.includes('video') && mediaSourceById[asset.id] ? (
+                        <img
+                          src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
+                          alt=""
+                          draggable={false}
+                        />
+                      ) : asset.kind.includes('video') && mediaSourceById[asset.id] ? (
+                        <>
+                          {!asset.deletedAt && <span className="asset-video-drag-surface" />}
+                          <video
+                            src={mediaSrcFor(asset.id, mediaSourceById[asset.id]!.path)}
+                            controls={alwaysShowVideoControls || activeVideoControlsId === asset.id}
+                            draggable={false}
+                            preload="metadata"
+                            onLoadedMetadata={(event) => {
+                              const video = event.currentTarget;
+                              if (
+                                video.duration > 0 &&
+                                video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+                              ) {
+                                video.currentTime = Math.min(1 / 30, video.duration / 2);
+                              }
+                            }}
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        </>
+                      ) : asset.kind.includes('video') ? (
+                        <Video size={30} />
+                      ) : (
+                        <Image size={30} />
+                      )}
+                    </div>
+                    <div className="asset-card-info">
+                      {asset.alias?.trim() && (
+                        <strong title={asset.alias.trim()} className="opt-card-title">
+                          {asset.alias.trim()}
+                        </strong>
+                      )}
+                      {!!asset.tags?.length && (
+                        <div className="asset-card-tags opt-card-tags">
+                          {asset.tags.slice(0, 2).map((tag) => (
+                            <span key={tag.id} className="opt-tag-mini">
+                              {tag.name}
+                            </span>
+                          ))}
+                          {asset.tags.length > 2 && (
+                            <span className="opt-tag-mini">+{asset.tags.length - 2}</span>
+                          )}
+                        </div>
+                      )}
+                      <div className="asset-card-footer opt-card-meta-line">
+                        <small>{new Date(asset.createdAt).toLocaleDateString()}</small>
+                        <span className="asset-card-size">
+                          {(asset.sizeBytes / 1024).toFixed(0)} KB
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                  {asset.id === expandedAssetId && assetDetails}
+                </Fragment>
               );
             })}
             {assets.length === 0 && (
@@ -1348,207 +1637,6 @@ export function AssetLibraryView({
               </button>
             )}
           </div>
-          <aside className="asset-inspector">
-            {selected ? (
-              <>
-                <div className="asset-inspector-preview">
-                  {selected.kind.includes('video') ? (
-                    mediaSourceById[selected.id] ? (
-                      <video
-                        src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)}
-                        controls
-                        preload="metadata"
-                      />
-                    ) : (
-                      <Video size={32} />
-                    )
-                  ) : mediaSourceById[selected.id] ? (
-                    <ImagePreview
-                      key={selected.id}
-                      src={mediaSrcFor(selected.id, mediaSourceById[selected.id]!.path)!}
-                      alt={displayName(selected)}
-                    />
-                  ) : (
-                    <Image size={32} />
-                  )}
-                </div>
-                <label>
-                  <span className="asset-inspector-label-row">
-                    <span>素材别名 (可检索)</span>
-                    {aliasSavedId === selected.id && (
-                      <span className="asset-save-success opt-save-badge">
-                        <Check size={11} /> 已保存
-                      </span>
-                    )}
-                  </span>
-                  <input
-                    key={`${selected.id}-${selected.alias}`}
-                    defaultValue={selected.alias}
-                    maxLength={120}
-                    disabled={!writable || showTrash}
-                    onBlur={(event) => {
-                      const nextAlias = event.target.value.trim();
-                      if (nextAlias !== (selected.alias ?? '')) {
-                        void callWorker('asset.alias.update', {
-                          assetId: selected.id,
-                          alias: nextAlias,
-                        })
-                          .then(() => {
-                            setAliasSavedId(selected.id);
-                            window.setTimeout(
-                              () => setAliasSavedId((curr) => (curr === selected.id ? null : curr)),
-                              2000,
-                            );
-                            return reloadCurrent();
-                          })
-                          .catch((error) => setMessage(String(error)));
-                      }
-                    }}
-                  />
-                </label>
-                {!showTrash && (
-                  <fieldset className="asset-tag-editor">
-                    <legend>
-                      <span>标签</span>
-                      <button
-                        type="button"
-                        className="icon-button"
-                        title="管理标签"
-                        onClick={() => setTagManagerOpen(true)}
-                      >
-                        <Pencil size={13} />
-                      </button>
-                    </legend>
-                    <input
-                      className="asset-tag-input"
-                      aria-label="添加标签"
-                      placeholder="输入标签并按 Enter"
-                      maxLength={120}
-                      value={tagDraft}
-                      disabled={!writable}
-                      onChange={(event) => setTagDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter') return;
-                        event.preventDefault();
-                        void addTagToSelectedAsset().catch((error) => setMessage(String(error)));
-                      }}
-                      onBlur={() =>
-                        void addTagToSelectedAsset().catch((error) => setMessage(String(error)))
-                      }
-                    />
-                    <div className="asset-tag-options">
-                      {tags.map((tag) => (
-                        <label key={tag.id}>
-                          <input
-                            type="checkbox"
-                            disabled={!writable}
-                            checked={selected.tags?.some((item) => item.id === tag.id) ?? false}
-                            onChange={() => {
-                              const tagIds = selected.tags?.map((item) => item.id) ?? [];
-                              const next = tagIds.includes(tag.id)
-                                ? tagIds.filter((id) => id !== tag.id)
-                                : [...tagIds, tag.id];
-                              void callWorker('asset.tags.replace', {
-                                assetIds: [selected.id],
-                                tagIds: next,
-                              })
-                                .then(reloadCurrent)
-                                .catch((error) => setMessage(String(error)));
-                            }}
-                          />
-                          <span>{tag.name}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </fieldset>
-                )}
-                <dl>
-                  <dt>类型</dt>
-                  <dd>{selected.kind}</dd>
-                  <dt>大小</dt>
-                  <dd>{(selected.sizeBytes / 1024).toFixed(1)} KiB</dd>
-                  <dt>创建</dt>
-                  <dd>{new Date(selected.createdAt).toLocaleString()}</dd>
-                  <dt>路径</dt>
-                  <dd>{selected.relativePath}</dd>
-                </dl>
-                <div className="asset-inspector-actions">
-                  <button
-                    type="button"
-                    aria-label="打开位置"
-                    title="打开位置"
-                    onClick={() => void callWorker('asset.reveal', { assetId: selected.id })}
-                  >
-                    <FolderOpen size={15} />
-                  </button>
-                  {!showTrash && (
-                    <button
-                      type="button"
-                      aria-label="查看来源任务"
-                      title="查看来源任务"
-                      onClick={() =>
-                        void callWorker('asset.source.locate', { assetId: selected.id })
-                          .then((source) => onOpenSource?.(source))
-                          .catch((error) => setMessage(String(error)))
-                      }
-                    >
-                      <ExternalLink size={15} />
-                    </button>
-                  )}
-                  {showTrash ? (
-                    <>
-                      <button
-                        type="button"
-                        aria-label="恢复素材"
-                        title="恢复素材"
-                        disabled={!writable}
-                        onClick={() =>
-                          void callWorker('asset.restore', { assetId: selected.id })
-                            .then(reloadCurrent)
-                            .catch((error) => setMessage(String(error)))
-                        }
-                      >
-                        <RotateCcw size={15} />
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        aria-label="彻底删除"
-                        title="彻底删除"
-                        disabled={!writable}
-                        onClick={() => {
-                          if (window.confirm('彻底删除后无法恢复，确认继续？'))
-                            void callWorker('asset.purge', {
-                              assetId: selected.id,
-                              confirm: true,
-                            })
-                              .then(reloadCurrent)
-                              .catch((error) => setMessage(String(error)));
-                        }}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="danger"
-                      aria-label="移到回收站"
-                      title="移到回收站"
-                      disabled={!writable}
-                      onClick={() =>
-                        void deleteAsset(selected).catch((error) => setMessage(String(error)))
-                      }
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="asset-empty">选择素材查看详情</div>
-            )}
-          </aside>
         </div>
         {dragPoint && pointerDraggingIds.length > 0 && (
           <div

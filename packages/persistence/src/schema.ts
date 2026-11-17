@@ -1,4 +1,4 @@
-export const CURRENT_SCHEMA_VERSION = 77;
+export const CURRENT_SCHEMA_VERSION = 80;
 
 export const MIGRATION_V69 = `
 CREATE TABLE IF NOT EXISTS agent_task_usage_counters (

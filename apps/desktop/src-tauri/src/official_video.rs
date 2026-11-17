@@ -620,9 +620,13 @@ pub(crate) fn poll(params: &Value) -> Result<Value, Value> {
                 true,
             )
         })?;
-        result["output"] = json!({"type":"native_temporary_file","path":output.path,"contentType":output.content_type});
-    } else if result["state"] == "failed" || result["state"] == "cancelled" {
-        result["error"] = json!({"message":"官方视频任务失败、过期或取消，请查看任务日志并核对供应商记录。","retryable":false});
+        let mut normalized_output = json!({"type":"native_temporary_file","path":output.path});
+        if let Some(content_type) = output.content_type {
+            normalized_output["contentType"] = json!(content_type);
+        }
+        result["output"] = normalized_output;
+    } else if result["state"] == "failed" {
+        result["error"] = crate::provider_media_poll_error(&body);
     }
     Ok(result)
 }
@@ -799,6 +803,36 @@ mod tests {
             status_output("minimax", &json!({"task":{"status":"running"}})),
             ("running", None)
         );
+    }
+    #[test]
+    fn official_poll_emits_errors_only_for_failed_tasks_and_preserves_diagnostics() {
+        let (_guard, mut params, _) = install("seedance", false);
+        params["providerTaskId"] = json!("task-seedance");
+        for state in ["cancelled", "failed"] {
+            FIXTURE_HTTP.with(|fixture| {
+                *fixture.borrow_mut() = Some(Box::new(move |request| {
+                    assert!(matches!(
+                        request.target,
+                        DubbingHttpTarget::OfficialVideo {
+                            operation: "poll",
+                            ..
+                        }
+                    ));
+                    Ok(raw(
+                        200,
+                        json!({"status": state, "error":{"message":"Fixture provider diagnostic"}}),
+                    ))
+                }))
+            });
+            let result = poll(&params).unwrap();
+            assert_eq!(result["state"], state);
+            if state == "failed" {
+                assert_eq!(result["error"]["message"], "Fixture provider diagnostic");
+                assert!(result["error"].get("code").is_none());
+            } else {
+                assert!(result.get("error").is_none());
+            }
+        }
     }
     #[test]
     fn source_type_signature_is_rechecked() {

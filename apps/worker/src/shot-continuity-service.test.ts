@@ -559,7 +559,7 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
     expect(f.service.get(f.shot.id)).toEqual(before);
   });
 
-  it('keeps reframing separate from final first-frame adoption and invalidates prior production on a changed selection', async () => {
+  it('keeps reframing separate and invalidates video production only when adopted inputs change', async () => {
     const f = await fixture();
     const first = await f.confirm('reframe');
     expect(first.binding?.firstFrameAssetId).toBeUndefined();
@@ -579,6 +579,18 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
       adapterKey: adapter.key,
     });
     f.service.savePrompt(f.shot.id, direct.rowVersion, 'image', '参考选帧生成下一镜头首帧。');
+    expect(() =>
+      production.compile({
+        target: { kind: 'shot', id: f.shot.id },
+        adapterKey: adapter.key,
+        expectedToken: compiled.source?.token,
+      }),
+    ).not.toThrow();
+    f.service.saveVideoImages(
+      f.shot.id,
+      f.service.imageContext(f.shot.id).videoImages.rowVersion,
+      [],
+    );
     expect(() =>
       production.compile({
         target: { kind: 'shot', id: f.shot.id },
@@ -783,7 +795,7 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
     expect(videoDraft.parameters.prompt).not.toContain('只用于静态图片');
     expect(JSON.stringify(videoDraft.parameters)).toContain(id);
     f.assets.deleteAsset(id, true);
-    expect(f.service.get(f.shot.id).stale).toBe(true);
+    expect(f.service.get(f.shot.id).stale).toBe(false);
     expect(() => f.assets.purgeAsset(id, true)).toThrow('镜头衔接');
   });
 
@@ -881,9 +893,9 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
         tools = result.tools!;
         return result;
       };
-      const read = await invoke('shot.continuity.read', { shotId: f.shot.id });
+      const read = await invoke('shot.image.read', { shotId: f.shot.id });
       expect(read.continuation!.outputs[0]!.images).toBeUndefined();
-      const visualRead = await invoke('shot.continuity.read', {
+      const visualRead = await invoke('shot.image.read', {
         shotId: f.shot.id,
         includeImages: true,
       });
@@ -891,23 +903,25 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
       expect(output.images).toHaveLength(2);
       expect(output.output).not.toContain('base64');
       const metadata = JSON.parse(output.output) as { rowVersion: number; sourceToken: string };
-      const saved = await invoke('shot.continuity.save', {
+      const saved = await invoke('shot.image.save', {
         shotId: f.shot.id,
         expectedRowVersion: metadata.rowVersion,
         sourceToken: metadata.sourceToken,
         intent: '已转身的侧面中景',
+        purpose: 'composition',
+        bindings: { schemaVersion: 1, characterDocumentIds: [] },
         prompt: '保持服装和站位，人物已转身，侧面中景。',
       });
       expect(
         (JSON.parse(saved.continuation!.outputs[0]!.output) as { status: string }).status,
-      ).toBe('shot_reference_prompt_saved');
+      ).toBe('shot_image_prompt_saved');
       expect(workflow.getTask({ taskId: task.taskId }).productionUpdated).toBe(true);
       expect(workflow.getTask({ taskId: task.taskId }).savedProductionReceipts?.receipts).toEqual([
         expect.objectContaining({
           generationId: prepared.stream.generationId,
-          toolName: 'shot.continuity.save',
+          toolName: 'shot.image.save',
           result: expect.objectContaining({
-            status: 'shot_reference_prompt_saved',
+            status: 'shot_image_prompt_saved',
             shotId: f.shot.id,
           }) as unknown,
         }),
@@ -922,7 +936,7 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
       expect(JSON.stringify(audit)).not.toContain('data:image');
       vision = false;
       await expect(
-        invoke('shot.continuity.read', { shotId: f.shot.id, includeImages: true }),
+        invoke('shot.image.read', { shotId: f.shot.id, includeImages: true }),
       ).rejects.toThrow('支持看图');
     },
   );
@@ -961,6 +975,26 @@ describe.runIf(process.platform === 'win32')('manual shot continuity with real l
         expectedRowVersion: 0,
       });
       expect(selection.binding?.firstFrameAssetId).toBeTruthy();
+      const document = await rpc('document.save', {
+        kind: 'prop',
+        title: '本地道具图片',
+        contentMarkdown: '已有道具资料',
+      });
+      const imported = await rpc('document.images.import', {
+        documentId: document.id,
+        sourcePaths: [join(f.project.rootPath, selection.images[0]!.relativePath)],
+      });
+      expect(imported[0]?.id).toBe(selection.images[0]?.id);
+      expect(await rpc('asset.list', { sourceDocumentId: document.id })).toMatchObject([
+        { id: imported[0]!.id },
+      ]);
+      expect(
+        await rpc('document.images.unbind', { documentId: document.id, assetId: imported[0]!.id }),
+      ).toEqual({ removed: true });
+      expect(await rpc('asset.list', { sourceDocumentId: document.id })).toEqual([]);
+      expect(
+        (await rpc('shot.continuity.get', { shotId: f.shot.id })).binding?.firstFrameAssetId,
+      ).toBe(selection.binding?.firstFrameAssetId);
       const saved = await rpc('shot.continuity.prompt.save', {
         shotId: f.shot.id,
         expectedRowVersion: selection.rowVersion,

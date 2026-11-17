@@ -28,10 +28,14 @@ export * from './production.js';
 export * from './prompt-bindings.js';
 export * from './character-sheet.js';
 export * from './video-prompt-guidance.js';
+export * from './video-poll-recovery.js';
+export * from './prompt-templates.js';
 export * from './production-schema.js';
 export * from './production-inputs.js';
 export * from './shot-continuity.js';
 import type { ShotContinuityWorkerMethodMap } from './shot-continuity.js';
+import type { ShotImageWorkerMethodMap } from './shot-image.js';
+export * from './shot-image.js';
 import type { RoughCutWorkerMethodMap } from './rough-cut.js';
 export * from './rough-cut.js';
 import type {
@@ -53,6 +57,7 @@ export {
   isWanMediaAdapter,
   isStructuredVideoAdapter,
   adapterBindsCatalogModel,
+  modelSupportsGenerationAdapter,
   supportsProductionAudioUpload,
 } from './official-media-contracts.js';
 export interface HealthResult {
@@ -1572,6 +1577,15 @@ export interface AgentTaskReviewTargetInfo {
   state: 'unverified' | 'pending' | 'needs_revision' | 'verified';
 }
 export interface AgentTaskDetail {
+  promptAuthoring?: {
+    purpose?: import('./prompt-templates.js').PromptPurpose;
+    stageVersion?: number;
+    templateVersion: number;
+    generalApplied: boolean;
+    scopedApplied: boolean;
+  };
+  /** Persisted replies owned by this execution; older/manual tasks may have no generation link. */
+  assistantMessageIds?: string[];
   deliveryReview?: {
     bundle?: {
       businessSaved: boolean;
@@ -1832,7 +1846,7 @@ export interface ShotInfo {
   position: number;
   status: string;
   documentId?: string;
-  /** Short-drama episode shot prompt (image/video generation text). */
+  /** Complete video authoring text. Static image prompts have their own record. */
   prompt?: string;
   bindings?: import('./prompt-bindings.js').PromptBindingIR;
   timing?: import('./prompt-bindings.js').ProductionTiming;
@@ -2023,11 +2037,15 @@ export interface ConversationModelPreferenceClearParams {
   conversationId: string;
   capability: ConversationModelPreferenceCapability;
 }
-/** Editable instructions automatically attached to every request in one conversation. */
+/** Independently editable prompt-purpose templates; historical shared text remains readable. */
 export interface ConversationPromptTemplateInfo {
   conversationId: string;
+  /** Historical shared template; new tasks with policyVersion=2 do not apply it. */
   content: string;
+  /** Frozen on new tasks. Omitted by historical runtime snapshots. */
+  policyVersion?: 2;
   rowVersion: number;
+  templates?: import('./prompt-templates.js').PromptTemplates;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -2035,6 +2053,8 @@ export interface ConversationPromptTemplateSaveParams {
   conversationId: string;
   content: string;
   expectedRowVersion: number;
+  /** Omitted by older clients to preserve all existing scoped templates. */
+  templates?: import('./prompt-templates.js').PromptTemplates;
 }
 export type ChatMessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export type ChatMessageStatus = 'streaming' | 'complete' | 'failed';
@@ -2346,6 +2366,12 @@ export interface LlmGenerationPrepareResult {
   stream: LlmGenerationIdentity;
 }
 export interface LlmGenerationRuntimeRequest extends LlmGenerationIdentity {
+  /** Worker-owned structured authoring output tool. */
+  requiredTool?: string;
+  /** Frozen local user settings, not a Provider API parameter. */
+  promptTemplateSnapshot?: ConversationPromptTemplateInfo;
+  promptWorkflow?: import('./prompt-templates.js').PromptPurpose;
+  toolCallMode?: 'single' | 'parallel-readonly';
   /** Bounded completed turns, rebuilt locally without opaque provider history. */
   contextTurns?: LlmChatToolTurn[];
   modelCapabilities?: ModelCapabilities;
@@ -2437,6 +2463,8 @@ export type HostMethod =
   | 'provider.confirmation.resolve';
 /** Provider request data that is safe to cross the sidecar boundary. Credentials and headers are absent. */
 export interface NativeProviderStreamStartParams extends LlmGenerationIdentity {
+  requiredTool?: string;
+  toolCallMode?: 'single' | 'parallel-readonly';
   contextTurns?: LlmChatToolTurn[];
   modelCapabilities?: ModelCapabilities;
   inferenceSettings?: LlmInferenceSettings;
@@ -2644,6 +2672,8 @@ export type SidecarEnvelope =
       error: HostError;
     };
 export interface AgentGenerationPrepareParams extends LlmGenerationPrepareParams {
+  promptWorkflow?: import('./prompt-templates.js').PromptPurpose;
+  promptTemplateVersion?: number;
   /** Legacy Desktop hint. Runtime always uses the project System Agent. */
   agentMode: 'document' | 'novel-writing' | 'short-drama';
   /** Optional frozen chapter scope metadata (max 50). */
@@ -2714,6 +2744,9 @@ export interface UnifiedAgentModelCandidate {
   schemaReady?: boolean;
 }
 export interface UnifiedAgentRunParams {
+  promptWorkflow?: import('./prompt-templates.js').PromptPurpose;
+  /** The exact saved template version submitted by the Desktop. */
+  promptTemplateVersion?: number;
   /** Internal batch jobs may pin a dependency; ordinary user messages leave this unset so the Agent routes them. */
   taskExecution?: 'ordered' | 'parallel';
   conversationId: string;
@@ -3716,6 +3749,9 @@ export interface VideoGenerationCostInfo {
   currency?: string;
 }
 export interface VideoGenerationMetadataInfo {
+  /** Query-only recovery links; no new paid generation is submitted. */
+  pollRecoveryOfJobId?: string;
+  pollRecoveryJobId?: string;
   providerBaseUrl?: string;
   providerRegion: VideoProviderRegion;
   providerProfileId?: string;
@@ -3939,6 +3975,7 @@ export interface WorkerMethodMap
     ProjectRuntimeWorkerMethodMap,
     NovelBatchWorkerMethodMap,
     ShotContinuityWorkerMethodMap,
+    ShotImageWorkerMethodMap,
     RoughCutWorkerMethodMap,
     FileTaskWorkerMethodMap {
   'scene.media.resolve': {
@@ -4713,6 +4750,14 @@ export interface WorkerMethodMap
   'asset.list': {
     params: AssetListParams;
     result: AssetInfo[];
+  };
+  'document.images.import': {
+    params: { documentId: string; sourcePaths: string[] };
+    result: AssetInfo[];
+  };
+  'document.images.unbind': {
+    params: { documentId: string; assetId: string };
+    result: { removed: true };
   };
   'asset.preview': {
     params: AssetPreviewParams;

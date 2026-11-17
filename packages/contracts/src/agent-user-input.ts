@@ -15,6 +15,7 @@ export interface AgentInputQuestion {
 export interface AgentInputDraft {
   key: string;
   title: string;
+  purpose?: 'clarification' | 'next_step';
   description?: string;
   questions: AgentInputQuestion[];
 }
@@ -56,6 +57,12 @@ export const AGENT_INPUT_DRAFT_SCHEMA = {
   properties: {
     key: { type: 'string', minLength: 1, maxLength: 80 },
     title: { type: 'string', minLength: 1, maxLength: 200 },
+    purpose: {
+      type: 'string',
+      enum: ['clarification', 'next_step'],
+      description:
+        'clarification requests missing user information; next_step offers new work after the current deliverables pass verification. Never use clarification to bypass saved-output readback.',
+    },
     description: { type: 'string', maxLength: 2000 },
     questions: {
       type: 'array',

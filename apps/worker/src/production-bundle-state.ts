@@ -3,6 +3,9 @@ import { AgentContextStore, contextContentHash } from '@ai-video/persistence';
 import { estimateTokenCount } from '@ai-video/context';
 import {
   PRODUCTION_BUNDLE_LIMITS,
+  isPromptPurpose,
+  promptPurposeForKind,
+  type PromptPurpose,
   productionWorkflowVersion,
   validateProductionBundleSources,
   validateProductionBundleManifest,
@@ -35,6 +38,8 @@ export type BundleSource = ProductionBundleSource & {
 export type BundleState = {
   bundleId: string;
   revision: number;
+  purposeContractVersion?: 1;
+  stage?: { purpose: PromptPurpose; version: number; stageKey: string };
   sources: BundleSource[];
   reused: BundleSource[];
   requirementsHash: string;
@@ -145,7 +150,9 @@ export function saveBundle(
 export function bundleRequirements(db: Database.Database, projectId: string, taskId: string) {
   const task = new AgentContextStore(db).loadTask(projectId, taskId);
   if (!task) throw new Error('BUNDLE_CONTEXT_MISSING');
-  const originals = task.userRequirements.map(({ id, text }) => ({ id, text }));
+  const originals = task.userRequirements
+    .filter((r) => !r.sourceKey?.includes(':prompt-template:'))
+    .map(({ id, text }) => ({ id, text }));
   return {
     originalRequirements: originals,
     decisions: task.confirmedDecisions,
@@ -237,6 +244,9 @@ export function bundleSummary(state: BundleState, objects: Map<string, BundleObj
         : 'bundle_candidate_incomplete',
     bundleId: state.bundleId,
     revision: state.revision,
+    purposeContractVersion: state.purposeContractVersion,
+    stage: state.stage,
+    stageVersion: state.stage?.version ?? 0,
     objectCount: state.entries.length,
     budget: state.budget,
     sources: state.sources,
@@ -263,6 +273,7 @@ export function stageBundle(
   taskId: string,
   args: Record<string, unknown>,
   providerStepId?: string,
+  authoredPurpose?: PromptPurpose,
 ): Record<string, unknown> {
   const snapshot = bundleTask(db, projectId, taskId, true),
     store = new AgentContextStore(db);
@@ -305,6 +316,9 @@ export function stageBundle(
     state = {
       bundleId: taskId,
       revision: 0,
+      ...(Number(snapshot.productionSkillRevision) >= 34
+        ? { purposeContractVersion: 1 as const }
+        : {}),
       sources,
       reused,
       requirementsHash: contextContentHash(JSON.stringify(requirements)),
@@ -329,6 +343,42 @@ export function stageBundle(
     return summary(state);
   }
   if (!state) throw new Error('BUNDLE_NOT_STARTED: begin with an output budget first.');
+  if (args.operation === 'purpose') {
+    if (committedBundle(db, projectId, taskId)) throw new Error('BUNDLE_ALREADY_COMMITTED');
+    if (
+      !isPromptPurpose(args.purpose) ||
+      typeof args.stageKey !== 'string' ||
+      !args.stageKey.trim() ||
+      args.stageKey.length > 200
+    )
+      throw new Error('BUNDLE_PURPOSE_INVALID');
+    const callId = `bundle-purpose:${args.stageKey}`;
+    const identity = JSON.stringify([args.purpose, args.expectedStageVersion]);
+    const prior = store.resultForCall(projectId, taskId, callId);
+    if (prior) {
+      if (prior.content !== identity)
+        throw new Error(
+          `BUNDLE_STAGE_KEY_CONFLICT: stageKey=${args.stageKey} already identifies another phase transition. To start a new transition use a new stageKey and expectedStageVersion=${state.stage?.version ?? 0}; an idempotent replay must repeat the original purpose and expectedStageVersion exactly. Current purpose=${state.stage?.purpose ?? 'none'}.`,
+        );
+      return { ...summary(state), status: 'bundle_purpose_selected', replayed: true };
+    }
+    if (args.expectedStageVersion !== (state.stage?.version ?? 0))
+      throw new Error(
+        `BUNDLE_STAGE_VERSION_CONFLICT: expectedStageVersion=${state.stage?.version ?? 0}`,
+      );
+    state = {
+      ...state,
+      stage: {
+        purpose: args.purpose,
+        version: (state.stage?.version ?? 0) + 1,
+        stageKey: args.stageKey,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    store.putResult(projectId, taskId, callId, 'production.bundle.purpose', identity);
+    saveBundle(db, projectId, taskId, state);
+    return { ...summary(state), status: 'bundle_purpose_selected' };
+  }
   if (args.operation === 'rebase') {
     for (const source of [...state.sources, ...state.reused])
       readBundleSource(db, projectId, source);
@@ -529,7 +579,9 @@ export function stageBundle(
   if (args.operation === 'put') {
     if (typeof args.partKey !== 'string' || !args.partKey.trim() || args.partKey.length > 200)
       throw new Error('BUNDLE_INVALID: stable partKey required.');
-    const part = validateProductionBundlePart(args.part),
+    const validatedPart = validateProductionBundlePart(args.part);
+    assertBundlePurpose(state, validatedPart, authoredPurpose);
+    const part = validatedPart,
       content = JSON.stringify(part),
       callId = `bundle-part:${args.partKey}`;
     const previous = store.resultForCall(projectId, taskId, callId);
@@ -592,7 +644,12 @@ export function stageBundle(
   if (args.operation === 'seal') {
     if (args.expectedRevision !== state.revision)
       throw new Error(`BUNDLE_REVISION_CONFLICT: expectedRevision=${state.revision}`);
-    const manifest = validateProductionBundleManifest(args.manifest);
+    const manifest = validateProductionBundleManifest(
+      args.manifest,
+      snapshot.promptGenerationVersion === 1 &&
+        Array.isArray(snapshot.promptGenerationPurposes) &&
+        !snapshot.promptGenerationPurposes.includes('video-prompt'),
+    );
     for (const [kind, keys] of [
       ['document', manifest.documentKeys],
       ['scene', manifest.sceneKeys],
@@ -633,4 +690,26 @@ export function committedBundle(
       }
     | undefined;
   return result ? (JSON.parse(result.result_json) as Record<string, unknown>) : undefined;
+}
+
+/** Only explicit kinds are checked. Prompt content is never semantically classified. */
+export function assertBundlePurpose(
+  state: BundleState,
+  part: ProductionBundlePart,
+  authoredPurpose?: PromptPurpose,
+) {
+  if (state.purposeContractVersion !== 1) return; // Frozen historical tasks retain their original execution contract.
+  const kinds = [
+    ...part.documents.map((d) => (d.kind === 'scene' ? 'location' : d.kind)),
+    ...part.scenes.map(() => 'scene'),
+    ...part.shots.map(() => (authoredPurpose === 'shot-image' ? 'shot-image' : 'shot')),
+  ];
+  if (!kinds.length) return;
+  if (!state.stage)
+    throw new Error('BUNDLE_PURPOSE_REQUIRED: select purpose before authoring prompt objects.');
+  for (const kind of kinds)
+    if (promptPurposeForKind(kind) !== state.stage.purpose)
+      throw new Error(
+        `BUNDLE_PURPOSE_MISMATCH: ${kind} requires ${promptPurposeForKind(kind)}; current purpose=${state.stage.purpose}. Switch purpose in a separate call before authoring.`,
+      );
 }

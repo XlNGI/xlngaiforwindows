@@ -333,7 +333,7 @@ describe('ChatPanel output recovery', () => {
 });
 
 describe('ChatPanel attempt metadata', () => {
-  it('lets the user edit and save the conversation prompt contract', () => {
+  it('opens the template editor in a modal, preserves drafts on close and saves the contract', () => {
     const conversation: ConversationInfo = {
       id: 'conversation-template',
       projectId: 'project',
@@ -344,7 +344,8 @@ describe('ChatPanel attempt metadata', () => {
     };
     const onChange = vi.fn();
     const onSave = vi.fn();
-    render(
+    const onKindChange = vi.fn();
+    const panel = (overrides: Partial<ComponentProps<typeof ChatPanel>> = {}) => (
       <ChatPanel
         scopeType="project"
         scopeAvailable
@@ -356,6 +357,7 @@ describe('ChatPanel attempt metadata', () => {
         statusMessage=""
         promptTemplate="固定时间和风格"
         onPromptTemplateChange={onChange}
+        onPromptTemplateKindChange={onKindChange}
         onSavePromptTemplate={onSave}
         legacyLlmConfigured={false}
         llmProfiles={[]}
@@ -371,26 +373,60 @@ describe('ChatPanel attempt metadata', () => {
         onComposerChange={vi.fn()}
         onCancelGeneration={vi.fn()}
         onSendMessage={vi.fn()}
-      />,
+        {...overrides}
+      />
     );
-    fireEvent.click(screen.getByText('本会话要求约束'));
-    const textarea = screen.getByLabelText('本会话要求约束');
+    const { container, rerender } = render(panel());
+    const trigger = screen.getByRole('button', { name: /本会话要求约束/ });
+    expect(screen.queryByRole('dialog', { name: '本会话要求约束' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: '本会话要求约束' })).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '本会话要求约束' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(container).not.toContainElement(dialog);
+    const textarea = screen.getByRole('textbox', { name: '本会话要求约束' });
+    expect(textarea).toHaveFocus();
     expect(textarea).toHaveValue('固定时间和风格');
     expect(textarea).not.toHaveAttribute('maxlength');
-    const tools = screen.getByText('模板与清理');
-    expect(tools.closest('details')).not.toHaveAttribute('open');
+    const tools = screen.getByRole('button', { name: '更多' });
+    expect(tools).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(tools);
-    fireEvent.click(screen.getByText('查看最新版分镜制作模板'));
-    const latest = screen.getByLabelText('最新版分镜制作模板');
+    fireEvent.click(screen.getByRole('button', { name: '查看默认模板' }));
+    const latest = screen.getByLabelText('当前用途默认模板');
     expect(latest).toHaveAttribute('readonly');
-    expect(textarea).toHaveValue('固定时间和风格');
     expect(onChange).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '套用最新版分镜模板' }));
-    expect(onChange).toHaveBeenCalledWith((latest as HTMLTextAreaElement).value);
+    const defaultText = (latest as HTMLTextAreaElement).value;
+    fireEvent.click(screen.getByRole('button', { name: '返回编辑' }));
+    expect(textarea).toHaveValue('固定时间和风格');
+    fireEvent.click(screen.getByRole('button', { name: '套用默认模板' }));
+    expect(onChange).toHaveBeenCalledWith(defaultText);
+    fireEvent.change(screen.getByLabelText('模板用途'), { target: { value: 'video-prompt' } });
+    expect(onKindChange).toHaveBeenCalledWith('video-prompt');
+    fireEvent.click(tools);
+    fireEvent.click(screen.getByRole('button', { name: '清空当前用途' }));
+    expect(onChange).toHaveBeenCalledWith('');
     fireEvent.change(textarea, { target: { value: '更新后的风格约束' } });
     expect(onChange).toHaveBeenCalledWith('更新后的风格约束');
-    fireEvent.click(screen.getByRole('button', { name: '保存会话约束' }));
+    rerender(panel({ promptTemplate: '更新后的风格约束', promptTemplateDirty: true }));
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(screen.queryByRole('dialog', { name: '本会话要求约束' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('textbox', { name: '本会话要求约束' })).toHaveValue('更新后的风格约束');
+    const save = screen.getByRole('button', { name: '保存约束' });
+    save.focus();
+    fireEvent.keyDown(save, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: '关闭约束编辑器' })).toHaveFocus();
+    fireEvent.click(save);
     expect(onSave).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: 'Escape', isComposing: true });
+    expect(screen.getByRole('dialog', { name: '本会话要求约束' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: '本会话要求约束' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    fireEvent.click(trigger);
+    rerender(panel({ conversation: { ...conversation, id: 'another-conversation' } }));
+    expect(screen.queryByRole('dialog', { name: '本会话要求约束' })).not.toBeInTheDocument();
   });
 
   it('shows in-conversation tool calls while a task runs', () => {
@@ -2147,7 +2183,7 @@ describe('ChatPanel attempt metadata', () => {
     expect(onOpenProviderSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('calls archive and restore callbacks for the selected conversation', () => {
+  it('renames on double click and calls archive and restore callbacks for the selected conversation', () => {
     const conversation: ConversationInfo = {
       id: 'conversation',
       projectId: 'project',
@@ -2159,12 +2195,15 @@ describe('ChatPanel attempt metadata', () => {
     const onArchiveConversation = vi.fn();
     const onRestoreConversation = vi.fn();
     const onLoadMoreConversations = vi.fn();
+    const onRenameConversation = vi.fn();
+    const onSelectConversation = vi.fn();
+    const otherConversation = { ...conversation, id: 'other-conversation', title: '另一个会话' };
     const view = render(
       <ChatPanel
         scopeType="project"
         scopeAvailable
         writable
-        conversations={[conversation]}
+        conversations={[conversation, otherConversation]}
         conversation={conversation}
         messages={[]}
         composer=""
@@ -2178,7 +2217,8 @@ describe('ChatPanel attempt metadata', () => {
         onShowArchivedConversationsChange={vi.fn()}
         canLoadMoreConversations
         onLoadMoreConversations={onLoadMoreConversations}
-        onSelectConversation={vi.fn()}
+        onRenameConversation={onRenameConversation}
+        onSelectConversation={onSelectConversation}
         onCreateConversation={vi.fn()}
         onArchiveConversation={onArchiveConversation}
         onRestoreConversation={onRestoreConversation}
@@ -2191,6 +2231,50 @@ describe('ChatPanel attempt metadata', () => {
         onSendMessage={vi.fn()}
       />,
     );
+
+    fireEvent.click(screen.getByRole('combobox', { name: '会话目录' }));
+    expect(screen.queryByRole('textbox', { name: '会话标题' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('listbox', { name: '选择会话' }), {
+      target: { value: otherConversation.id },
+    });
+    expect(onSelectConversation).toHaveBeenCalledExactlyOnceWith(otherConversation);
+    expect(screen.queryByRole('listbox', { name: '选择会话' })).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('combobox', { name: '会话目录' }), { key: 'ArrowDown' });
+    expect(screen.getByRole('listbox', { name: '选择会话' })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole('listbox', { name: '选择会话' }), { key: 'Escape' });
+    expect(screen.getByRole('combobox', { name: '会话目录' })).toHaveFocus();
+    fireEvent.doubleClick(screen.getByRole('combobox', { name: '会话目录' }));
+    const titleInput = screen.getByRole('textbox', { name: '会话标题' });
+    expect(titleInput).toHaveFocus();
+    expect(titleInput).toHaveValue('测试会话');
+    fireEvent.change(titleInput, { target: { value: '  修改后的会话  ' } });
+    fireEvent.keyDown(titleInput, { key: 'Enter', isComposing: true });
+    expect(onRenameConversation).not.toHaveBeenCalled();
+    fireEvent.keyDown(titleInput, { key: 'Enter' });
+    expect(onRenameConversation).toHaveBeenCalledExactlyOnceWith('conversation', '修改后的会话');
+
+    fireEvent.doubleClick(screen.getByRole('combobox', { name: '会话目录' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '会话标题' }), {
+      target: { value: '取消的标题' },
+    });
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '会话标题' }), { key: 'Escape' });
+    expect(onRenameConversation).toHaveBeenCalledTimes(1);
+
+    fireEvent.doubleClick(screen.getByRole('combobox', { name: '会话目录' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '会话标题' }), {
+      target: { value: '   ' },
+    });
+    fireEvent.blur(screen.getByRole('textbox', { name: '会话标题' }));
+    expect(onRenameConversation).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '重命名会话' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '会话标题' }), {
+      target: { value: '失焦保存的标题' },
+    });
+    fireEvent.blur(screen.getByRole('textbox', { name: '会话标题' }));
+    expect(onRenameConversation).toHaveBeenLastCalledWith('conversation', '失焦保存的标题');
+    expect(onRenameConversation).toHaveBeenCalledTimes(2);
 
     fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     fireEvent.click(screen.getByRole('menuitem', { name: '归档会话' }));

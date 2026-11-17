@@ -80,7 +80,7 @@ fn read_txt_document(path: &Path) -> Result<NovelImportResult, String> {
 /// Decodes downloaded novel text. Most plain-text novels are UTF-8, UTF-16 with a BOM, or legacy
 /// GBK/GB2312 encodings common on Chinese download sites, so strict UTF-8 is tried first and
 /// GB18030 (a superset of GBK/GB2312) is used as a fallback.
-fn decode_novel_text(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decode_novel_text(bytes: &[u8]) -> Result<String, String> {
     if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
         return String::from_utf8(bytes[3..].to_vec())
             .map_err(|_| "Text files must use a supported encoding".to_string());

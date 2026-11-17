@@ -1120,7 +1120,8 @@ describe('MediaPreparationService', () => {
     ).toBeUndefined();
   });
   it('offers custom OpenAI Images to enabled models without a model binding', async () => {
-    const f = await setup();
+    const attachments: LlmInputAttachment[] = [];
+    const f = await setup(attachments);
     const customProfile = f.settings.createProfile({
       name: 'Custom Images',
       category: 'llm',
@@ -1184,6 +1185,47 @@ describe('MediaPreparationService', () => {
       providerRegion: 'global',
     });
     expect(draft.normalizedParameters).toMatchObject({ prompt: 'A red fox' });
+
+    attachments.push({ name: 'reference.png', mimeType: 'image/png', dataUrl: tinyPng });
+    const referenceContext = f.service.selectionContext(
+      'image',
+      { prompt: '保留角色，融合场景' },
+      f.identity,
+    );
+    const editingCandidates = referenceContext.candidates.filter(
+      (item) => item.providerProfileId === customProfile.id,
+    );
+    expect(editingCandidates.map((item) => item.remoteModelId)).toEqual(['vendor-edit-model']);
+    const editAdapter = editingCandidates[0]!.adapters[0]!;
+    expect(editAdapter.key).toBe('REFERENCE_TO_IMAGE:custom:openai-images:v1');
+    const editDraft = f.service.prepareSelected(
+      referenceContext,
+      {
+        providerProfileId: customProfile.id,
+        modelId: editModel.id,
+        adapterKey: editAdapter.key,
+        parameters: { images: [tinyPng, 'https://example.com/background.png'] },
+      },
+      f.identity,
+    );
+    expect(editDraft.mediaModelSelection).toMatchObject({
+      remoteModelId: 'vendor-edit-model',
+      providerBaseUrl: customProfile.baseUrl,
+    });
+    const editJob = f.projectsService.access(false, (db) =>
+      createRepositories(db).jobs.get(editDraft.draftId)!,
+    );
+    const editSnapshot = JSON.parse(editJob.taskSnapshotJson!) as {
+      parameters: { images: string[] };
+      inputs: unknown[];
+    };
+    expect(editSnapshot.parameters.images).toEqual([
+      expect.stringMatching(/^controlled-file:\/\//u),
+      'https://example.com/background.png',
+    ]);
+    expect(editSnapshot.inputs).toHaveLength(1);
+    expect(editJob.taskSnapshotJson).not.toContain('base64');
+    expect(editJob.providerTaskId).toBeUndefined();
   });
   it('offers custom OpenAI-compatible video models without a model binding', async () => {
     const f = await setup();

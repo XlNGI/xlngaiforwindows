@@ -8,6 +8,7 @@ import type {
   SceneMaterialBindingInfo,
 } from '@ai-video/contracts';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
+import { documentImageBindingPredicate } from './document-image-binding.js';
 
 type AssetRow = {
   id: string;
@@ -169,8 +170,8 @@ export function productionMediaView(
   imageBindings: SceneMaterialBindingInfo[],
   materialReferences: Array<{ documentId: string; role: 'scene' | 'prop' }>,
   overrides: {
-    imageGeneration: ProductionImageSelection[];
-    videoGeneration: ProductionImageSelection[];
+    imageGeneration?: ProductionImageSelection[];
+    videoGeneration?: ProductionImageSelection[];
   },
 ) {
   return projects.access(false, (db, project) => {
@@ -184,6 +185,7 @@ export function productionMediaView(
         JOIN generation_jobs j ON j.id=r.job_id AND j.project_id=a.project_id
         WHERE a.project_id=? AND a.deleted_at IS NULL AND lower(a.kind) NOT LIKE '%video%'
           AND json_extract(j.task_snapshot_json,'$.sourceDocumentId')=?
+          AND ${documentImageBindingPredicate(db, "json_extract(j.task_snapshot_json,'$.sourceDocumentId')", 'a.id')}
         ORDER BY a.created_at DESC,a.id DESC LIMIT 9`,
         )
         .all(project.id, documentId) as Array<{ id: string }>;
@@ -261,10 +263,10 @@ export function productionMediaView(
           ]
         : [],
     );
-    const inputs = (selected: ProductionImageSelection[]) =>
-      selected.length
-        ? selected.map(({ assetId, ...item }) => ({ ...item, ...describe(assetId) }))
-        : referenceImages;
+    const inputs = (selected: ProductionImageSelection[] | undefined) =>
+      selected === undefined
+        ? referenceImages
+        : selected.map(({ assetId, ...item }) => ({ ...item, ...describe(assetId) }));
     return {
       scope: 'saved-production-bindings',
       modelAdapted: false,

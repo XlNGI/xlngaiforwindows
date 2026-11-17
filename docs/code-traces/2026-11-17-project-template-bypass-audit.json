@@ -1,0 +1,313 @@
+{
+  "auditDate": "2026-11-17",
+  "timezone": "Asia/Shanghai",
+  "readOnly": true,
+  "newProviderCalls": 0,
+  "project": {
+    "id": "9563ebc2-654e-4898-87ac-39fbfb81ecfd",
+    "name": "的撒发生",
+    "database": "C:\\Users\\MSI\\Desktop\\iphoneshare\\的撒法服务器的访问\\project.sqlite"
+  },
+  "task": {
+    "id": "a3fc6cf2-06af-466d-94a3-6d38c9175133",
+    "generationId": "96abbb78-8148-46f8-b894-14bb1bd263d6",
+    "status": "completed",
+    "createdAt": "2026-11-17T07:50:42.446Z",
+    "completedAt": "2026-11-17T07:56:51.795Z",
+    "model": "deepseek-v4-flash",
+    "protocol": "openai-chat-completions",
+    "promptGenerationVersion": null
+  },
+  "templateVersion": 1,
+  "templates": [
+    {
+      "purpose": "character-image",
+      "characters": 983,
+      "hash": "4b2bd37e225db142021d28d9081f0ee0f54a5fa5965628576938464b1c2570bd",
+      "equalsCurrent": true
+    },
+    {
+      "purpose": "prop-image",
+      "characters": 82,
+      "hash": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0",
+      "equalsCurrent": true
+    },
+    {
+      "purpose": "scene-image",
+      "characters": 368,
+      "hash": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187",
+      "equalsCurrent": true
+    },
+    {
+      "purpose": "shot-image",
+      "characters": 680,
+      "hash": "8737f51c710a5d686a3e61895998740824235007272a9f3594d7f24602936b43",
+      "equalsCurrent": true
+    },
+    {
+      "purpose": "video-prompt",
+      "characters": 3487,
+      "hash": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051",
+      "equalsCurrent": true
+    }
+  ],
+  "providerRequests": {
+    "count": 38,
+    "firstAt": "2026-11-17T07:50:42.475Z",
+    "lastAt": "2026-11-17T07:56:51.741Z"
+  },
+  "diagnosticCounts": {
+    "unselected": 7,
+    "general": 28,
+    "video-prompt": 3
+  },
+  "templateTransitions": [
+    {
+      "id": "1cc990b3-24ad-4753-a2be-5ad8b3fdf266",
+      "at": "2026-11-17T07:50:42.485Z",
+      "version": 1,
+      "general": {
+        "hash": "26d100f984f2ca7297361bf8bda2be6559b2dc4d96a4fe435165a6df8ccdf591",
+        "characters": 194
+      },
+      "scoped": []
+    },
+    {
+      "id": "66c603be-4ec2-49b5-a890-5efc2ba8bfa3",
+      "at": "2026-11-17T07:52:00.522Z",
+      "version": 1,
+      "purpose": "general",
+      "general": {
+        "hash": "26d100f984f2ca7297361bf8bda2be6559b2dc4d96a4fe435165a6df8ccdf591",
+        "characters": 194
+      },
+      "scoped": []
+    },
+    {
+      "id": "11784b8e-636b-433c-a5a6-79c7cc88cad4",
+      "at": "2026-11-17T07:56:23.875Z",
+      "version": 1,
+      "purpose": "video-prompt",
+      "general": {
+        "hash": "26d100f984f2ca7297361bf8bda2be6559b2dc4d96a4fe435165a6df8ccdf591",
+        "characters": 194
+      },
+      "scoped": [
+        {
+          "kind": "video-prompt",
+          "hash": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051",
+          "characters": 3487
+        }
+      ]
+    }
+  ],
+  "loads": [
+    {
+      "callId": "call_5fd0c0904ffb47cdb2c1ebf7",
+      "at": "2026-11-17T07:52:00.466Z",
+      "arguments": {
+        "names": [
+          "document.submit_draft",
+          "scene.read",
+          "production.read",
+          "scene.structure.stage"
+        ],
+        "workflow": "general"
+      }
+    },
+    {
+      "callId": "call_dc8bacb8c6d24f5c811fa2ee",
+      "at": "2026-11-17T07:56:23.759Z",
+      "arguments": {
+        "names": ["scene.update_shot_prompts"]
+      }
+    }
+  ],
+  "saves": [
+    {
+      "callId": "f7d19092-d47e-4b47-9a9d-96dee9e380bc",
+      "at": "2026-11-17T07:52:50.137Z",
+      "title": "林晚 · 角色提示词",
+      "documentKind": "character",
+      "documentId": "ac80ad15-2a04-4c35-8946-2b99446ce41e",
+      "versionId": "b5c0845d-d50a-4a93-bb70-5aae42e470c5",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "97d3e0e3-d008-4907-a8c4-03df26075a7e",
+      "at": "2026-11-17T07:53:06.812Z",
+      "title": "沈翰文 · 角色提示词",
+      "documentKind": "character",
+      "documentId": "5f3381aa-d707-44d7-a2cc-02cf97511d71",
+      "versionId": "31988b55-d54c-4448-beff-f2d62f104d47",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "a63aba5d-b935-4b28-b393-839057b8e142",
+      "at": "2026-11-17T07:53:41.230Z",
+      "title": "乔乔 · 角色提示词",
+      "documentKind": "character",
+      "documentId": "d3aa71e6-e83e-457b-a22e-3bf0cd7d64c3",
+      "versionId": "404ac460-1741-4a73-a677-e6d37b596290",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "2abd848f-2268-40d6-93d4-15260cb2f8c4",
+      "at": "2026-11-17T07:53:57.259Z",
+      "title": "顾晚晴 · 角色提示词",
+      "documentKind": "character",
+      "documentId": "f8afa46e-03b9-4b26-a35e-abb0789c4d32",
+      "versionId": "55e1c36e-9ba3-4e75-ba10-8a2a0bd598d0",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "07da60bb-a32a-402d-a347-a570af73ea17",
+      "at": "2026-11-17T07:54:41.098Z",
+      "title": "卧室 · 结婚纪念日清晨",
+      "documentKind": "scene",
+      "documentId": "cdc8ae99-663f-44f7-bd03-286d773f51cf",
+      "versionId": "480bb347-77de-4709-b19d-9582e7d7c00b",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "23117e49-b2ce-42a5-b75c-07a7eae6d48f",
+      "at": "2026-11-17T07:54:52.539Z",
+      "title": "门厅 · 撞见丈夫的平静伪装",
+      "documentKind": "scene",
+      "documentId": "280ca651-49e9-4123-8f09-ca2e8c4bf69b",
+      "versionId": "20c7327c-bd85-4c4c-b202-f204eee4b2c5",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "2aed4142-b92a-4ff3-b7e7-733aee8b551e",
+      "at": "2026-11-17T07:55:09.736Z",
+      "title": "深夜诊所 · 对峙真凶",
+      "documentKind": "scene",
+      "documentId": "d1170eef-d08e-4db5-9f1e-88b59a5c905e",
+      "versionId": "663a9145-a56e-41e3-abc0-8f5e97663d29",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "73e6131b-272a-428f-87f8-5ae7abb181ee",
+      "at": "2026-11-17T07:55:20.002Z",
+      "title": "胭脂红口红 · 重来的证据",
+      "documentKind": "prop",
+      "documentId": "c1dbfb56-309b-4980-9349-dc6a2ccff110",
+      "versionId": "8aa000f4-cbcd-49d9-99c0-cdb7f3143011",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "76513887-ac1c-465d-af0e-2d0c14e183fc",
+      "at": "2026-11-17T07:55:33.697Z",
+      "title": "林晚的银质环扣吊坠 · 环扣",
+      "documentKind": "prop",
+      "documentId": "cfc27955-cdab-458d-9bb1-4b8224974b5a",
+      "versionId": "e7e9bee4-bd5e-45cd-abb2-652a93e76cae",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    },
+    {
+      "callId": "b308546e-18c0-490f-90d0-1637b640cdcc",
+      "at": "2026-11-17T07:55:55.884Z",
+      "title": "沈翰文的旧怀表 · 7:30的定格",
+      "documentKind": "prop",
+      "documentId": "fba5e496-2a98-43eb-b500-ebcb022408b7",
+      "versionId": "2c2a9e24-85fb-4d4c-b38a-3c15adeaf74c",
+      "purpose": "general",
+      "scopedTemplates": [],
+      "submittedEqualsSaved": true
+    }
+  ],
+  "calls": [
+    {
+      "tool_name": "conversation.task.checkpoint",
+      "status": "failed",
+      "count": 2
+    },
+    {
+      "tool_name": "conversation.task.checkpoint",
+      "status": "succeeded",
+      "count": 3
+    },
+    {
+      "tool_name": "conversation.task.route",
+      "status": "failed",
+      "count": 1
+    },
+    {
+      "tool_name": "document.submit_draft",
+      "status": "failed",
+      "count": 6
+    },
+    {
+      "tool_name": "document.submit_draft",
+      "status": "succeeded",
+      "count": 10
+    },
+    {
+      "tool_name": "library.read",
+      "status": "succeeded",
+      "count": 1
+    },
+    {
+      "tool_name": "library.search",
+      "status": "succeeded",
+      "count": 1
+    },
+    {
+      "tool_name": "production.read",
+      "status": "failed",
+      "count": 4
+    },
+    {
+      "tool_name": "production.read",
+      "status": "succeeded",
+      "count": 4
+    },
+    {
+      "tool_name": "project.structure.get",
+      "status": "succeeded",
+      "count": 3
+    },
+    {
+      "tool_name": "scene.read",
+      "status": "succeeded",
+      "count": 2
+    },
+    {
+      "tool_name": "scene.update_shot_prompts",
+      "status": "succeeded",
+      "count": 1
+    }
+  ],
+  "assertions": {
+    "tenFirstSavesMatchSubmittedText": true,
+    "allTenSavesUsedGeneralWithoutScopedTemplates": true,
+    "currentTemplatesEqualFrozenTemplates": true,
+    "noUnifiedPromptGenerationCalls": true,
+    "noFrozenUnifiedInput": true,
+    "noCharacterScenePropTemplateInAll38DiagnosticRequests": true
+  },
+  "limits": [
+    "Persisted Worker projection diagnostics, runtime snapshots and Native request metadata were inspected; historical HTTP body bytes were not captured by this audit.",
+    "The ten original saved versions were compared with successful tool arguments; a later edit to a character document is a separate version.",
+    "Content omissions were manually compared with the applicable templates; no model-based semantic grading was run."
+  ]
+}

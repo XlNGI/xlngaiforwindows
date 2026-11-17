@@ -9,6 +9,39 @@ import {
 import type { StoredToolResult } from '@ai-video/persistence';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { BUNDLE_PROMPT_READ_VIEW } from './production-bundle-schema.js';
+import { taskEvidenceKey } from './agent-preparation-evidence.js';
+
+it('keeps executed empty navigation scopes and pagination in externalized receipts', () => {
+  const value = {
+    status: 'succeeded',
+    detail: 'full',
+    resourceMap: {
+      projectId: 'project',
+      revision: 'revision',
+      filters: { kind: 'shot', parentId: 'scene:first', includeArchived: false },
+      resources: [],
+      offset: 0,
+      limit: 20,
+      totalResources: 0,
+      truncated: false,
+    },
+    structure: { metadata: '标题'.repeat(4000) },
+  };
+  const result: StoredToolResult = {
+    id: 'full',
+    callId: 'call',
+    toolName: 'project.structure.get',
+    status: 'completed',
+    content: JSON.stringify(value),
+    contentHash: 'hash',
+    arguments: {},
+    version: 1,
+  };
+  const receipt = JSON.parse(modelResultReceipt(result)) as Record<string, unknown>;
+  expect(receipt).toMatchObject({ externalized: true, resourceMap: value.resourceMap });
+  expect(taskEvidenceKey(result.toolName, receipt)).toBe(taskEvidenceKey(result.toolName, value));
+  expect(result.content).toBe(JSON.stringify(value));
+});
 
 it('projects retained batch pages once, preserves evicted pages and suppresses superseded candidate text', () => {
   const page = (localKey: string, hash: string, text: string) => ({

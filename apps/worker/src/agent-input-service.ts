@@ -11,6 +11,7 @@ import {
   type AgentInputSubmitResult,
 } from '@ai-video/contracts';
 import { ProjectService } from './project-service.js';
+import { assessTaskCompletion, assertTaskPartialAllowed } from './agent-task-deliverables.js';
 
 type EventRow = { id: string; payload_json: string; created_at: string };
 
@@ -58,6 +59,33 @@ export class AgentInputService {
       database.transaction(() => {
         if (identity.projectId !== project.id) throw new Error('Question project does not match.');
         requireTask(database, project.id, identity.taskId, identity.conversationId);
+        const generation = database
+          .prepare(
+            'SELECT generation_id FROM agent_task_generations WHERE task_id=? ORDER BY ordinal DESC LIMIT 1',
+          )
+          .get(identity.taskId) as { generation_id: string } | undefined;
+        const progress = generation
+          ? assessTaskCompletion(database, project.id, generation.generation_id, identity.taskId!)
+          : undefined;
+        const onlySavedReview =
+          progress?.pending.length &&
+          progress.pending.every((item) => {
+            const action = item.nextAction as
+              | {
+                  kind?: string;
+                  toolName?: string;
+                  arguments?: { operation?: string };
+                }
+              | undefined;
+            return (
+              (action?.kind === 'review_outputs' && item.remainingCount === 0) ||
+              (item.businessSaved === true &&
+                action?.toolName === 'production.bundle' &&
+                action.arguments?.operation === 'readback')
+            );
+          });
+        if (draft.purpose === 'next_step' || (draft.purpose === undefined && onlySavedReview))
+          assertTaskPartialAllowed(progress);
         const dedupe = `user-input:request:${draft.key}`;
         const existing = database
           .prepare('SELECT * FROM agent_task_events WHERE task_id=? AND dedupe_key=?')
@@ -67,6 +95,7 @@ export class AgentInputService {
           const saved = {
             key: form.key,
             title: form.title,
+            ...(form.purpose !== undefined ? { purpose: form.purpose } : {}),
             ...(form.description !== undefined ? { description: form.description } : {}),
             questions: form.questions,
           };

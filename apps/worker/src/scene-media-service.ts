@@ -5,6 +5,7 @@ import type {
 } from '@ai-video/contracts';
 import { VoiceReferenceRepository } from '@ai-video/persistence';
 import { ProjectService } from './project-service.js';
+import { documentImageBindingPredicate } from './document-image-binding.js';
 
 /** Resolve a bounded scene projection, independently of library pagination. No filesystem reads. */
 export function resolveSceneMedia(
@@ -22,6 +23,7 @@ export function resolveSceneMedia(
         (SELECT a.id FROM generation_jobs j JOIN generation_results r ON r.job_id=j.id
          JOIN assets a ON a.id=r.asset_id AND a.project_id=j.project_id
          WHERE j.project_id=d.project_id AND json_extract(j.task_snapshot_json,'$.sourceDocumentId')=d.id
+           AND ${documentImageBindingPredicate(db, 'd.id', 'a.id')}
            AND a.deleted_at IS NULL AND lower(a.kind) NOT LIKE '%video%'
          ORDER BY a.created_at,a.id LIMIT 1) AS imageId
       FROM documents d WHERE d.project_id=? AND d.kind='character' AND d.id IN (${ids.map(() => '?').join(',')})
@@ -43,6 +45,7 @@ export function resolveSceneMedia(
         ROW_NUMBER() OVER (PARTITION BY json_extract(j.task_snapshot_json,'$.sourceDocumentId') ORDER BY a.created_at DESC,a.id DESC) AS position
       FROM generation_jobs j JOIN generation_results r ON r.job_id=j.id JOIN assets a ON a.id=r.asset_id AND a.project_id=j.project_id
       WHERE j.project_id=? AND json_extract(j.task_snapshot_json,'$.sourceDocumentId') IN (${ids.map(() => '?').join(',')})
+        AND ${documentImageBindingPredicate(db, "json_extract(j.task_snapshot_json,'$.sourceDocumentId')", 'a.id')}
         AND a.deleted_at IS NULL AND lower(a.kind) NOT LIKE '%video%'
     ) SELECT id,documentId FROM ranked WHERE position<=8`,
           )

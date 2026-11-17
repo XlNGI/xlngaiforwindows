@@ -27,6 +27,8 @@ mod llm_stream;
 mod model_contract;
 mod novel_import;
 mod official_video;
+mod openai_image_edit;
+pub mod project_directory;
 mod provider_connector;
 mod provider_http;
 mod request_guard;
@@ -364,7 +366,7 @@ struct MediaCredentialSelection {
 fn openai_images_provider(adapter_key: &str) -> Option<&'static str> {
     let parts = adapter_key.split(':').collect::<Vec<_>>();
     if parts.len() != 4
-        || parts[0] != "TEXT_TO_IMAGE"
+        || !matches!(parts[0], "TEXT_TO_IMAGE" | "REFERENCE_TO_IMAGE")
         || parts[2] != "openai-images"
         || parts[3] != "v1"
     {
@@ -519,7 +521,9 @@ fn resolve_media_selection(
         .ok_or("Worker returned an invalid provider model list")?;
     let required_capability = if ensure_video_adapter(adapter_key).is_ok() {
         "videoGeneration"
-    } else if adapter_key.starts_with("REFERENCE_TO_IMAGE:unicompapi:") {
+    } else if adapter_key.starts_with("REFERENCE_TO_IMAGE:")
+        && (provider_type == "unicompapi" || openai_images.is_some())
+    {
         "imageEditing"
     } else {
         "imageGeneration"
@@ -662,7 +666,10 @@ fn openai_compatible_target(
     provider_type: &str,
     endpoint: &str,
 ) -> Result<OpenAiImagesTarget, String> {
-    if !matches!(endpoint, "/images/generations" | "/videos") {
+    if !matches!(
+        endpoint,
+        "/images/generations" | "/images/edits" | "/videos"
+    ) {
         return Err("OpenAI-compatible endpoint is not allowed".into());
     }
     let url = tauri::Url::parse(base_url).map_err(|_| "Provider Base URL is invalid")?;
@@ -683,7 +690,7 @@ fn openai_compatible_target(
         return Err("Provider Base URL must be an API root, not an endpoint URL".into());
     }
     if provider_type == "openai"
-        && (endpoint != "/images/generations"
+        && (!matches!(endpoint, "/images/generations" | "/images/edits")
             || host != "api.openai.com"
             || base_path != "/v1"
             || url.port().is_some())
@@ -1033,37 +1040,61 @@ fn provider_openai_images_submit_blocking(
             "Provider and OpenAI Images adapter do not match",
         ));
     }
-    let target = openai_images_target(base_url, provider_type)
-        .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let editing = adapter_key.starts_with("REFERENCE_TO_IMAGE:");
+    let target = openai_compatible_target(
+        base_url,
+        provider_type,
+        if editing {
+            "/images/edits"
+        } else {
+            "/images/generations"
+        },
+    )
+    .map_err(OpenAiImagesSubmitFailure::not_sent)?;
     if provider_type == "custom" {
         provider_http::assert_provider_api_host(&target.host)
     } else {
         provider_http::assert_public_host(&target.host)
     }
     .map_err(OpenAiImagesSubmitFailure::not_sent)?;
-    let body = openai_images_payload(adapter_key, remote_model_id, payload)
-        .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+    let (body, boundary) = if editing {
+        let edit = openai_image_edit::build(adapter_key, remote_model_id, payload)
+            .map_err(OpenAiImagesSubmitFailure::not_sent)?;
+        (edit.body, Some(edit.boundary))
+    } else {
+        (
+            openai_images_payload(adapter_key, remote_model_id, payload)
+                .map_err(OpenAiImagesSubmitFailure::not_sent)?,
+            None,
+        )
+    };
     let secret =
         credential_read(credential_subject).map_err(OpenAiImagesSubmitFailure::not_sent)?;
     let secret = secret
         .as_str()
         .map_err(OpenAiImagesSubmitFailure::not_sent)?;
-    let response = provider_http::request_json_with_receive_timeout(
-        JsonHttpRequest {
-            host: &target.host,
-            port: target.port,
-            secure: true,
-            method: "POST",
-            path: &target.path,
-            authorization_scheme: "Bearer",
-            accept: "application/json",
-            secret,
-            body: Some(&body),
-            request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
-            response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
-        },
-        Duration::from_secs(5 * 60),
-    )
+    let request = JsonHttpRequest {
+        host: &target.host,
+        port: target.port,
+        secure: true,
+        method: "POST",
+        path: &target.path,
+        authorization_scheme: "Bearer",
+        accept: "application/json",
+        secret,
+        body: Some(&body),
+        request_body_limit: PROVIDER_REQUEST_BODY_LIMIT,
+        response_body_limit: UNICOMPAPI_RESPONSE_BODY_LIMIT,
+    };
+    let response = if let Some(boundary) = boundary.as_deref() {
+        provider_http::request_multipart_json_with_receive_timeout(
+            request,
+            Duration::from_secs(5 * 60),
+            boundary,
+        )
+    } else {
+        provider_http::request_json_with_receive_timeout(request, Duration::from_secs(5 * 60))
+    }
     .map_err(OpenAiImagesSubmitFailure::after_transport)?;
     let mut response = ProviderHttpResponse {
         status: response.status,
@@ -3343,6 +3374,30 @@ fn dispatch_host_request(
     streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
     available: Arc<AtomicBool>,
 ) {
+    dispatch_host_request_with_stream(
+        value,
+        writer,
+        streams,
+        available,
+        |params, cancellation, emit| llm_stream::native_provider_stream(params, cancellation, emit),
+    );
+}
+
+type HostProviderStream = fn(
+    serde_json::Value,
+    Arc<llm_stream::LlmCancellation>,
+    &mut dyn FnMut(llm_stream::LlmStreamEvent) -> Result<(), llm_stream::StreamFailure>,
+) -> Result<(), llm_stream::StreamFailure>;
+
+// Keep the real host routing and event transport in boundary tests; only the
+// credential source and loopback HTTP permission are replaced by the fixture.
+fn dispatch_host_request_with_stream(
+    value: serde_json::Value,
+    writer: Arc<Mutex<ChildStdin>>,
+    streams: Arc<Mutex<std::collections::HashMap<String, ActiveHostStream>>>,
+    available: Arc<AtomicBool>,
+    stream_provider: HostProviderStream,
+) {
     if !available.load(Ordering::Acquire) {
         return;
     }
@@ -3497,6 +3552,7 @@ fn dispatch_host_request(
                     params,
                     Arc::clone(&cancellation),
                     &writer,
+                    stream_provider,
                 );
                 if let Ok(mut active) = streams.lock() {
                     if active
@@ -3965,21 +4021,14 @@ fn provider_media_poll_blocking(
     } else {
         None
     };
-    normalize_provider_media_poll(
-        &response,
-        if model_contract::is_contract_adapter(adapter_key) {
-            "official-contract"
-        } else {
-            provider_region
-        },
-        output.as_ref(),
-    )
-    .map_err(|error| host_error("INTERNAL_ERROR", error, false))
+    normalize_provider_media_poll(&response, provider_region, adapter_key, output.as_ref())
+        .map_err(|error| host_error("INTERNAL_ERROR", error, false))
 }
 
 fn normalize_provider_media_poll(
     response: &ProviderHttpResponse,
     provider_region: &str,
+    adapter_key: &str,
     output: Option<&ProviderBinaryDownloadResponse>,
 ) -> Result<serde_json::Value, String> {
     let provider_state = provider_state(&response.body)
@@ -3996,11 +4045,24 @@ fn normalize_provider_media_poll(
                 "queued"
             }
             Some("in_progress" | "processing" | "running") => "running",
-            Some("unknown") if provider_region == "unicompapi" => "running",
+            // Preserve the retired contract-1 behavior without applying it to current revisions.
+            Some("unknown")
+                if provider_region == "unicompapi" && !adapter_key.ends_with(":contract-1") =>
+            {
+                "running"
+            }
             Some("success" | "succeeded" | "completed") => "succeeded",
             Some("cancelled" | "canceled") => "cancelled",
-            Some("failed" | "failure" | "error" | "expired") | None => "failed",
-            Some(_) => "failed",
+            Some("failed" | "failure" | "error" | "expired") => "failed",
+            Some(state) => {
+                return Err(format!(
+                    "Provider polling returned an unsupported task state: {}",
+                    sanitize_provider_diagnostic(state)
+                ))
+            }
+            None => {
+                return Err("Provider polling response did not contain a task state".to_string())
+            }
         }
     };
     if state == "succeeded" && output.is_none() {
@@ -4045,22 +4107,24 @@ fn normalize_provider_media_poll(
         normalized.insert("output".to_string(), value);
     }
     if state == "failed" {
-        let (code, message) = provider_submit_error(&response.body);
-        let message = sanitize_provider_diagnostic(
-            message
-                .as_deref()
-                .unwrap_or("Provider returned a failed or unsupported task state"),
-        );
         normalized.insert(
             "error".to_string(),
-            serde_json::json!({
-                "code": code.map(|value| sanitize_provider_diagnostic(&value)),
-                "message": message,
-                "retryable": false,
-            }),
+            provider_media_poll_error(&response.body),
         );
     }
     Ok(serde_json::Value::Object(normalized))
+}
+
+fn provider_media_poll_error(body: &serde_json::Value) -> serde_json::Value {
+    let (code, message) = provider_submit_error(body);
+    let mut error = serde_json::json!({
+        "message": sanitize_provider_diagnostic(message.as_deref().unwrap_or("Provider video task failed")),
+        "retryable": false,
+    });
+    if let Some(code) = code {
+        error["code"] = serde_json::json!(sanitize_provider_diagnostic(&code));
+    }
+    error
 }
 
 fn run_host_provider_stream(
@@ -4069,6 +4133,7 @@ fn run_host_provider_stream(
     params: serde_json::Value,
     cancellation: Arc<llm_stream::LlmCancellation>,
     writer: &Arc<Mutex<ChildStdin>>,
+    stream_provider: HostProviderStream,
 ) {
     let mut sequence = 0_u64;
     let mut emit = |mut event: serde_json::Value| -> Result<(), llm_stream::StreamFailure> {
@@ -4092,7 +4157,7 @@ fn run_host_provider_stream(
         sequence += 1;
         Ok(())
     };
-    let result = llm_stream::native_provider_stream(params, Arc::clone(&cancellation), |event| {
+    let result = stream_provider(params, Arc::clone(&cancellation), &mut |event| {
         emit_native_provider_event(event, &mut emit)
     });
     match result {
@@ -4364,6 +4429,8 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
         "inferenceSettings",
         "modelCapabilities",
         "contextTurns",
+        "toolCallMode",
+        "requiredTool",
         "attemptId",
         "projectId",
         "projectSessionId",
@@ -4403,6 +4470,21 @@ fn validate_provider_stream_params(value: &serde_json::Value) -> Result<(), Stri
     }
     if contains_sensitive_host_data(value) {
         return Err("Sensitive data cannot cross the Native Provider boundary".to_string());
+    }
+    if let Some(mode) = value.get("toolCallMode") {
+        llm_stream::validate_provider_tool_call_mode(mode)?;
+    }
+    if let Some(required) = value.get("requiredTool") {
+        let name = required
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or("Native Provider requiredTool must name an authorized tool")?;
+        if !value["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"].as_str() == Some(name)))
+        {
+            return Err("Native Provider requiredTool must name an authorized tool".to_string());
+        }
     }
     if let Some(settings) = value.get("inferenceSettings") {
         llm_stream::validate_provider_inference_settings(
@@ -4586,44 +4668,54 @@ pub(crate) struct MarkdownImportResult {
 
 pub(crate) fn read_markdown_document(path: &Path) -> Result<MarkdownImportResult, String> {
     if !path.is_absolute() {
-        return Err("Markdown import path must be absolute".to_string());
+        return Err("Document import path must be absolute".to_string());
     }
     let supported_extension = path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            extension.eq_ignore_ascii_case("md")
+                || extension.eq_ignore_ascii_case("markdown")
+                || extension.eq_ignore_ascii_case("txt")
         });
     if !supported_extension {
-        return Err("Only .md and .markdown files can be imported".to_string());
+        return Err("Only .txt, .md and .markdown files can be imported".to_string());
     }
 
     let mut file =
-        File::open(path).map_err(|error| format!("Could not open Markdown file: {error}"))?;
+        File::open(path).map_err(|error| format!("Could not open document file: {error}"))?;
     let metadata = file
         .metadata()
-        .map_err(|error| format!("Could not inspect Markdown file: {error}"))?;
+        .map_err(|error| format!("Could not inspect document file: {error}"))?;
     if !metadata.is_file() {
-        return Err("Markdown import path must identify a file".to_string());
+        return Err("Document import path must identify a file".to_string());
     }
     if metadata.len() > MARKDOWN_IMPORT_LIMIT {
-        return Err("Markdown file exceeds the 5 MiB import limit".to_string());
+        return Err("Document file exceeds the 5 MiB import limit".to_string());
     }
 
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read Markdown file: {error}"))?;
+        .map_err(|error| format!("Could not read document file: {error}"))?;
     if bytes.len() as u64 > MARKDOWN_IMPORT_LIMIT {
-        return Err("Markdown file exceeds the 5 MiB import limit".to_string());
+        return Err("Document file exceeds the 5 MiB import limit".to_string());
     }
-    let content = String::from_utf8(bytes)
-        .map_err(|_| "Markdown files must use UTF-8 encoding".to_string())?;
+    let content = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+    {
+        novel_import::decode_novel_text(&bytes)?
+    } else {
+        String::from_utf8(bytes)
+            .map_err(|_| "Markdown files must use UTF-8 encoding".to_string())?
+    };
     let title = path
         .file_stem()
         .and_then(|value| value.to_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or("Markdown file name cannot be used as a document title")?;
+        .ok_or("Document file name cannot be used as a document title")?;
 
     Ok(MarkdownImportResult {
         title: title.to_string(),
@@ -4933,6 +5025,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            project_directory::project_directory_pick,
             worker_request,
             markdown_import,
             novel_import,
@@ -5275,7 +5368,7 @@ mod tests {
         assert_eq!(imported.title, "第一章");
         assert_eq!(imported.content_markdown, "# 第一章\n\n故事开始。");
 
-        let unsupported = root.join("notes.txt");
+        let unsupported = root.join("notes.pdf");
         write(&unsupported, "not Markdown").expect("write unsupported fixture");
         assert!(super::read_markdown_document(&unsupported).is_err());
 
@@ -5291,6 +5384,48 @@ mod tests {
         assert!(super::read_markdown_document(&oversized).is_err());
 
         remove_dir_all(root).expect("remove Markdown import fixture directory");
+    }
+
+    #[test]
+    fn markdown_import_preserves_plain_text_in_common_windows_encodings() {
+        let root = std::env::temp_dir().join(format!(
+            "unicomp-script-text-import-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        create_dir_all(&root).expect("create script text fixtures");
+        let text = "第一场 内景 客厅 日\r\n\r\n小林：你好。\r\n（推门进入）";
+        let mut utf16_le = vec![0xff, 0xfe];
+        let mut utf16_be = vec![0xfe, 0xff];
+        for unit in text.encode_utf16() {
+            utf16_le.extend_from_slice(&unit.to_le_bytes());
+            utf16_be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let (gbk, _, had_errors) = encoding_rs::GBK.encode(text);
+        assert!(!had_errors);
+        for (name, bytes) in [
+            ("剧本-utf8.txt", text.as_bytes().to_vec()),
+            ("剧本-bom.TXT", format!("\u{feff}{text}").into_bytes()),
+            ("剧本-utf16-le.txt", utf16_le),
+            ("剧本-utf16-be.txt", utf16_be),
+            ("剧本-gbk.txt", gbk.into_owned()),
+        ] {
+            let path = root.join(name);
+            write(&path, bytes).expect("write script text fixture");
+            let imported = super::read_markdown_document(&path).expect("import script text");
+            assert_eq!(imported.title, path.file_stem().unwrap().to_str().unwrap());
+            assert_eq!(imported.content_markdown, text);
+        }
+        assert!(super::read_markdown_document(Path::new("relative.txt")).is_err());
+        let oversized = root.join("oversized.txt");
+        std::fs::File::create(&oversized)
+            .expect("create oversized text fixture")
+            .set_len(MARKDOWN_IMPORT_LIMIT + 1)
+            .expect("size oversized text fixture");
+        assert!(super::read_markdown_document(&oversized).is_err());
+        remove_dir_all(root).expect("remove script text fixtures");
     }
 
     #[test]
@@ -6099,7 +6234,7 @@ mod tests {
             body: json!({"status":"FAILURE","fail_reason":"blocked"}),
             retry_after_ms: None,
         };
-        let failure = normalize_provider_media_poll(&response, "unicompapi", None).unwrap();
+        let failure = normalize_provider_media_poll(&response, "unicompapi", "", None).unwrap();
         assert_eq!(failure["state"], "failed");
         assert_eq!(failure["error"]["message"], "blocked");
         let success = ProviderHttpResponse {
@@ -6107,7 +6242,7 @@ mod tests {
             body: json!({"status":"completed","url":"https://example.com/video.mp4"}),
             retry_after_ms: None,
         };
-        assert!(normalize_provider_media_poll(&success, "unicompapi", None).is_err());
+        assert!(normalize_provider_media_poll(&success, "unicompapi", "", None).is_err());
         let key = "REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3";
         assert!(ensure_video_adapter(key).is_ok());
         assert!(unicompapi_payload(key,json!({"prompt":"test","audio":true,"media":[{"type":"reference_audio","url":"https://example.com/voice.wav"}]}),"wan3.0-video").is_ok());
@@ -7213,6 +7348,82 @@ mod tests {
     }
 
     #[test]
+    fn native_provider_host_contract_accepts_tool_call_modes_for_both_protocols() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            for (mode, readonly, expected) in [
+                (Some("single"), true, false),
+                (Some("parallel-readonly"), false, true),
+                (None, true, true),
+                (None, false, false),
+            ] {
+                let mut value = native_provider_stream_fixture();
+                value["protocol"] = json!(protocol);
+                value["tools"] = if readonly {
+                    json!([{"name":"library.read", "description":"read", "parameters":{"type":"object"}, "executionLane":"parallel-readonly"}])
+                } else {
+                    json!([{"name":"document.create", "description":"write", "parameters":{"type":"object"}}])
+                };
+                if let Some(mode) = mode {
+                    value["toolCallMode"] = json!(mode);
+                }
+                validate_provider_stream_params(&value).unwrap();
+                let body = crate::llm_stream::request_body_for_contract_test(value).unwrap();
+                assert_eq!(
+                    body["parallel_tool_calls"], expected,
+                    "{protocol}: {mode:?}"
+                );
+                assert!(body.get("toolCallMode").is_none());
+                assert!(body.get("tool_call_mode").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn native_provider_host_contract_rejects_invalid_tool_call_modes() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            for mode in [
+                json!(null),
+                json!(false),
+                json!(1),
+                json!([]),
+                json!({"mode":"single"}),
+                json!({"single":null}),
+                json!({"parallel-readonly":null}),
+                json!(""),
+                json!("parallel"),
+                json!("Single"),
+            ] {
+                let mut value = native_provider_stream_fixture();
+                value["protocol"] = json!(protocol);
+                value["toolCallMode"] = mode;
+                assert_eq!(
+                    validate_provider_stream_params(&value).unwrap_err(),
+                    "Native Provider toolCallMode must be single or parallel-readonly"
+                );
+                assert!(crate::llm_stream::request_body_for_contract_test(value).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn native_provider_host_contract_validates_required_authoring_tool() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            let mut value = native_provider_stream_fixture();
+            value["protocol"] = json!(protocol);
+            value["requiredTool"] = json!("prompt.generation.submit");
+            value["toolCallMode"] = json!("single");
+            assert!(validate_provider_stream_params(&value).is_err());
+            value["tools"] = json!([{"name":"prompt.generation.submit","description":"all prompts","parameters":{"type":"object"}}]);
+            validate_provider_stream_params(&value).unwrap();
+            let body = crate::llm_stream::request_body_for_contract_test(value.clone()).unwrap();
+            assert_eq!(body["tool_choice"]["type"], "function");
+            assert!(body.get("requiredTool").is_none());
+            value["requiredTool"] = json!(false);
+            assert!(validate_provider_stream_params(&value).is_err());
+        }
+    }
+
+    #[test]
     fn native_provider_host_contract_accepts_inference_settings_through_request_body() {
         for (protocol, parameter) in [
             ("openai-responses", "max_output_tokens"),
@@ -7279,8 +7490,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn native_provider_host_contract_accepts_actual_worker_envelopes_with_settings() {
+    fn native_provider_worker_envelopes(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
         let worker_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worker");
         let script = r#"
             import { NativeProviderBridge, createPiStreamFunction } from './dist/native-provider-bridge.js';
@@ -7294,6 +7504,28 @@ mod tests {
             }
             process.stdout.write(JSON.stringify(envelopes));
         "#;
+        let output = Command::new("node")
+            .args([
+                "--input-type=module",
+                "-e",
+                script,
+                &serde_json::to_string(cases).unwrap(),
+            ])
+            .current_dir(worker_directory)
+            .output()
+            .expect("Worker bridge fixture should start");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelopes: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelopes.len(), cases.len());
+        envelopes
+    }
+
+    #[test]
+    fn native_provider_host_contract_accepts_actual_worker_envelopes_with_settings() {
         let cases = ["openai-responses", "openai-chat-completions"].map(|protocol| {
             let mut value = native_provider_stream_fixture();
             value["protocol"] = json!(protocol);
@@ -7311,24 +7543,7 @@ mod tests {
             };
             value
         });
-        let output = Command::new("node")
-            .args([
-                "--input-type=module",
-                "-e",
-                script,
-                &serde_json::to_string(&cases).unwrap(),
-            ])
-            .current_dir(worker_directory)
-            .output()
-            .expect("Worker bridge fixture should start");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let envelopes: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(envelopes.len(), 2);
-        for envelope in envelopes {
+        for envelope in native_provider_worker_envelopes(&cases) {
             validate_host_request_envelope(&envelope).unwrap();
             let params = &envelope["params"];
             validate_provider_stream_params(params).unwrap();
@@ -7346,6 +7561,219 @@ mod tests {
                 messages.last().unwrap(),
                 &json!({"role": "user", "content": "New user instruction"})
             );
+        }
+    }
+
+    fn native_provider_host_echo_fixture() -> WorkerProcess {
+        let mut command = Command::new("node");
+        command.args([
+            "-e",
+            "require('readline').createInterface({input:process.stdin}).on('line',line=>process.stdout.write(JSON.stringify({received:JSON.parse(line)})+'\\n'))",
+        ]);
+        WorkerProcess::spawn_command(command).unwrap()
+    }
+
+    #[test]
+    fn native_provider_host_routes_worker_modes_to_local_http_for_both_protocols() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let echo = native_provider_host_echo_fixture();
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            for (mode, readonly, expected) in [
+                (Some("single"), true, false),
+                (Some("parallel-readonly"), false, true),
+                (None, true, true),
+                (None, false, false),
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let mut params = native_provider_stream_fixture();
+                params["baseUrl"] = json!(format!("http://127.0.0.1:{port}/v1"));
+                params["protocol"] = json!(protocol);
+                params["tools"] = if readonly {
+                    json!([{"name":"library.read", "description":"read", "parameters":{"type":"object"}, "executionLane":"parallel-readonly"}])
+                } else {
+                    json!([{"name":"document.create", "description":"write", "parameters":{"type":"object"}}])
+                };
+                if let Some(mode) = mode {
+                    params["toolCallMode"] = json!(mode);
+                }
+                let envelope = native_provider_worker_envelopes(&[params]).pop().unwrap();
+                let request_id = envelope["requestId"].clone();
+                let server = thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "Native route did not reach mock HTTP"
+                                );
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(error) => panic!("mock accept failed: {error}"),
+                        }
+                    };
+                    // Windows can inherit the listener's nonblocking mode.
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let (body_start, length) = loop {
+                        let mut chunk = [0u8; 4096];
+                        let count = stream.read(&mut chunk).unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let path = if protocol == "openai-responses" {
+                                "responses"
+                            } else {
+                                "chat/completions"
+                            };
+                            assert!(headers.starts_with(&format!("POST /v1/{path} HTTP/1.1")));
+                            assert!(headers
+                                .to_ascii_lowercase()
+                                .contains("authorization: bearer local-native-boundary-key"));
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|value| value.trim().parse().unwrap())
+                                })
+                                .unwrap();
+                            if bytes.len() >= end + 4 + length {
+                                break (end + 4, length);
+                            }
+                        }
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&bytes[body_start..body_start + length]).unwrap();
+                    assert_eq!(body["parallel_tool_calls"], expected);
+                    assert_eq!(body["model"], "remote");
+                    assert!(body.get("toolCallMode").is_none());
+                    assert!(body.get("tool_call_mode").is_none());
+                    assert!(!body.to_string().contains("executionLane"));
+                    let payload = if protocol == "openai-responses" {
+                        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"boundary ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+                    } else {
+                        "data: {\"id\":\"chat_mock\",\"choices\":[{\"delta\":{\"content\":\"boundary ok\"}}]}\n\ndata: [DONE]\n\n"
+                    };
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload).unwrap();
+                });
+                super::dispatch_host_request_with_stream(
+                    envelope,
+                    Arc::clone(&echo.stdin),
+                    Arc::clone(&echo.host_streams),
+                    Arc::clone(&echo.available),
+                    crate::llm_stream::native_provider_stream_for_contract_test,
+                );
+                let mut saw_delta = false;
+                let mut saw_complete = false;
+                let mut sequence = 0;
+                loop {
+                    let line = echo
+                        .responses
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(15))
+                        .unwrap()
+                        .unwrap();
+                    assert!(!line.contains("local-native-boundary-key"));
+                    let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let received = &value["received"];
+                    assert_eq!(received["requestId"], request_id);
+                    if received["kind"] == "host.response" {
+                        assert_eq!(received["ok"], true, "{received}");
+                        assert_eq!(received["result"]["projectSessionId"], "session");
+                        break;
+                    }
+                    assert_eq!(received["kind"], "host.event");
+                    assert_eq!(received["sequence"], sequence);
+                    assert_eq!(received["event"]["projectSessionId"], "session");
+                    sequence += 1;
+                    if received["event"]["type"] == "text_delta" {
+                        assert_eq!(received["event"]["delta"], "boundary ok");
+                        saw_delta = true;
+                    }
+                    saw_complete |= received["event"]["type"] == "complete";
+                }
+                server.join().unwrap();
+                assert!(saw_delta && saw_complete, "{protocol}: {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_provider_host_rejects_bad_modes_and_secrets_before_stream_execution() {
+        let echo = native_provider_host_echo_fixture();
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            let mut invalids = Vec::new();
+            for mode in [
+                json!(null),
+                json!(false),
+                json!(1),
+                json!([]),
+                json!({}),
+                json!({"single":null}),
+                json!({"parallel-readonly":null}),
+                json!(""),
+                json!("parallel"),
+            ] {
+                let mut params = native_provider_stream_fixture();
+                params["toolCallMode"] = mode;
+                invalids.push(params);
+            }
+            for (field, value) in [
+                ("unknown", json!(true)),
+                ("apiKey", json!("fixture-secret")),
+                ("headers", json!({"Authorization":"fixture-secret"})),
+            ] {
+                let mut params = native_provider_stream_fixture();
+                params["toolCallMode"] = json!("single");
+                params[field] = value;
+                invalids.push(params);
+            }
+            let mut nested_secret = native_provider_stream_fixture();
+            nested_secret["toolCallMode"] = json!("parallel-readonly");
+            nested_secret["attachments"][0]["apiKey"] = json!("fixture-secret");
+            invalids.push(nested_secret);
+            for mut params in invalids {
+                params["protocol"] = json!(protocol);
+                super::dispatch_host_request_with_stream(
+                    json!({"kind":"host.request", "requestId":"invalid-mode", "method":"provider.stream.start", "params":params}),
+                    Arc::clone(&echo.stdin),
+                    Arc::clone(&echo.host_streams),
+                    Arc::clone(&echo.available),
+                    |_, _, _| {
+                        panic!("Invalid input must be rejected before credential lookup or HTTP")
+                    },
+                );
+                let line = echo
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert!(!line.contains("fixture-secret"));
+                let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["received"]["kind"], "host.response");
+                assert_eq!(response["received"]["ok"], false);
+                assert_eq!(response["received"]["error"]["code"], "INVALID_PARAMETERS");
+                assert!(echo.host_streams.lock().unwrap().is_empty());
+            }
         }
     }
 
@@ -7435,7 +7863,7 @@ mod tests {
             content_type: Some("video/mp4".to_string()),
         };
 
-        let normalized = normalize_provider_media_poll(&response, "global", Some(&output))
+        let normalized = normalize_provider_media_poll(&response, "global", "", Some(&output))
             .expect("successful poll should normalize");
         let serialized = normalized.to_string();
 
@@ -7464,7 +7892,7 @@ mod tests {
             retry_after_ms: Some(17_000),
         };
 
-        let normalized = normalize_provider_media_poll(&response, "global", None)
+        let normalized = normalize_provider_media_poll(&response, "global", "", None)
             .expect("failed poll should normalize");
 
         assert_eq!(normalized["state"], "failed");
@@ -7473,6 +7901,130 @@ mod tests {
         assert_eq!(
             normalized["error"]["message"],
             "download [URL] with [CREDENTIAL] [CREDENTIAL]"
+        );
+    }
+
+    #[test]
+    fn provider_media_poll_omits_absent_optional_error_code() {
+        for body in [
+            json!({"status":"failed","error":{"message":"Reference image could not be read"}}),
+            json!({"status":"failed","error":{"code":null,"message":"Reference image could not be read"}}),
+        ] {
+            let response = ProviderHttpResponse {
+                status: 200,
+                body,
+                retry_after_ms: None,
+            };
+            let normalized =
+                normalize_provider_media_poll(&response, "unicompapi", "", None).unwrap();
+            assert_eq!(normalized["state"], "failed");
+            assert_eq!(
+                normalized["error"]["message"],
+                "Reference image could not be read"
+            );
+            assert!(normalized["error"].get("code").is_none());
+        }
+    }
+
+    #[test]
+    fn provider_media_poll_does_not_turn_unknown_task_states_into_failures() {
+        for body in [json!({"status":"preparing"}), json!({})] {
+            let response = ProviderHttpResponse {
+                status: 200,
+                body,
+                retry_after_ms: None,
+            };
+            assert!(normalize_provider_media_poll(&response, "unicompapi", "", None).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_media_poll_unknown_state_policy_matches_the_actual_adapter_revision() {
+        let response = ProviderHttpResponse {
+            status: 200,
+            body: json!({"status":"unknown"}),
+            retry_after_ms: None,
+        };
+        for key in [
+            "REFERENCE_TO_VIDEO:unicompapi:cn.bytedance.seedance2-0.video:contract-2",
+            "REFERENCE_TO_VIDEO:unicompapi:cn.qwen.wan3-0-video:contract-3",
+            "TEXT_TO_VIDEO:unicompapi:openai-compatible-video:v1",
+        ] {
+            assert_eq!(
+                normalize_provider_media_poll(&response, "unicompapi", key, None).unwrap()["state"],
+                "running"
+            );
+        }
+        for (region, key) in [
+            (
+                "unicompapi",
+                "TEXT_TO_VIDEO:unicompapi:cn.happyhorse.1.1.t2v:contract-1",
+            ),
+            ("global", "TEXT_TO_VIDEO:vidu:viduq3-pro:v2"),
+        ] {
+            assert!(normalize_provider_media_poll(&response, region, key, None).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_media_poll_actual_worker_preserves_native_terminal_diagnostics() {
+        let cases = [
+            (200, json!({"status":"failure","error":{"message":"Reference image could not be read"}})),
+            (400, json!({"status":"failed","error":{"code":"invalid_reference","message":"Reference image could not be read"}})),
+            (200, json!({"status":"expired","fail_reason":"Reference image could not be read"})),
+            (200, json!({"status":"cancelled"})),
+            (200, json!({"status":"unknown"})),
+        ].map(|(status, body)| normalize_provider_media_poll(&ProviderHttpResponse { status, body, retry_after_ms: None }, "unicompapi", "REFERENCE_TO_VIDEO:unicompapi:cn.bytedance.seedance2-0.video:contract-2", None).unwrap());
+        let script = r#"
+            import assert from 'node:assert/strict';
+            import { mkdtempSync, rmSync } from 'node:fs';
+            import { tmpdir } from 'node:os';
+            import { join } from 'node:path';
+            import { ProjectService } from './dist/project-service.js';
+            import { VideoGenerationService } from './dist/video-generation-service.js';
+            import { ProjectTaskRuntime } from './dist/project-task-runtime.js';
+            const root = mkdtempSync(join(tmpdir(), 'native-poll-contract-'));
+            const projects = new ProjectService({ recentProjectsPath: join(root, 'recent.json') });
+            const videos = new VideoGenerationService(projects);
+            let runtime;
+            try {
+                projects.create(join(root, 'project'), 'Native poll boundary');
+                for (const response of JSON.parse(process.argv[1])) {
+                    const prepared = videos.prepare({ adapterKey: 'TEXT_TO_VIDEO:unicompapi:kling-v3-turbo:v1', parameters: { prompt: 'fixture', duration: 5, ratio: '16:9' }, providerRegion: 'unicompapi', providerProfileId: '11111111-1111-4111-8111-111111111111', modelId: 'kling-v3-turbo' });
+                    const job = videos.attachTask({ jobId: prepared.id, providerTaskId: 'accepted-' + prepared.id });
+                    let requests = 0;
+                    runtime = new ProjectTaskRuntime(projects, videos, { request: async (method, params) => { assert.equal(method, 'provider.media.poll'); assert.equal(params.providerTaskId, job.providerTaskId); requests++; return response; } });
+                    runtime.start();
+                    const deadline = Date.now() + 5000;
+                    while (requests === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+                    runtime.stop();
+                    const observed = videos.get(job.id);
+                    assert.equal(observed.status, response.state === 'running' ? 'polling' : response.state);
+                    assert.equal(requests, 1);
+                    if (response.state === 'failed') {
+                        assert.equal(observed.metadata.failureKind, 'provider');
+                        assert.equal(observed.metadata.pollAttempts, 1);
+                        assert.ok(observed.error.includes(response.error.message));
+                        if (response.error.code) assert.ok(observed.error.includes(response.error.code));
+                    }
+                }
+                process.stdout.write('Native to actual Worker polling boundary passed');
+            } finally { runtime?.stop(); projects.close(); rmSync(root, { recursive: true, force: true }); }
+        "#;
+        let output = Command::new("node")
+            .args([
+                "--input-type=module",
+                "-e",
+                script,
+                &serde_json::to_string(&cases).unwrap(),
+            ])
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worker"))
+            .output()
+            .expect("Actual Worker poll fixture should start");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

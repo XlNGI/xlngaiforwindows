@@ -1,7 +1,7 @@
 import { RotateCcw, Volume2 } from 'lucide-react';
 import type { SceneReferenceImageOptions } from '@ai-video/contracts';
 import type { AssetInfo, DocumentKind } from '@ai-video/contracts';
-import { AssetImagePreview } from './AssetImagePreview';
+import { DocumentImageGallery } from './DocumentImageGallery';
 import { VoiceReferencePanel } from './dubbing/VoiceReferencePanel';
 import { MarkdownEditor } from './MarkdownEditor';
 import type { useCharacterVoicePrompt } from './use-character-voice-prompt';
@@ -21,6 +21,8 @@ export function CharacterSceneWorkspace({
   onRestoreVersion,
   onSceneReferenceChange,
   onOpenAsset,
+  onImagesImported,
+  onImagesRemoved,
   boundScenes = [],
   onOpenScene,
   sampleText = '',
@@ -46,6 +48,8 @@ export function CharacterSceneWorkspace({
   onRestoreVersion: (versionId: string) => void;
   onSceneReferenceChange?: (sceneReference: SceneReferenceImageOptions) => void;
   onOpenAsset?: (assetId: string) => void;
+  onImagesImported?: (assets: AssetInfo[]) => void;
+  onImagesRemoved?: (assetId: string) => void;
   boundScenes?: Array<{ id: string; title: string }>;
   onOpenScene?: (sceneId: string) => void;
   sampleText?: string;
@@ -229,35 +233,16 @@ export function CharacterSceneWorkspace({
         </section>
       ) : null}
       {kind !== 'voice' ? (
-        <section
-          className={`character-scene-gallery${assets.length === 0 ? ' is-empty' : ''}`}
-          aria-labelledby="character-scene-gallery-heading"
-        >
-          <div className="workspace-section-heading">
-            <h2 id="character-scene-gallery-heading">已生成图片</h2>
-            <span className="workspace-count">{assets.length} 张</span>
-          </div>
-          {assets.length === 0 ? (
-            <p className="character-scene-gallery-empty">生成图片后，可绑定到场次和镜头。</p>
-          ) : (
-            <ul className="character-scene-gallery-grid">
-              {assets.map((asset) => (
-                <li key={asset.id}>
-                  <AssetImagePreview asset={asset} />
-                  {onOpenAsset ? (
-                    <button
-                      className="image-library-link"
-                      type="button"
-                      onClick={() => onOpenAsset(asset.id)}
-                    >
-                      查看素材
-                    </button>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <DocumentImageGallery
+          key={`${projectId}:${documentId}`}
+          projectId={projectId}
+          documentId={documentId}
+          writable={writable}
+          assets={assets}
+          onOpenAsset={onOpenAsset}
+          onImported={onImagesImported}
+          onRemoved={onImagesRemoved}
+        />
       ) : null}
       {kind === 'character' && projectId && documentId ? (
         <details className="workspace-extra">

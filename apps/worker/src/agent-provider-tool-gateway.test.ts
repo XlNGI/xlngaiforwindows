@@ -61,6 +61,118 @@ function executor(
   } satisfies AgentProviderToolExecutor;
 }
 describe('AgentProviderToolGateway', () => {
+  it('offers only specialized authoring workflows for new tasks while retaining historical compatibility', () => {
+    const make = (purposeOnly: boolean) =>
+      new AgentProviderToolGateway(
+        executor({}),
+        identity,
+        [definition('document.submit_draft')],
+        vi.fn(),
+        vi.fn(),
+        undefined,
+        undefined,
+        true,
+        purposeOnly,
+      )
+        .tools()
+        .find((tool) => tool.name === 'tools.load')!;
+    const current = make(true);
+    const prepare = current.prepareArguments!;
+    expect(() => prepare({ names: ['document.submit_draft'], workflow: 'general' })).toThrow();
+    for (const workflow of [
+      'character-image',
+      'scene-image',
+      'prop-image',
+      'shot-image',
+      'video-prompt',
+    ])
+      expect(() => prepare({ names: ['document.submit_draft'], workflow })).not.toThrow();
+    expect(() =>
+      make(false).prepareArguments!({ names: ['document.submit_draft'], workflow: 'general' }),
+    ).not.toThrow();
+  });
+  it('retains rejected write-batch candidates once without executing them', () => {
+    const worker = {
+      ...executor({}),
+      preserveToolArguments: vi.fn(() => ({ resultId: 'candidate' })),
+    };
+    const gateway = new AgentProviderToolGateway(
+      worker,
+      identity,
+      [definition('document.submit_draft')],
+      vi.fn(),
+      vi.fn(),
+    );
+    const calls = [0, 1].map((index) => ({
+      id: `write-${index}`,
+      name: 'document.submit_draft',
+      arguments: { title: `角色${index}`, contentMarkdown: '完整正文' },
+    }));
+    const rejection = gateway.providerResponseRejection(calls);
+    expect(rejection).toContain('candidate');
+    expect(rejection).toContain('write-1');
+    expect(rejection).not.toContain('完整正文');
+    expect(gateway.providerResponseRejection(calls)).toBe(rejection);
+    expect(worker.preserveToolArguments).toHaveBeenCalledTimes(2);
+    expect(worker.executeTools).not.toHaveBeenCalled();
+  });
+  it('allows immutable checkpoint result pages in one frozen response and rejects writes before execution', async () => {
+    const checkpoint = SYSTEM_AGENT_TOOLS.find(
+      (tool) => tool.name === 'conversation.task.checkpoint',
+    )!;
+    const worker = { ...executor({}), advanceTextTurn: vi.fn(() => [checkpoint]) };
+    worker.executeTools.mockImplementation((params) =>
+      Promise.resolve({
+        continuation: {
+          protocol: 'openai-responses',
+          previousResponseId: 'response',
+          outputs: [
+            {
+              callId: params.calls[0]!.id,
+              output: '{"status":"task_result_read","content":"资料"}',
+            },
+          ],
+        },
+      }),
+    );
+    const gateway = new AgentProviderToolGateway(worker, identity, [checkpoint], vi.fn(), vi.fn());
+    const calls = [0, 1, 2].map((index) => ({
+      id: `page-${index}`,
+      name: checkpoint.name,
+      arguments: { operation: 'result', resultId: 'source', resultOffset: index * 4096 },
+    }));
+    expect(gateway.providerResponseRejection(calls)).toBeUndefined();
+    gateway.freezeProviderResponse(calls);
+    const tool = gateway.tools().find((t) => t.name === checkpoint.name)!;
+    for (const call of calls) {
+      gateway.captureProviderCall(call.id, 'response');
+      await tool.execute(call.id, call.arguments);
+    }
+    expect(worker.advanceTextTurn).not.toHaveBeenCalled();
+    gateway.finishProviderResponse();
+    expect(worker.executeTools).toHaveBeenCalledTimes(3);
+    expect(worker.advanceTextTurn).toHaveBeenCalledTimes(1);
+    for (const operation of [
+      'plan',
+      'decision',
+      'save',
+      'partial',
+      'review',
+      'state',
+      'read',
+      undefined,
+    ]) {
+      expect(
+        gateway.providerResponseRejection([
+          calls[0]!,
+          { id: 'unsafe', name: checkpoint.name, arguments: { operation } },
+        ]),
+      ).toContain('No calls were executed');
+    }
+    expect(
+      gateway.providerResponseRejection([calls[0]!, { id: 'load', name: 'tools.load' }]),
+    ).toContain('No calls were executed');
+  });
   it('does not run bundle submission diagnostics on an unresolved prepared-argument reference', () => {
     const submit = preparedArgumentsDefinition(
       SYSTEM_AGENT_TOOLS.find((tool) => tool.name === 'production.bundle.submit')!,
@@ -149,10 +261,14 @@ describe('AgentProviderToolGateway', () => {
         bindings: { schemaVersion: 1 as const },
       }),
     ).not.toThrow();
+    const nullableCreate = { ...create, baseVersionId: null };
+    expect(prepare(nullableCreate)).toEqual(create);
+    expect(nullableCreate.baseVersionId).toBeNull();
     for (const extra of [
-      { baseVersionId: null },
       { baseVersionId: 'source-version' },
       { expectedDocumentRowVersion: 0 },
+      { documentId: null, baseVersionId: null },
+      { expectedDocumentRowVersion: 0, baseVersionId: null },
     ])
       expect(() => prepare({ ...create, ...extra })).toThrow();
     const update = { ...create, resourceId: 'document:target', documentId: 'target' };
@@ -164,6 +280,9 @@ describe('AgentProviderToolGateway', () => {
         baseVersionId: 'current-target-version',
       }),
     ).not.toThrow();
+    expect(
+      prepare({ ...update, expectedDocumentRowVersion: 0, baseVersionId: null }),
+    ).toMatchObject({ documentId: 'target', expectedDocumentRowVersion: 0, baseVersionId: null });
     expect(() =>
       prepare({
         ...update,
@@ -622,7 +741,7 @@ describe('AgentProviderToolGateway', () => {
     expect(gateway.currentDefinitions()).toEqual(selection);
     expect(worker.executeTools).not.toHaveBeenCalled();
   });
-  it('returns the full video writing guidance when the Agent loads video preparation', async () => {
+  it('declares video template selection without injecting default creative requirements', async () => {
     const worker = executor({});
     const gateway = new AgentProviderToolGateway(
       worker,
@@ -644,8 +763,10 @@ describe('AgentProviderToolGateway', () => {
     if (output?.type !== 'text') throw new Error('Expected tool loading instructions.');
     const result = JSON.parse(output.text) as {
       instructions: string;
+      workflow: string;
     };
-    expect(result.instructions).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
+    expect(result.workflow).toBe('video-prompt');
+    expect(result.instructions).not.toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
     expect(gateway.currentDefinitions().map((tool) => tool.name)).toContain('media.video.prepare');
     expect(worker.executeTools).not.toHaveBeenCalled();
   });

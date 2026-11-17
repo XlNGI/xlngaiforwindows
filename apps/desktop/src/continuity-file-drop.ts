@@ -7,6 +7,7 @@ export function useContinuityFileDrop(
   enabled: boolean,
   onFiles: (paths: string[]) => void,
   onError: (message: string) => void,
+  targetSelector = '[data-continuity-file-drop]',
 ) {
   const latest = useRef({ enabled, onFiles, onError });
   latest.current = { enabled, onFiles, onError };
@@ -28,9 +29,7 @@ export function useContinuityFileDrop(
             payload.position.x / ratio,
             payload.position.y / ratio,
           );
-          const inside = Boolean(
-            ref.current && hit?.closest('[data-continuity-file-drop]') === ref.current,
-          );
+          const inside = Boolean(ref.current && hit?.closest(targetSelector) === ref.current);
           setHovering(inside && payload.type !== 'drop');
           if (inside && payload.type === 'drop') latest.current.onFiles(payload.paths);
         }),
@@ -46,6 +45,6 @@ export function useContinuityFileDrop(
       active = false;
       dispose?.();
     };
-  }, [ref]);
+  }, [ref, targetSelector]);
   return enabled && hovering;
 }

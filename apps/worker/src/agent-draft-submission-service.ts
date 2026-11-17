@@ -6,7 +6,11 @@ import type {
   NovelWritingAction,
   PromptBindingIR,
 } from '@ai-video/contracts';
-import { rebuildLibraryChunksForDocument } from '@ai-video/persistence';
+import {
+  AgentContextStore,
+  contextContentHash,
+  rebuildLibraryChunksForDocument,
+} from '@ai-video/persistence';
 import { DOCUMENT_KINDS, validatePromptBindings } from '@ai-video/contracts';
 import { AgentOrchestrationService } from './agent-orchestration-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
@@ -18,6 +22,7 @@ import {
   RESOURCE_ARGUMENT_KEYS,
   resolveWriteResource,
 } from './project-resource-map.js';
+import type { ContextRecoverySnapshot } from './agent-context-manager.js';
 const KINDS = new Set<DocumentKind>(DOCUMENT_KINDS);
 const ROLES = new Set<DocumentBindingRole>([
   'work-outline',
@@ -287,6 +292,8 @@ export class AgentDraftSubmissionService {
             !ROLES.has(text(args.bindingRole, 'bindingRole', 80) as DocumentBindingRole)
           )
             throw new Error('Invalid novel reference binding role.');
+          if (resource.locator.workspace === 'characters')
+            assertDraftTemplatePurpose(database, project.id, parent.id, kind);
           if (bindings !== undefined) {
             if (!['character', 'scene', 'prop', 'voice'].includes(kind))
               throw new Error(
@@ -423,6 +430,50 @@ export class AgentDraftSubmissionService {
       throw new Error('Draft submission requires a trusted executing conversation tool call.');
     return parent;
   }
+}
+
+/** Validate what the model actually received, including deliberately empty templates. */
+function assertDraftTemplatePurpose(
+  db: Database.Database,
+  projectId: string,
+  taskId: string,
+  kind: DocumentKind,
+) {
+  const purpose = (
+    { character: 'character-image', scene: 'scene-image', prop: 'prop-image' } as const
+  )[kind as 'character' | 'scene' | 'prop'];
+  if (!purpose) return;
+  const runtime = new AgentContextStore(db).loadRuntime<ContextRecoverySnapshot>(
+    projectId,
+    taskId,
+  )?.runtime;
+  const snapshot = runtime?.promptTemplateSnapshot;
+  if (snapshot?.policyVersion !== 2) return; // Historical tasks retain their frozen contract.
+  const row = db
+    .prepare(
+      'SELECT details_json FROM agent_context_diagnostics WHERE project_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1',
+    )
+    .get(projectId, taskId) as { details_json: string } | undefined;
+  const applied = row
+    ? (
+        JSON.parse(row.details_json) as {
+          promptTemplates?: {
+            version?: number;
+            purpose?: string;
+            scoped?: Array<{ kind: string; hash: string }>;
+          };
+        }
+      ).promptTemplates
+    : undefined;
+  const text = snapshot.templates?.[purpose] ?? '';
+  if (
+    applied?.purpose !== purpose ||
+    applied.version !== snapshot.rowVersion ||
+    !applied.scoped?.some((item) => item.kind === purpose && item.hash === contextContentHash(text))
+  )
+    throw new Error(
+      `PROMPT_TEMPLATE_PURPOSE_REQUIRED: ${kind} production text requires the frozen ${purpose} template before authoring. No draft was saved. For source-based generation use prompt.generation.request with all requested purposes; for an explicit document edit call tools.load with workflow=${purpose}, read the applicable template, then revise the complete text. Do not replay this unscoped candidate unchanged. Empty templates are valid.`,
+    );
 }
 function text(value: unknown, label: string, maximum: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum)

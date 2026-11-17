@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, createReadStream, existsSync } from 'node:fs';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import type {
   AssetInfo,
   LlmToolOutput,
@@ -11,16 +11,34 @@ import type {
   ShotContinuityPreviewParams,
   ShotContinuitySelectionParams,
   ShotContinuityReferencesParams,
+  ShotImageContext,
+  ShotImageSaveParams,
+  ProductionImageSelection,
 } from '@ai-video/contracts';
-import { continuityReferenceImageIds, continuitySourceImageIds } from '@ai-video/contracts';
-import { createRepositories, readShotContinuity, writeShotContinuity } from '@ai-video/persistence';
+import {
+  continuityReferenceImageIds,
+  continuitySourceImageIds,
+  validatePromptBindings,
+} from '@ai-video/contracts';
+import {
+  createRepositories,
+  readShotContinuity,
+  writeShotContinuity,
+  readShotImage,
+  writeShotImage,
+  readShotVideoImages,
+  writeShotVideoImages,
+} from '@ai-video/persistence';
+import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
 import { ContentService } from './content-service.js';
 import { ImageGenerationService } from './image-generation-service.js';
 import { FfmpegRuntime } from './ffmpeg-runtime.js';
 import { ExecutionPool } from './execution-pool.js';
 import { ProductionService } from './production-service.js';
+import { LocalMediaImportService } from './local-media-import-service.js';
 import { assertStorageCapacity } from './storage-capacity.js';
+import { shotImageSourceToken } from './shot-image-source.js';
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 async function fileHash(path: string): Promise<string> {
   const digest = createHash('sha256');
@@ -35,9 +53,128 @@ export class ShotContinuityService {
     private readonly assets: ImageGenerationService,
     private readonly ffmpeg = new FfmpegRuntime(),
     private readonly capacity = new ExecutionPool(),
+    private readonly localMediaImports = new LocalMediaImportService(
+      projects,
+      assets,
+      ffmpeg,
+      capacity,
+    ),
   ) {}
   cancelAll(): void {
+    this.localMediaImports.cancelAll();
     for (const controller of this.controllers) controller.abort();
+  }
+  imageContext(shotId: string): ShotImageContext {
+    const context = this.get(shotId);
+    const production = new ProductionService(this.projects);
+    const inputImages = production.imageInputs(shotId);
+    return this.projects.access(false, (db, project) => {
+      const image = readShotImage(db, project.id, shotId);
+      const videoImages = readShotVideoImages(db, project.id, shotId);
+      const repo = createRepositories(db);
+      const ids = [
+        ...new Set([
+          ...inputImages.map((i) => i.assetId),
+          ...(videoImages.selections ?? []).map((i) => i.assetId),
+        ]),
+      ];
+      const assets = ids.flatMap((id) => {
+        const asset = repo.assets.get(id);
+        return asset && asset.projectId === project.id && !asset.deletedAt ? [asset] : [];
+      });
+      // Content, source hashes and scope matter. Output adoption does not invalidate authoring.
+      const currentSourceToken = shotImageSourceToken(db, project.id, shotId, inputImages);
+      return {
+        ...image,
+        currentSourceToken,
+        stale: Boolean(image.sourceToken && image.sourceToken !== currentSourceToken),
+        sourceStale: context.stale,
+        inputImages,
+        assets,
+        videoImages,
+      };
+    });
+  }
+  private assertImageWritable(shotId: string) {
+    this.get(shotId);
+    this.projects.access(true, (db) => {
+      const repo = createRepositories(db),
+        shot = repo.shots.get(shotId)!;
+      if (shot.archivedAt || repo.scenes.get(shot.sceneId)?.archivedAt)
+        throw new Error('场次或镜头已归档，请先恢复。');
+    });
+  }
+  saveImage(params: ShotImageSaveParams): ShotImageContext {
+    this.assertImageWritable(params.shotId);
+    if (
+      typeof params.prompt !== 'string' ||
+      params.prompt.length > 20000 ||
+      typeof params.intent !== 'string' ||
+      params.intent.length > 4000 ||
+      !['composition', 'first-frame', 'last-frame'].includes(params.purpose)
+    )
+      throw new Error('图片正文、用途或要求无效。');
+    this.projects.access(true, (db, project) =>
+      db.transaction(() => {
+        if (this.imageContext(params.shotId).currentSourceToken !== params.sourceToken)
+          throw new Error('镜头或图片来源已变化，请重新读取后核对；当前草稿已保留。');
+        if (params.bindings)
+          validatePromptBindingReferences(db, project.id, validatePromptBindings(params.bindings));
+        writeShotImage(db, project.id, params);
+        // Include the newly selected independent scope in the saved source fingerprint.
+        const current = this.imageContext(params.shotId);
+        db.prepare(
+          'UPDATE shot_image_prompts SET source_token=? WHERE shot_id=? AND project_id=?',
+        ).run(current.currentSourceToken, params.shotId, project.id);
+      })(),
+    );
+    return this.imageContext(params.shotId);
+  }
+  saveVideoImages(
+    shotId: string,
+    expectedRowVersion: number,
+    selections: ProductionImageSelection[],
+  ): ShotImageContext {
+    this.assertImageWritable(shotId);
+    if (
+      selections.length > 12 ||
+      new Set(selections.map((i) => i.assetId)).size !== selections.length ||
+      selections.filter((i) => i.role === 'first-frame').length > 1 ||
+      selections.some((i) => !['reference', 'first-frame', 'character', 'scene'].includes(i.role))
+    )
+      throw new Error('最多采用 12 张不同图片和一个显式首帧。');
+    this.projects.access(true, (db, project) =>
+      db.transaction(() => {
+        for (const selection of selections) {
+          const asset = this.assets.getAssetInfo(selection.assetId);
+          if (
+            asset.projectId !== project.id ||
+            asset.deletedAt ||
+            !this.assets
+              .assetMediaSource({ assetId: selection.assetId })
+              .contentType.startsWith('image/')
+          )
+            throw new Error('请选择当前项目可用的图片。');
+        }
+        writeShotVideoImages(db, project.id, shotId, expectedRowVersion, selections);
+      })(),
+    );
+    return this.imageContext(shotId);
+  }
+  readImageForAgent(shotId: string) {
+    const image = this.imageContext(shotId);
+    const production = new ProductionService(this.projects);
+    return {
+      ...image,
+      sourceToken: image.currentSourceToken,
+      currentShot: production.read({ kind: 'shot', id: shotId }),
+      candidateReferences: production.readMediaForAgent({ kind: 'shot', id: shotId }).inputs
+        .referenceImages,
+      visualInputs: image.inputImages.map((image) => ({
+        assetId: image.assetId,
+        label: image.label ?? image.role,
+      })),
+    };
   }
   resolveAssets(shotId: string, assetIds: string[]): AssetInfo[] {
     this.get(shotId);
@@ -112,7 +249,7 @@ export class ShotContinuityService {
             source.contentHash !== binding.sourceVideoHash ||
             !videos.some((video) => video.id === source.id) ||
             !existsSync(resolveProjectRelativePath(project.rootPath, source.relativePath))) ||
-          imageIds.some(
+          continuitySourceImageIds(binding).some(
             (id) =>
               id &&
               !images.some(
@@ -245,177 +382,8 @@ export class ShotContinuityService {
     }
   }
   /** Explicit user import only; never called by Agent retrieval or ordinary attachment handling. */
-  async importFiles(shotId: string, sourcePaths: string[]): Promise<AssetInfo[]> {
-    this.projects.access(true, () => undefined);
-    this.get(shotId);
-    if (
-      !sourcePaths.length ||
-      sourcePaths.length > 12 ||
-      new Set(sourcePaths).size !== sourcePaths.length
-    )
-      throw new Error('每次请选择 1–12 个不同的本地文件。');
-    const project = this.projects.current()!;
-    const sessionId = this.projects.currentSessionId();
-    return this.work((signal) =>
-      this.capacity.run('ffmpeg', project.id, signal, () =>
-        this.temporary(project.rootPath, async (directory) => {
-          const staged: Array<{
-            asset: AssetInfo;
-            path: string;
-          }> = [];
-          const selected: AssetInfo[] = [];
-          const created: string[] = [];
-          let committed = false;
-          try {
-            for (const input of sourcePaths) {
-              this.assertSession(sessionId, signal);
-              const extension = extname(input).toLowerCase();
-              const image = ['.png', '.jpg', '.jpeg', '.webp'].includes(extension);
-              if (!image && !['.mp4', '.m4v', '.mov', '.mkv', '.webm'].includes(extension))
-                throw new Error('仅支持 PNG、JPEG、WebP 图片和 MP4、MOV、M4V、MKV、WebM 视频。');
-              if (!isAbsolute(input) || input.includes('\0')) throw new Error('请选择本地文件。');
-              const canonical = await realpath(input);
-              if (
-                resolve(input).toLowerCase() !== canonical.toLowerCase() ||
-                !(await lstat(input)).isFile()
-              )
-                throw new Error('请选择普通本地文件，不能使用符号链接或目录。');
-              const size = (await stat(canonical)).size;
-              if (!size || size > (image ? 20 : 512) * 1024 * 1024)
-                throw new Error(
-                  image
-                    ? '图片须为非空文件且不超过 20 MiB。'
-                    : '视频须为非空文件且不超过 512 MiB。',
-                );
-              assertStorageCapacity(directory, size);
-              const id = randomUUID();
-              const path = join(directory, `${id}${extension}`);
-              await copyFile(canonical, path, constants.COPYFILE_EXCL);
-              if (
-                (await stat(path)).size !== size ||
-                (await fileHash(path)) !== (await fileHash(canonical))
-              )
-                throw new Error('导入期间源文件已变化，请重新拖入。');
-              if (image) {
-                const bytes = await readFile(path);
-                const matches =
-                  extension === '.png'
-                    ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-                    : extension === '.webp'
-                      ? bytes.subarray(0, 4).toString() === 'RIFF' &&
-                        bytes.subarray(8, 12).toString() === 'WEBP'
-                      : bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-                if (!matches) throw new Error('图片内容与文件扩展名不一致。');
-                await this.ffmpeg.previewImage(path, join(directory, `${id}-preview.jpg`), signal);
-              } else if (!(await this.ffmpeg.probe(path, signal)).hasVideo)
-                throw new Error('所选文件没有可用视频画面。');
-              this.assertSession(sessionId, signal);
-              const contentHash = await fileHash(path);
-              const inBatch = selected.find(
-                (asset) =>
-                  asset.contentHash === contentHash && asset.kind.includes('video') === !image,
-              );
-              if (inBatch) continue;
-              const duplicate = this.projects.access(false, (db) => {
-                const row = db
-                  .prepare(
-                    `SELECT id FROM assets WHERE project_id=? AND content_hash=? AND deleted_at IS NULL
-                  AND (kind LIKE '%video%')=? LIMIT 1`,
-                  )
-                  .get(project.id, contentHash, image ? 0 : 1) as
-                  | {
-                      id: string;
-                    }
-                  | undefined;
-                if (!row) return undefined;
-                try {
-                  this.assets.assetMediaSource({ assetId: row.id });
-                  return this.assets.getAssetInfo(row.id);
-                } catch {
-                  return undefined;
-                }
-              });
-              if (
-                duplicate &&
-                (await fileHash(this.assets.assetMediaSource({ assetId: duplicate.id }).path)) ===
-                  contentHash
-              ) {
-                selected.push(duplicate);
-                continue;
-              }
-              const asset: AssetInfo = {
-                id,
-                projectId: project.id,
-                kind: image ? 'reference-image' : 'generated-video',
-                alias: basename(input).normalize('NFKC').slice(0, 120),
-                relativePath: `assets/${image ? 'images' : 'videos'}/${id}${extension}`,
-                contentHash,
-                sizeBytes: size,
-                createdAt: new Date().toISOString(),
-              };
-              staged.push({ asset, path });
-              selected.push(asset);
-            }
-            for (const item of staged) {
-              this.assertSession(sessionId, signal);
-              const final = resolveProjectRelativePath(project.rootPath, item.asset.relativePath);
-              await mkdir(dirname(final), { recursive: true });
-              assertStorageCapacity(dirname(final), item.asset.sizeBytes);
-              await copyFile(item.path, final, constants.COPYFILE_EXCL);
-              created.push(final);
-            }
-            this.assertSession(sessionId, signal);
-            this.projects.access(true, (db) =>
-              db.transaction(() => {
-                this.get(shotId);
-                const repo = createRepositories(db);
-                if (!staged.length) return;
-                const jobId = randomUUID();
-                const now = new Date().toISOString();
-                repo.jobs.save({
-                  id: jobId,
-                  projectId: project.id,
-                  adapterKey: 'local:continuity-import',
-                  status: 'succeeded',
-                  mediaState: 'succeeded',
-                  requestJson: '{}',
-                  taskSnapshotJson: JSON.stringify({
-                    version: 1,
-                    localOperation: 'media-import',
-                    fileNames: staged.map((item) => item.asset.alias),
-                  }),
-                  createdAt: now,
-                  updatedAt: now,
-                });
-                for (const { asset } of staged) {
-                  repo.assets.save(asset);
-                  repo.generationResults.save({
-                    id: randomUUID(),
-                    jobId,
-                    assetId: asset.id,
-                    createdAt: now,
-                  });
-                }
-                repo.generationJobEvents.append({
-                  id: randomUUID(),
-                  jobId,
-                  projectId: project.id,
-                  phase: 'complete',
-                  status: 'succeeded',
-                  summary: `用户导入 ${staged.length} 项衔接素材。`,
-                  createdAt: now,
-                });
-                repo.projects.touch(now);
-              })(),
-            );
-            committed = true;
-            return selected;
-          } finally {
-            if (!committed) for (const path of created) await rm(path, { force: true });
-          }
-        }),
-      ),
-    );
+  importFiles(shotId: string, sourcePaths: string[]): Promise<AssetInfo[]> {
+    return this.localMediaImports.importFiles({ shotId }, sourcePaths);
   }
   async preview(params: ShotContinuityPreviewParams) {
     return this.work(async (signal) => {
@@ -697,6 +665,12 @@ export class ShotContinuityService {
                     ...(legacy?.mode === 'continue' ? { firstFrameAssetId: anchorAssetId } : {}),
                   },
                 );
+                if (legacy?.mode === 'continue') {
+                  const adopted = readShotVideoImages(database, project.id, params.shotId);
+                  writeShotVideoImages(database, project.id, params.shotId, adopted.rowVersion, [
+                    { assetId: anchorAssetId, role: 'first-frame' },
+                  ]);
+                }
                 repo.projects.touch(now);
               })(),
             );
@@ -798,6 +772,17 @@ export class ShotContinuityService {
         firstFrameAssetId: role === 'first-frame' ? assetId : undefined,
         prompt: undefined,
       });
+      const adopted = readShotVideoImages(database, project.id, shotId);
+      const ids =
+        role === 'reference'
+          ? assetId
+            ? [assetId]
+            : []
+          : continuityReferenceImageIds(binding).filter((id) => id !== assetId);
+      writeShotVideoImages(database, project.id, shotId, adopted.rowVersion, [
+        ...ids.map((id) => ({ assetId: id, role: 'reference' as const })),
+        ...(role === 'first-frame' && assetId ? [{ assetId, role: 'first-frame' as const }] : []),
+      ]);
     });
     return this.get(shotId);
   }
@@ -827,6 +812,17 @@ export class ShotContinuityService {
         firstFrameAssetId: params.firstFrameAssetId,
         prompt: undefined,
       });
+      const adopted = readShotVideoImages(database, project.id, params.shotId);
+      writeShotVideoImages(
+        database,
+        project.id,
+        params.shotId,
+        adopted.rowVersion,
+        params.assetIds.map((assetId) => ({
+          assetId,
+          role: assetId === params.firstFrameAssetId ? 'first-frame' : 'reference',
+        })),
+      );
     });
     return this.get(params.shotId);
   }
@@ -837,8 +833,16 @@ export class ShotContinuityService {
       writeShotContinuity(database, project.id, shotId, expectedRowVersion, {
         ...binding,
         notes: notes.trim(),
-        imagePrompt: notes.trim() === binding.notes ? binding.imagePrompt : undefined,
         prompt: undefined,
+      });
+      const image = this.imageContext(shotId);
+      this.saveImage({
+        shotId,
+        expectedRowVersion: image.rowVersion,
+        sourceToken: image.currentSourceToken,
+        prompt: image.prompt,
+        intent: notes.trim(),
+        purpose: image.purpose,
       });
     });
     return this.get(shotId);
@@ -848,6 +852,15 @@ export class ShotContinuityService {
     if (!prompt.trim() || prompt.length > 20000) throw new Error('提示词需要为 1–20000 字符。');
     this.projects.access(true, (database, project) => {
       const binding = this.binding(shotId, expectedRowVersion);
+      const image = this.imageContext(shotId);
+      this.saveImage({
+        shotId,
+        expectedRowVersion: image.rowVersion,
+        sourceToken: image.currentSourceToken,
+        prompt,
+        intent: image.intent,
+        purpose: image.purpose,
+      });
       writeShotContinuity(database, project.id, shotId, expectedRowVersion, {
         ...binding,
         imagePrompt: prompt,
@@ -933,16 +946,46 @@ export class ShotContinuityService {
     shotId: string,
     expectedRowVersion: number,
     sourceToken = this.readForAgent(shotId).sourceToken,
+    independent = false,
   ): Promise<NonNullable<LlmToolOutput['images']>> {
-    this.binding(shotId, expectedRowVersion);
-    if (this.readForAgent(shotId).sourceToken !== sourceToken)
-      throw new Error('参考资料已变化，请重新读取。');
+    const check = () => {
+      if (independent) {
+        const image = this.imageContext(shotId);
+        if (
+          image.rowVersion !== expectedRowVersion ||
+          image.currentSourceToken !== sourceToken ||
+          image.sourceStale
+        )
+          throw new Error('图片正文或参考资料已变化，请重新读取。');
+      } else {
+        this.binding(shotId, expectedRowVersion);
+        if (this.readForAgent(shotId).sourceToken !== sourceToken)
+          throw new Error('参考资料已变化，请重新读取。');
+      }
+    };
+    check();
     return this.work(async (signal) => {
       const context = this.get(shotId);
       const project = this.projects.current()!;
       const sessionId = this.projects.currentSessionId();
       await this.verifyBindingFiles(context, signal);
-      const inputs = this.visualInputs(context);
+      const inputs = independent
+        ? this.readImageForAgent(shotId).visualInputs
+        : this.visualInputs(context);
+      if (!inputs.length) return [];
+      if (inputs.length > 36) throw new Error('当前参考图片超过 36 张，请先缩小本图范围。');
+      const verifyInputs = async () => {
+        for (const input of inputs) {
+          const asset = this.assets.getAssetInfo(input.assetId),
+            media = this.assets.assetMediaSource({ assetId: input.assetId });
+          if (
+            !media.contentType.startsWith('image/') ||
+            (await fileHash(media.path)) !== asset.contentHash
+          )
+            throw new Error('参考图片文件已变化，请重新确认素材。');
+        }
+      };
+      await verifyInputs();
       // Share the bounded JSONL payload across images without always reducing every image to 640px.
       const maxImageBytes = Math.floor(899000 / inputs.length);
       const images = await this.capacity.run('ffmpeg', project.id, signal, () =>
@@ -967,9 +1010,8 @@ export class ShotContinuityService {
       );
       this.assertSession(sessionId, signal);
       await this.verifyBindingFiles(context, signal);
-      this.binding(shotId, expectedRowVersion);
-      if (this.readForAgent(shotId).sourceToken !== sourceToken)
-        throw new Error('参考资料已变化，请重新读取。');
+      await verifyInputs();
+      check();
       return images;
     });
   }

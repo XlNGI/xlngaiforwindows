@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssetLibraryView } from './AssetLibraryView';
 
@@ -42,6 +42,72 @@ describe('AssetLibraryView', () => {
     cleanup();
     callWorker.mockReset();
     callWorker.mockResolvedValue([]);
+  });
+
+  it('expands one material in place and keeps batch selection separate from details', async () => {
+    const { cards, selected } = await selectableMedia();
+    expect(screen.queryByRole('region', { name: '素材详情' })).not.toBeInTheDocument();
+    fireEvent.click(cards[1]!);
+    const details = screen.getByRole('region', { name: '素材详情' });
+    expect(details).toBe(cards[1]!.nextElementSibling);
+    expect(cards[1]).toHaveAttribute('aria-expanded', 'true');
+    expect(within(details).getByLabelText('别名')).toHaveValue('素材 1');
+    expect(within(details).getByText('文件信息').closest('details')).not.toHaveAttribute('open');
+
+    fireEvent.click(within(cards[2]!).getByRole('button', { name: '选择' }));
+    expect(selected()).toEqual([false, true, true, false]);
+    expect(within(details).getByLabelText('别名')).toHaveValue('素材 1');
+    fireEvent.click(cards[1]!);
+    expect(screen.queryByRole('region', { name: '素材详情' })).not.toBeInTheDocument();
+    expect(cards[1]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(cards[2]!, { key: 'Enter' });
+    expect(screen.getByLabelText('别名')).toHaveValue('素材 2');
+    fireEvent.keyDown(cards[2]!, { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: '素材详情' })).not.toBeInTheDocument();
+    await waitFor(() => expect(cards[2]).toHaveFocus());
+  });
+
+  it('keeps the same detail and unsaved alias when resizing the material grid', async () => {
+    let resize!: () => void;
+    let tracks = '150px 150px 150px';
+    const getStyle = window.getComputedStyle.bind(window);
+    const styleSpy = vi.spyOn(window, 'getComputedStyle').mockImplementation((element, pseudo) => {
+      const style = getStyle(element, pseudo);
+      if (element.classList.contains('asset-grid')) {
+        Object.defineProperty(style, 'gridTemplateColumns', { configurable: true, value: tracks });
+      }
+      return style;
+    });
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: () => void) {
+          resize = callback;
+        }
+        observe() {}
+        disconnect = disconnect;
+      },
+    );
+    try {
+      const { cards } = await selectableMedia();
+      fireEvent.click(cards[2]!);
+      const details = screen.getByRole('region', { name: '素材详情' });
+      const alias = within(details).getByLabelText('别名');
+      fireEvent.change(alias, { target: { value: '尚未离开输入框的别名' } });
+      expect(details).toHaveStyle({ gridRow: '2' });
+      tracks = '300px';
+      act(() => resize());
+      expect(screen.getByRole('region', { name: '素材详情' })).toBe(details);
+      expect(details).toHaveStyle({ gridRow: '4' });
+      expect(alias).toHaveValue('尚未离开输入框的别名');
+      cleanup();
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      styleSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('sends selected videos to rough cut or directly exports an XML package', async () => {
@@ -234,7 +300,7 @@ describe('AssetLibraryView', () => {
       'aria-selected',
       'true',
     );
-    expect(screen.getByLabelText('素材别名 (可检索)')).toHaveValue(outsideAsset.alias);
+    expect(screen.getByLabelText('别名')).toHaveValue(outsideAsset.alias);
     expect(
       callWorker.mock.calls.filter(([method]) => method === 'asset.list').length,
     ).toBeGreaterThan(queriesBeforeDeepLink);
@@ -397,6 +463,7 @@ describe('AssetLibraryView', () => {
     });
     render(<AssetLibraryView writable />);
 
+    fireEvent.click(await screen.findByRole('option', { name: '图片素材 1' }));
     const input = await screen.findByLabelText('添加标签');
     fireEvent.change(input, { target: { value: '  Dragon  ' } });
     fireEvent.keyDown(input, { key: 'Enter' });
@@ -600,5 +667,6 @@ describe('AssetLibraryView', () => {
       '/worker-media/image-1',
     );
     fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.getByRole('region', { name: '素材详情' })).toBeInTheDocument();
   });
 });

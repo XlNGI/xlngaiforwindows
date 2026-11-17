@@ -62,6 +62,8 @@ import type { ProductionCapability } from './use-production-state';
 import { projectWorker } from './worker-scope';
 import {
   adapterBindsCatalogModel,
+  canResumeVideoPolling,
+  modelSupportsGenerationAdapter,
   addProductionAudioBindings,
   addProductionImageBindings,
   productionAudioImageBindings,
@@ -271,6 +273,34 @@ function isVideoCapability(capability: GenerationCapability | undefined): boolea
   );
 }
 
+function productionModelOptions(
+  profile: ProviderProfileInfo,
+  models: ProviderModelInfo[],
+  adapters: AdapterDescriptor[],
+  referenceModel?: string,
+) {
+  return models.flatMap((model) => {
+    if (
+      !model.enabled ||
+      model.unavailableAt ||
+      (referenceModel !== undefined && model.remoteModelId !== referenceModel)
+    )
+      return [];
+    return adapters
+      .filter(
+        (adapter) =>
+          modelSupportsGenerationAdapter(model, adapter) &&
+          adapterBindsCatalogModel(adapter, {
+            providerType: profile.providerType,
+            remoteModelId: model.remoteModelId,
+            parameterTemplateKey: model.parameterTemplateKey,
+            contractStatus: model.contractStatus,
+          }),
+      )
+      .map((adapter) => ({ optionKey: `${model.id}::${adapter.key}`, adapter, model }));
+  });
+}
+
 function formatElapsed(elapsedMs: number): string {
   const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
   const minutes = Math.floor(seconds / 60);
@@ -369,8 +399,14 @@ function MediaProductionPanel({
   const [catalog, setCatalog] = useState<AdapterCatalogResult>();
   const effectiveCapability = capability ?? catalog?.capabilities[0]?.key ?? 'TEXT_TO_IMAGE';
   const [profiles, setProfiles] = useState<ProviderProfileInfo[]>([]);
+  const [modelsByProfileId, setModelsByProfileId] = useState<Record<string, ProviderModelInfo[]>>(
+    {},
+  );
   const [selectedProfileId, setSelectedProfileId] = useState('');
-  const [models, setModels] = useState<ProviderModelInfo[]>([]);
+  const models = useMemo(
+    () => modelsByProfileId[selectedProfileId] ?? [],
+    [modelsByProfileId, selectedProfileId],
+  );
   const [adapterKey, setAdapterKey] = useState('');
   const [catalogModelId, setCatalogModelId] = useState('');
   const [formReady, setFormReady] = useState(false);
@@ -818,32 +854,76 @@ function MediaProductionPanel({
   useEffect(() => {
     let active = true;
     void Promise.all([callWorker('adapter.catalog', {}), callWorker('provider.profile.list', {})])
-      .then(([nextCatalog, nextProfiles]) => {
+      .then(async ([nextCatalog, nextProfiles]) => {
         if (!active) return;
+        const listedProfiles = nextProfiles ?? [];
+        const results = await Promise.allSettled(
+          listedProfiles.map(async (profile) => {
+            const listedModels = await callWorker('provider.model.list', {
+              profileId: profile.id,
+            });
+            return [profile.id, listedModels ?? []] as const;
+          }),
+        );
+        if (!active) return;
+        // Publish one snapshot, so connection eligibility and model options
+        // always use the same settings revision. A failed connection cannot
+        // reuse stale models or hide healthy connections.
         setCatalog(nextCatalog);
-        setProfiles(nextProfiles ?? []);
+        setProfiles(listedProfiles);
+        setModelsByProfileId(
+          Object.fromEntries(
+            results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : [])),
+          ),
+        );
+        const failedProfiles = results.flatMap((result, index) =>
+          result.status === 'rejected' ? [listedProfiles[index]!.name] : [],
+        );
+        if (failedProfiles.length) setMessage(`供应商模型读取失败：${failedProfiles.join('、')}`);
       })
       .catch((reason) => {
-        if (active) setMessage(errorMessage(reason, '适配器目录读取失败'));
+        if (active) {
+          setProfiles([]);
+          setModelsByProfileId({});
+          setMessage(errorMessage(reason, '适配器目录读取失败'));
+        }
       });
     return () => {
       active = false;
     };
   }, [providerSettingsRevision]);
 
+  const capabilityAdapters = useMemo(
+    () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
+    [catalog, effectiveCapability],
+  );
+  const modelOptionsByProfileId = useMemo(
+    () =>
+      Object.fromEntries(
+        profiles.map((profile) => [
+          profile.id,
+          productionModelOptions(
+            profile,
+            modelsByProfileId[profile.id] ?? [],
+            capabilityAdapters,
+            audioReference?.model,
+          ),
+        ]),
+      ),
+    [audioReference?.model, capabilityAdapters, modelsByProfileId, profiles],
+  );
   const eligibleProfiles = useMemo(() => {
-    const customMediaAdapterAvailable = catalog?.adapters.some(
-      (adapter) => adapter.provider === 'custom' && adapter.capability === effectiveCapability,
-    );
     return profiles.filter((profile) => {
-      const customCompatibleProfile =
-        customMediaAdapterAvailable &&
+      const routeCompatible =
         profile.accessType === 'custom' &&
         profile.providerType === 'custom' &&
         (profile.category === 'llm' || profile.category === 'multi') &&
         ['openai-responses', 'openai-chat-completions'].includes(profile.protocol);
-      const officialMediaProfile =
+      const officialRoute =
         (profile.providerType === 'vidu' && profile.protocol === 'vidu-v2') ||
+        (profile.providerType === 'openai' &&
+          profile.accessType === 'official' &&
+          profile.protocol === 'openai-responses') ||
         ['wan-video', 'seedance-video', 'minimax-video'].includes(profile.providerType) ||
         (effectiveCapability === 'TEXT_TO_AUDIO' &&
           profile.providerType === 'minimax-speech' &&
@@ -853,19 +933,13 @@ function MediaProductionPanel({
         (!audioReference ||
           (profile.id === audioReference.providerProfileId &&
             profile.providerType === 'minimax-speech')) &&
-        (officialMediaProfile || customCompatibleProfile) &&
+        (officialRoute || routeCompatible) &&
         profile.enabled &&
         profile.connectionStatus === 'ready' &&
-        (profile.category === 'multi' ||
-          customCompatibleProfile ||
-          (isVideoCapability(effectiveCapability)
-            ? profile.category === 'video'
-            : effectiveCapability === 'TEXT_TO_AUDIO'
-              ? false
-              : profile.category === 'image'))
+        modelOptionsByProfileId[profile.id]!.length > 0
       );
     });
-  }, [audioReference, catalog, effectiveCapability, profiles]);
+  }, [audioReference, effectiveCapability, modelOptionsByProfileId, profiles]);
   const selectedProfile = eligibleProfiles.find((profile) => profile.id === selectedProfileId);
   const providerRegion =
     selectedProfile?.providerType === 'unicompapi'
@@ -896,24 +970,6 @@ function MediaProductionPanel({
         : (eligibleProfiles[0]?.id ?? '');
     if (nextProfileId !== selectedProfileId) setSelectedProfileId(nextProfileId);
   }, [effectiveCapability, eligibleProfiles, selectedProfileId]);
-
-  useEffect(() => {
-    if (!selectedProfileId) {
-      setModels([]);
-      return;
-    }
-    let active = true;
-    void Promise.resolve(callWorker('provider.model.list', { profileId: selectedProfileId }))
-      .then((items) => {
-        if (active) setModels(items);
-      })
-      .catch((reason) => {
-        if (active) setMessage(errorMessage(reason, '供应商模型读取失败'));
-      });
-    return () => {
-      active = false;
-    };
-  }, [providerSettingsRevision, selectedProfileId]);
 
   useEffect(() => {
     const selected = catalog?.adapters.find((item) => item.key === adapterKey);
@@ -1052,45 +1108,13 @@ function MediaProductionPanel({
     preferredAssetKind,
   ]);
 
-  const capabilityAdapters = useMemo(
-    () => catalog?.adapters.filter((item) => item.capability === effectiveCapability) ?? [],
-    [catalog, effectiveCapability],
+  const modelOptions = useMemo(
+    () => (selectedProfile ? (modelOptionsByProfileId[selectedProfile.id] ?? []) : []),
+    [modelOptionsByProfileId, selectedProfile],
   );
-  const modelOptions = useMemo(() => {
-    if (!selectedProfile) return [];
-    return models.flatMap((model) => {
-      if (!model.enabled || model.unavailableAt) return [];
-      const supportsCapability = isVideoCapability(effectiveCapability)
-        ? model.capabilities.videoGeneration
-        : effectiveCapability === 'TEXT_TO_AUDIO'
-          ? model.capabilities.speechSynthesis === true
-          : effectiveCapability === 'REFERENCE_TO_IMAGE'
-            ? model.capabilities.imageEditing === true || model.capabilities.imageGeneration
-            : model.capabilities.imageGeneration;
-      if (
-        !supportsCapability ||
-        (audioReference !== undefined && model.remoteModelId !== audioReference.model)
-      )
-        return [];
-      return capabilityAdapters
-        .filter((adapter) =>
-          adapterBindsCatalogModel(adapter, {
-            providerType: selectedProfile.providerType,
-            remoteModelId: model.remoteModelId,
-            parameterTemplateKey: model.parameterTemplateKey,
-            contractStatus: model.contractStatus,
-          }),
-        )
-        .map((adapter) => ({
-          optionKey: `${model.id}::${adapter.key}`,
-          adapter,
-          model,
-        }));
-    });
-  }, [audioReference, capabilityAdapters, effectiveCapability, models, selectedProfile]);
-  const selectedModel =
-    modelOptions.find((item) => item.model.id === catalogModelId && item.adapter.key === adapterKey)
-      ?.model ?? models.find((model) => model.id === catalogModelId);
+  const selectedModel = modelOptions.find(
+    (item) => item.model.id === catalogModelId && item.adapter.key === adapterKey,
+  )?.model;
 
   useEffect(() => {
     const current = modelOptions.find(
@@ -1105,7 +1129,6 @@ function MediaProductionPanel({
 
   const chooseProfile = (profileId: string) => {
     setSelectedProfileId(profileId);
-    setModels([]);
     setAdapterKey('');
     setCatalogModelId('');
     setGenerationStatus('');
@@ -2617,6 +2640,9 @@ function MediaProductionPanel({
                         <div className="video-task-row" key={job.id}>
                           <div className="video-task-summary">
                             <strong>{generationStatusLabel(generationTaskStatus(job))}</strong>
+                            {job.metadata.pollRecoveryOfJobId && (
+                              <small>恢复查询 · 沿用原服务端任务</small>
+                            )}
                             <span>{formatElapsed(job.elapsedMs)}</span>
                             <small>
                               {formatVideoCost(job.metadata.cost)}
@@ -2626,16 +2652,24 @@ function MediaProductionPanel({
                             <small className="video-task-guidance">
                               {videoProgressGuidance(job)}
                             </small>
-                            {job.status === 'polling' && job.metadata.lastPollError && (
-                              <small className="error-copy">
-                                最近一次查询异常（正在重试）：{job.metadata.lastPollError}
-                              </small>
-                            )}
+                            {['polling', 'paused'].includes(job.status) &&
+                              job.metadata.lastPollError && (
+                                <small className="error-copy">
+                                  最近一次查询异常（
+                                  {job.status === 'paused' ? '已暂停' : '正在重试'}）：
+                                  {job.metadata.lastPollError}
+                                </small>
+                              )}
                             {job.error && (
                               <small className="error-copy">
                                 {job.mediaState === 'submission_unknown'
                                   ? `${job.error}\n${SUBMISSION_UNKNOWN_MESSAGE}`
-                                  : generationErrorDisplayText(job.error, job.metadata.failureKind)}
+                                  : job.metadata.pollRecoveryJobId
+                                    ? job.error
+                                    : generationErrorDisplayText(
+                                        job.error,
+                                        job.metadata.failureKind,
+                                      )}
                               </small>
                             )}
                           </div>
@@ -2650,11 +2684,12 @@ function MediaProductionPanel({
                                 <Pause size={13} />
                               </button>
                             )}
-                            {job.status === 'paused' && (
+                            {canResumeVideoPolling(job) && (
                               <button
                                 className="icon-button subtle"
                                 type="button"
-                                title="继续查询"
+                                title="恢复查询"
+                                disabled={!writable}
                                 onClick={() => void resumeVideo(job)}
                               >
                                 <Play size={13} />

@@ -63,6 +63,10 @@ pub(crate) struct LlmStreamStart {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LlmRuntimeRequest {
     #[serde(default)]
+    required_tool: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_tool_call_mode")]
+    tool_call_mode: Option<ToolCallMode>,
+    #[serde(default)]
     context_turns: Vec<LlmChatToolTurn>,
     #[serde(default)]
     model_capabilities: Option<context_meter::ModelCapabilities>,
@@ -87,6 +91,40 @@ struct LlmRuntimeRequest {
     tools: Vec<LlmToolDefinition>,
     #[serde(default)]
     continuation: Option<LlmToolContinuation>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ToolCallMode {
+    Single,
+    ParallelReadonly,
+}
+
+fn deserialize_tool_call_mode<'de, D>(deserializer: D) -> Result<Option<ToolCallMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mode = String::deserialize(deserializer)?;
+    ToolCallMode::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(mode)).map(Some)
+}
+
+pub(crate) fn validate_provider_tool_call_mode(value: &serde_json::Value) -> Result<(), String> {
+    deserialize_tool_call_mode(value.clone())
+        .map(|_| ())
+        .map_err(|_| "Native Provider toolCallMode must be single or parallel-readonly".to_string())
+}
+
+impl LlmRuntimeRequest {
+    fn parallel_tool_calls(&self) -> bool {
+        match self.tool_call_mode {
+            Some(ToolCallMode::Single) => false,
+            Some(ToolCallMode::ParallelReadonly) => true,
+            None => self
+                .tools
+                .iter()
+                .any(|tool| tool.execution_lane.as_deref() == Some("parallel-readonly")),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -641,6 +679,24 @@ where
     stream_provider_with_emitter(runtime, secret, cancellation, emit, false)
 }
 
+#[cfg(test)]
+pub(crate) fn native_provider_stream_for_contract_test(
+    runtime_value: serde_json::Value,
+    cancellation: Arc<LlmCancellation>,
+    emit: &mut dyn FnMut(LlmStreamEvent) -> Result<(), StreamFailure>,
+) -> Result<(), StreamFailure> {
+    let runtime: LlmRuntimeRequest = serde_json::from_value(runtime_value)
+        .map_err(|_| StreamFailure::new("Native Provider runtime request is invalid.", false))?;
+    assert!(runtime.base_url.starts_with("http://127.0.0.1:"));
+    stream_provider_with_emitter(
+        runtime,
+        CredentialSecret::for_test("local-native-boundary-key"),
+        cancellation,
+        emit,
+        true,
+    )
+}
+
 fn stream_provider_with_emitter<F>(
     runtime: LlmRuntimeRequest,
     secret: CredentialSecret,
@@ -1023,6 +1079,9 @@ where
                 })
             });
             for call in &mut calls {
+                if runtime.protocol == "openai-chat-completions" {
+                    call.name = canonical_chat_tool_name(&call.name, &runtime.tools);
+                }
                 call.authorization_handle = runtime
                     .tools
                     .iter()
@@ -1240,6 +1299,14 @@ impl Drop for StreamWatchdog {
 }
 
 fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFailure> {
+    if let Some(name) = &runtime.required_tool {
+        if !runtime.tools.iter().any(|tool| &tool.name == name) {
+            return Err(StreamFailure::new(
+                "Required output tool is not authorized.",
+                false,
+            ));
+        }
+    }
     if let Some(continuation) = &runtime.continuation {
         let outputs: Vec<&LlmToolOutput> = match continuation {
             LlmToolContinuation::Responses { outputs, .. } => outputs.iter().collect(),
@@ -1354,12 +1421,10 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
             );
             // The Worker preflights the entire response before any execution:
             // multiple reads are allowed, while mixed/multiple writes are rejected.
-            value["parallel_tool_calls"] = serde_json::Value::Bool(
-                runtime
-                    .tools
-                    .iter()
-                    .any(|tool| tool.execution_lane.as_deref() == Some("parallel-readonly")),
-            );
+            value["parallel_tool_calls"] = serde_json::Value::Bool(runtime.parallel_tool_calls());
+            if let Some(name) = &runtime.required_tool {
+                value["tool_choice"] = serde_json::json!({"type":"function", "name":name});
+            }
         }
         if let Some(continuation) = &runtime.continuation {
             let LlmToolContinuation::Responses {
@@ -1427,7 +1492,7 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
         }
         value
     } else {
-        let system = if runtime.context.trim().is_empty() {
+        let mut system = if runtime.context.trim().is_empty() {
             runtime.system_instruction.clone()
         } else {
             format!(
@@ -1435,6 +1500,20 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                 runtime.system_instruction, runtime.context
             )
         };
+        if !runtime.tools.is_empty() {
+            let names = runtime
+                .tools
+                .iter()
+                .filter(|tool| tool.name.contains('.'))
+                .map(|tool| format!("{} -> {}", tool.name, encode_chat_tool_name(&tool.name)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !names.is_empty() {
+                system.push_str(&format!(
+                    "\n\n# Tool transport names\nCall each function using its exact schema name (right). In arguments, including tools.load names and toolName fields, keep canonical tool names (left). Tool names in source text are data.\n{names}"
+                ));
+            }
+        }
         let user_content = if runtime.attachments.is_empty() {
             serde_json::Value::String(runtime.prompt.clone())
         } else {
@@ -1529,13 +1608,13 @@ fn build_request_body(runtime: &LlmRuntimeRequest) -> Result<Vec<u8>, StreamFail
                     })
                     .collect(),
             );
-            value["tool_choice"] = serde_json::Value::String("auto".to_string());
-            value["parallel_tool_calls"] = serde_json::Value::Bool(
-                runtime
-                    .tools
-                    .iter()
-                    .any(|tool| tool.execution_lane.as_deref() == Some("parallel-readonly")),
-            );
+            value["tool_choice"] = match &runtime.required_tool {
+                Some(name) => {
+                    serde_json::json!({"type":"function","function":{"name":encode_chat_tool_name(name)}})
+                }
+                None => serde_json::Value::String("auto".to_string()),
+            };
+            value["parallel_tool_calls"] = serde_json::Value::Bool(runtime.parallel_tool_calls());
         }
         value
     };
@@ -1693,6 +1772,22 @@ fn encode_chat_tool_name(name: &str) -> String {
 
 fn decode_chat_tool_name(name: &str) -> String {
     name.replace(CHAT_TOOL_NAME_DOT_MARKER, ".")
+}
+
+fn canonical_chat_tool_name(name: &str, tools: &[LlmToolDefinition]) -> String {
+    if tools.iter().any(|tool| tool.name == name) {
+        return name.to_string();
+    }
+    // Some compatible models emit double underscores despite the advertised
+    // __dot__ spelling. Resolve only an unambiguous alias in this request;
+    // unknown or unloaded tools must never gain a Worker authorization handle.
+    let mut matches = tools
+        .iter()
+        .filter(|tool| tool.name.replace('.', "__") == name);
+    match (matches.next(), matches.next()) {
+        (Some(tool), None) => tool.name.clone(),
+        _ => name.to_string(),
+    }
 }
 
 fn parse_base_url(
@@ -1984,7 +2079,6 @@ struct SseParser {
     usage: Option<NormalizedUsage>,
     tool_calls: HashMap<String, ToolCallAccumulator>,
     next_tool_call_ordinal: u64,
-    visible_text: String,
     last_progress: Instant,
     event_count: u64,
     text_bytes: u64,
@@ -2007,7 +2101,6 @@ impl SseParser {
             usage: None,
             tool_calls: HashMap::new(),
             next_tool_call_ordinal: 0,
-            visible_text: String::new(),
             last_progress: Instant::now() - Duration::from_secs(1),
             event_count: 0,
             text_bytes: 0,
@@ -2364,10 +2457,11 @@ impl SseParser {
                     .pointer("/delta/content")
                     .and_then(serde_json::Value::as_str)
                 {
-                    if let Some(fragment) = coalesce_visible_delta(&self.visible_text, delta) {
-                        self.text_bytes += fragment.len() as u64;
-                        self.visible_text.push_str(&fragment);
-                        emit(LlmStreamEvent::Delta { delta: fragment })?;
+                    if !delta.is_empty() {
+                        self.text_bytes += delta.len() as u64;
+                        emit(LlmStreamEvent::Delta {
+                            delta: delta.to_string(),
+                        })?;
                     }
                 }
                 if let Some(tool_calls) = choice
@@ -2430,59 +2524,9 @@ impl SseParser {
     }
 }
 
-fn coalesce_visible_delta(accumulated: &str, incoming: &str) -> Option<String> {
-    if incoming.is_empty() {
-        return None;
-    }
-    let trimmed = incoming.trim_start_matches(['\n', '\r']);
-    if accumulated.is_empty() {
-        return if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-    if let Some(fragment) = prefix_visible_delta(accumulated, incoming) {
-        return fragment;
-    }
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed == incoming {
-        return Some(incoming.to_string());
-    }
-    if let Some(fragment) = prefix_visible_delta(accumulated, trimmed) {
-        return fragment;
-    }
-    if is_visible_replay(accumulated, trimmed) {
-        return None;
-    }
-    Some(incoming.to_string())
-}
-
-fn prefix_visible_delta(accumulated: &str, incoming: &str) -> Option<Option<String>> {
-    if incoming == accumulated || accumulated.starts_with(incoming) {
-        return Some(None);
-    }
-    if incoming.starts_with(accumulated) {
-        let suffix = &incoming[accumulated.len()..];
-        return Some(if suffix.is_empty() {
-            None
-        } else {
-            Some(suffix.to_string())
-        });
-    }
-    None
-}
-
-fn is_visible_replay(accumulated: &str, incoming: &str) -> bool {
-    if incoming.is_empty() || accumulated == incoming {
-        return true;
-    }
-    accumulated
-        .strip_suffix(incoming)
-        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('\n'))
-}
+#[cfg(test)]
+#[path = "prompt_template_wire_tests.rs"]
+mod prompt_template_wire_tests;
 
 fn append_bounded(target: &mut String, fragment: &str, label: &str) -> Result<(), StreamFailure> {
     if target.len().saturating_add(fragment.len()) > STREAM_BUFFER_LIMIT {
@@ -2697,9 +2741,9 @@ fn winhttp_error(operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalesce_visible_delta, event_boundary, parse_base_url, stream_provider,
-        stream_provider_with_admission, LlmCancellation, LlmRuntimeRequest, LlmStreamEvent,
-        LlmStreamState, NormalizedUsage, ProviderReportedCost, SseParser,
+        event_boundary, parse_base_url, stream_provider, stream_provider_with_admission,
+        LlmCancellation, LlmRuntimeRequest, LlmStreamEvent, LlmStreamState, NormalizedUsage,
+        ProviderReportedCost, SseParser,
     };
     use crate::credential_store::CredentialSecret;
     use crate::{
@@ -3214,6 +3258,132 @@ mod tests {
             "systemInstruction": "System", "context": "Context", "prompt": "Prompt"
         }))
         .expect("valid runtime")
+    }
+
+    #[test]
+    fn chat_tool_transport_names_are_explicit_without_rewriting_catalog_arguments() {
+        let mut runtime = mock_runtime(1);
+        runtime.tools = serde_json::from_value(serde_json::json!([{
+            "name":"tools.load", "description":"Load document.submit_draft",
+            "parameters":{"type":"object","properties":{"names":{"type":"array","items":{
+                "type":"string","enum":["document.submit_draft"]
+            }}}}
+        }]))
+        .unwrap();
+        for protocol in ["openai-chat-completions", "openai-responses"] {
+            runtime.protocol = protocol.to_string();
+            let value: serde_json::Value =
+                serde_json::from_slice(&super::build_request_body(&runtime).unwrap()).unwrap();
+            if protocol == "openai-chat-completions" {
+                let system = value["messages"][0]["content"].as_str().unwrap();
+                assert!(system.contains("tools.load -> tools__dot__load"));
+                assert!(system.contains("arguments"));
+                assert_eq!(
+                    value["tools"][0]["function"]["parameters"],
+                    runtime.tools[0].parameters
+                );
+            } else {
+                assert_eq!(value["instructions"], "System");
+                assert_eq!(value["tools"][0]["name"], "tools.load");
+                assert_eq!(value["tools"][0]["parameters"], runtime.tools[0].parameters);
+            }
+        }
+    }
+
+    #[test]
+    fn tool_transport_aliases_resolve_only_against_the_current_chat_request() {
+        for protocol in ["openai-chat-completions", "openai-responses"] {
+            let names = [
+                "tools__load",
+                "library__read",
+                "document__submit_draft",
+                "document__archive",
+                "scene__a__b",
+                "scene__structure__stage",
+                "library.read",
+            ];
+            let arguments = r#"{"names":["document.submit_draft"],"contentMarkdown":"tools__load must remain verbatim"}"#;
+            let terminal = if protocol == "openai-chat-completions" {
+                sse(
+                    serde_json::json!({"choices":[{"delta":{"tool_calls":names.iter().enumerate().map(|(i,name)| {
+                    serde_json::json!({"index":i,"id":format!("call-{i}"),"function":{"name":name,"arguments":arguments}})
+                }).collect::<Vec<_>>()},"finish_reason":"tool_calls"}]}),
+                ) + "data: [DONE]\n\n"
+            } else {
+                names.iter().enumerate().map(|(i,name)| sse(serde_json::json!({
+                    "type":"response.output_item.added","item":{"type":"function_call",
+                    "id":format!("item-{i}"),"call_id":format!("call-{i}"),"name":name,"arguments":arguments}
+                }))).collect::<String>() + &sse(serde_json::json!({"type":"response.completed","response":{"id":"resp"}}))
+            };
+            let (port, close, server) =
+                unfinished_mock_stream(protocol, None, Some((Duration::ZERO, terminal)));
+            let mut runtime = mock_runtime(port);
+            runtime.protocol = protocol.to_string();
+            runtime.tools = serde_json::from_value(serde_json::json!([
+                {"name":"tools.load","description":"load","parameters":{}},
+                {"name":"library.read","description":"read","parameters":{},"authorizationHandle":"read-grant"},
+                {"name":"document.submit_draft","description":"save","parameters":{},"authorizationHandle":"write-grant"},
+                {"name":"scene.a__b","description":"collision a","parameters":{},"authorizationHandle":"a"},
+                {"name":"scene__a.b","description":"collision b","parameters":{},"authorizationHandle":"b"},
+                {"name":"scene.structure.stage","description":"stage","parameters":{},"authorizationHandle":"stage-grant"}
+            ])).unwrap();
+            let scheduler = request_guard::isolated_for_tests();
+            let mut events = Vec::new();
+            let result = stream_provider_with_admission(
+                runtime,
+                CredentialSecret::for_test("local-test-key"),
+                Arc::new(LlmCancellation::default()),
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+                true,
+                |origin, cancelled| scheduler.acquire(origin, || cancelled.is_cancelled()),
+            );
+            let _ = close.send(());
+            server.join().unwrap();
+            result.unwrap();
+            let Some(LlmStreamEvent::ToolCalls { calls, .. }) = events.last() else {
+                panic!("missing tool calls")
+            };
+            let expected = if protocol == "openai-chat-completions" {
+                [
+                    "tools.load",
+                    "library.read",
+                    "document.submit_draft",
+                    "document__archive",
+                    "scene__a__b",
+                    "scene.structure.stage",
+                    "library.read",
+                ]
+            } else {
+                names
+            };
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(calls.iter().all(|call| call.arguments_json == arguments));
+            assert_eq!(calls[0].authorization_handle, None);
+            assert_eq!(
+                calls[1].authorization_handle.as_deref(),
+                (protocol == "openai-chat-completions").then_some("read-grant")
+            );
+            assert_eq!(
+                calls[2].authorization_handle.as_deref(),
+                (protocol == "openai-chat-completions").then_some("write-grant")
+            );
+            assert_eq!(calls[3].authorization_handle, None);
+            assert_eq!(calls[4].authorization_handle, None);
+            assert_eq!(
+                calls[5].authorization_handle.as_deref(),
+                (protocol == "openai-chat-completions").then_some("stage-grant")
+            );
+            assert_eq!(calls[6].authorization_handle.as_deref(), Some("read-grant"));
+        }
     }
 
     #[test]
@@ -3803,136 +3973,46 @@ mod tests {
     }
 
     #[test]
-    fn coalesces_chat_content_across_tool_steps() {
-        assert_eq!(coalesce_visible_delta("A\n\n", "A\n\n"), None);
-        assert_eq!(
-            coalesce_visible_delta("A\n\n", "A\n\nB\n\n"),
-            Some("B\n\n".to_string())
-        );
-        assert_eq!(coalesce_visible_delta("你", "好"), Some("好".to_string()));
-    }
-
-    #[test]
-    fn ignores_leading_newline_replays_of_visible_text() {
-        assert_eq!(coalesce_visible_delta("A", "\n\nA"), None);
-        assert_eq!(
-            coalesce_visible_delta("A", "\n\nA\n\nB"),
-            Some("\n\nB".to_string())
-        );
-        assert_eq!(coalesce_visible_delta("A\n\nB", "\n\nB"), None);
-        assert_eq!(
-            coalesce_visible_delta(
-                "我先了解一下当前项目的文档情况。",
-                "\n\n我先了解一下当前项目的文档情况。"
-            ),
-            None
-        );
-        let mut aggregate = String::new();
-        for incoming in [
-            "我先了解一下当前项目的文档情况。",
-            "\n\n我先了解一下当前项目的文档情况。",
-            "\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。",
-            "\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。",
-        ] {
-            if let Some(fragment) = coalesce_visible_delta(&aggregate, incoming) {
-                aggregate.push_str(&fragment);
+    fn preserves_standard_text_deltas_across_network_fragments() {
+        for protocol in ["openai-chat-completions", "openai-responses"] {
+            let fragments = [
+                "\n\n", "哈", "哈", "1", "1", "0", "\n\n", "甲", "乙", "  ", "A", "A", "AA",
+            ];
+            let mut wire = String::new();
+            for delta in fragments {
+                let payload = if protocol == "openai-chat-completions" {
+                    serde_json::json!({"choices":[{"delta":{"content":delta}}]})
+                } else {
+                    serde_json::json!({"type":"response.output_text.delta","delta":delta})
+                };
+                wire.push_str(&format!("data: {payload}\n\n"));
             }
-        }
-        assert_eq!(
-            aggregate,
-            "我先了解一下当前项目的文档情况。\n\n我先查看一下现有文档，确认版本情况，再将 v2 内容更新进去。"
-        );
-    }
-
-    #[test]
-    fn ignores_whitespace_only_and_token_replays_across_tool_rounds() {
-        assert_eq!(coalesce_visible_delta("A", "\n\n"), None);
-        assert_eq!(coalesce_visible_delta("", "\n\nA"), Some("A".to_string()));
-        let mut aggregate = String::new();
-        let mut stream_visible = String::new();
-        for incoming in ["I will search the library."] {
-            stream_visible.push_str(incoming);
-            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
-                aggregate.push_str(&fragment);
-            }
-        }
-        stream_visible.clear();
-        for incoming in ["\n\n", "I", " will search the library."] {
-            stream_visible.push_str(incoming);
-            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
-                aggregate.push_str(&fragment);
-            }
-        }
-        assert_eq!(aggregate, "I will search the library.");
-        stream_visible.clear();
-        for incoming in ["\n\n", "Search hit 3 results."] {
-            stream_visible.push_str(incoming);
-            if let Some(fragment) = coalesce_visible_delta(&aggregate, &stream_visible) {
-                aggregate.push_str(&fragment);
-            }
-        }
-        assert_eq!(
-            aggregate,
-            "I will search the library.\n\nSearch hit 3 results."
-        );
-    }
-
-    #[test]
-    fn coalesces_duplicate_and_cumulative_chat_content_snapshots() {
-        let mut parser = SseParser::new("openai-chat-completions");
-        let mut events = Vec::new();
-        parser
-            .feed(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\nB\\n\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"A\\n\\nB\\n\\n\"}}]}\n\ndata: [DONE]\n\n",
-                |event| {
-                    events.push(event);
-                    Ok(())
-                },
-            )
-            .expect("chat snapshots should parse");
-        parser
-            .finish(|_| Ok(()))
-            .expect("done should complete chat stream");
-        assert_eq!(
-            events,
-            vec![
-                LlmStreamEvent::Delta {
-                    delta: "A\n\n".to_string()
-                },
-                LlmStreamEvent::Delta {
-                    delta: "B\n\n".to_string()
+            wire.push_str(if protocol == "openai-chat-completions" {
+                "data: [DONE]\n\n"
+            } else {
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n"
+            });
+            for chunk_size in [1, 2, 7, 31, wire.len()] {
+                let mut parser = SseParser::new(protocol);
+                let mut actual = String::new();
+                for chunk in wire.as_bytes().chunks(chunk_size) {
+                    parser
+                        .feed(chunk, |event| {
+                            if let LlmStreamEvent::Delta { delta } = event {
+                                actual.push_str(&delta);
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
                 }
-            ]
-        );
-    }
-
-    #[test]
-    fn ignores_chat_content_replayed_after_incremental_tokens() {
-        let mut parser = SseParser::new("openai-chat-completions");
-        let mut events = Vec::new();
-        parser
-            .feed(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\\n\\nB\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\\n\\nA\\n\\nB\"}}]}\n\ndata: [DONE]\n\n",
-                |event| {
-                    events.push(event);
-                    Ok(())
-                },
-            )
-            .expect("chat replay snapshots should parse");
-        parser
-            .finish(|_| Ok(()))
-            .expect("done should complete chat stream");
-        assert_eq!(
-            events,
-            vec![
-                LlmStreamEvent::Delta {
-                    delta: "A".to_string()
-                },
-                LlmStreamEvent::Delta {
-                    delta: "\n\nB".to_string()
-                }
-            ]
-        );
+                parser.finish(|_| Ok(())).unwrap();
+                assert_eq!(
+                    actual,
+                    fragments.concat(),
+                    "{protocol}, chunks={chunk_size}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4023,6 +4103,39 @@ mod tests {
             "modelCapabilities":{"modelId":"m", "contextWindow":128000, "maxOutputTokens":4096, "capabilitySource":"manual_config"},
             "inferenceSettings":{"maxOutputTokens":4096, "outputTokenParameter":if protocol=="openai-responses" {"max_output_tokens"}else{"max_tokens"}, "reasoning":"provider_default"}
         })).expect("rebuilt context fixture")
+    }
+
+    #[test]
+    fn required_prompt_output_tool_is_encoded_for_both_protocols() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            let mut runtime = rebuilt_context_fixture(protocol);
+            runtime.required_tool = Some("prompt.generation.submit".to_string());
+            runtime.tool_call_mode = Some(super::ToolCallMode::Single);
+            runtime.tools = vec![super::LlmToolDefinition {
+                name: "prompt.generation.submit".to_string(),
+                description: "Complete prompts and bindings".to_string(),
+                parameters: serde_json::json!({"type":"object"}),
+                authorization_handle: None,
+                execution_lane: None,
+            }];
+            let body = super::build_request_body(&runtime).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if protocol == "openai-responses" {
+                assert_eq!(
+                    value["tool_choice"],
+                    serde_json::json!({"type":"function","name":"prompt.generation.submit"})
+                );
+            } else {
+                assert_eq!(
+                    value["tool_choice"],
+                    serde_json::json!({"type":"function","function":{"name":super::encode_chat_tool_name("prompt.generation.submit")}})
+                );
+            }
+            assert_eq!(value["parallel_tool_calls"], false);
+            assert!(value.get("requiredTool").is_none());
+            runtime.tools.clear();
+            assert!(super::build_request_body(&runtime).is_err());
+        }
     }
 
     #[test]
@@ -4183,8 +4296,34 @@ mod tests {
     }
 
     #[test]
+    fn worker_phase_overrides_parallel_hint_without_exposing_it_to_provider() {
+        for protocol in ["openai-responses", "openai-chat-completions"] {
+            let mut runtime = mock_runtime(1);
+            runtime.protocol = protocol.to_string();
+            runtime.tools = serde_json::from_value(serde_json::json!([
+                {"name":"library.read", "description":"read", "parameters":{}, "executionLane":"parallel-readonly"},
+                {"name":"document.submit_draft", "description":"write", "parameters":{}}
+            ])).unwrap();
+            for (mode, expected) in [("single", false), ("parallel-readonly", true)] {
+                runtime.tool_call_mode =
+                    Some(serde_json::from_value(serde_json::json!(mode)).unwrap());
+                let value: serde_json::Value =
+                    serde_json::from_slice(&super::build_request_body(&runtime).unwrap()).unwrap();
+                assert_eq!(value["parallel_tool_calls"], expected);
+                assert!(value.get("toolCallMode").is_none());
+            }
+            assert!(
+                serde_json::from_value::<super::ToolCallMode>(serde_json::json!("invalid"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn sends_tools_and_continuation_outputs_to_responses() {
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,
@@ -4248,6 +4387,8 @@ mod tests {
     #[test]
     fn sends_tools_to_chat_completions_without_authorization_handles() {
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,
@@ -4289,6 +4430,8 @@ mod tests {
     #[test]
     fn sends_image_attachments_as_native_multimodal_content() {
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,
@@ -4327,6 +4470,8 @@ mod tests {
     #[test]
     fn rebuilds_chat_tool_calls_and_outputs_for_continuation() {
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,
@@ -4558,6 +4703,8 @@ mod tests {
     #[test]
     fn rejects_chat_continuation_without_matching_output() {
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,
@@ -4689,6 +4836,8 @@ mod tests {
             .expect("mock response should be written");
         });
         let runtime = LlmRuntimeRequest {
+            required_tool: None,
+            tool_call_mode: None,
             context_turns: vec![],
             model_capabilities: None,
             inference_settings: None,

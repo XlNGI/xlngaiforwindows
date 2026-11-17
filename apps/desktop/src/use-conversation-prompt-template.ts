@@ -1,10 +1,17 @@
-import { useEffect, useReducer, useRef } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import type { ConversationInfo, ProjectRuntimeScope } from '@ai-video/contracts';
 import { projectWorker, workerScope } from './worker-scope';
-import { SCENE_PROMPT_CONSTRAINT_TEMPLATE } from './conversation-prompt-template';
+import {
+  DEFAULT_PROMPT_TEMPLATES,
+  type PromptTemplates,
+  type PromptTemplateKind,
+  type ConversationPromptTemplateInfo,
+} from '@ai-video/contracts';
 
 interface TemplateDraft {
   content: string;
+  templates: PromptTemplates;
+  savedTemplates: string;
   savedContent: string;
   rowVersion: number;
   loaded: boolean;
@@ -34,6 +41,7 @@ function templateError(reason: unknown): string {
 /** Drafts and in-flight operations retain their original conversation and project epoch. */
 export function useConversationPromptTemplate(conversation?: ConversationInfo) {
   const [, redraw] = useReducer((version: number) => version + 1, 0);
+  const [kind, setKind] = useState<PromptTemplateKind>('character-image');
   const drafts = useRef(new Map<string, TemplateDraft>());
   const scope = workerScope(conversation?.projectId);
   const key = conversation ? draftKey(conversation, scope) : undefined;
@@ -55,7 +63,15 @@ export function useConversationPromptTemplate(conversation?: ConversationInfo) {
     const owner = draftKey(target, capturedScope);
     let draft = drafts.current.get(owner);
     if (!draft) {
-      draft = { content: '', savedContent: '', rowVersion: 0, loaded: false, error: '' };
+      draft = {
+        content: '',
+        templates: {},
+        savedTemplates: '{}',
+        savedContent: '',
+        rowVersion: 0,
+        loaded: false,
+        error: '',
+      };
       drafts.current.set(owner, draft);
     }
     const entry = draft;
@@ -71,8 +87,13 @@ export function useConversationPromptTemplate(conversation?: ConversationInfo) {
         .then((saved) => {
           // A new conversation starts with a detailed editable starter. An
           // explicitly saved empty value remains empty and is never reseeded.
-          entry.defaultUnsaved = saved.rowVersion === 0 && !saved.content;
-          entry.content = entry.defaultUnsaved ? SCENE_PROMPT_CONSTRAINT_TEMPLATE : saved.content;
+          entry.defaultUnsaved = saved.rowVersion === 0;
+          // Keep historical shared text in storage, without editing or applying it.
+          entry.content = saved.content;
+          entry.templates = structuredClone(
+            entry.defaultUnsaved ? DEFAULT_PROMPT_TEMPLATES : (saved.templates ?? {}),
+          );
+          entry.savedTemplates = JSON.stringify(saved.templates ?? {});
           entry.savedContent = saved.content;
           entry.rowVersion = saved.rowVersion;
           entry.loaded = true;
@@ -95,22 +116,32 @@ export function useConversationPromptTemplate(conversation?: ConversationInfo) {
     if (conversation) void load(conversation).catch(() => undefined);
   }, [key]);
 
-  const saveForSubmission = async (target: ConversationInfo): Promise<string> => {
+  const saveForSubmissionSnapshot = async (
+    target: ConversationInfo,
+  ): Promise<ConversationPromptTemplateInfo> => {
     const capturedScope = workerScope(target.projectId);
     const owner = draftKey(target, capturedScope);
     const entry = await load(target);
     // Save-button clicks and send may arrive in the same event turn.
     if (entry.saving) await entry.saving;
     const content = entry.content;
-    if (content !== entry.savedContent || entry.defaultUnsaved) {
+    const templates = structuredClone(entry.templates);
+    const serialized = JSON.stringify(templates);
+    if (
+      content !== entry.savedContent ||
+      serialized !== entry.savedTemplates ||
+      entry.defaultUnsaved
+    ) {
       entry.error = '';
       entry.saving = projectWorker(capturedScope)('conversation.promptTemplate.save', {
         conversationId: target.id,
         content,
+        templates,
         expectedRowVersion: entry.rowVersion,
       })
         .then((saved) => {
           entry.savedContent = saved.content;
+          entry.savedTemplates = serialized;
           entry.rowVersion = saved.rowVersion;
           entry.defaultUnsaved = false;
         })
@@ -125,22 +156,39 @@ export function useConversationPromptTemplate(conversation?: ConversationInfo) {
       refresh(owner);
       await entry.saving;
     }
-    return content;
+    return {
+      conversationId: target.id,
+      content: '',
+      policyVersion: 2,
+      templates,
+      rowVersion: entry.rowVersion,
+    };
   };
+  const saveForSubmission = async (target: ConversationInfo): Promise<string> =>
+    (await saveForSubmissionSnapshot(target)).content;
   const draft = key ? drafts.current.get(key) : undefined;
   return {
+    rowVersion: draft?.rowVersion ?? 0,
     content: draft?.content ?? '',
+    kind,
+    selectKind: setKind,
+    selectedContent: draft?.templates[kind] ?? '',
     busy: Boolean(conversation && (!draft || draft.loading || draft.saving)),
     loading: Boolean(conversation && (!draft || draft.loading)),
     error: draft?.error ?? '',
-    dirty: Boolean(draft && draft.content !== draft.savedContent),
-    change: (content: string) => {
+    dirty: Boolean(
+      draft &&
+      (draft.content !== draft.savedContent ||
+        JSON.stringify(draft.templates) !== draft.savedTemplates),
+    ),
+    change: (content: string, editingKind = kind) => {
       if (!key || !draft?.loaded) return;
-      draft.content = content;
+      draft.templates[editingKind] = content;
       refresh(key);
     },
     reload: () =>
       conversation ? load(conversation, true).then(() => undefined) : Promise.resolve(),
     saveForSubmission,
+    saveForSubmissionSnapshot,
   };
 }

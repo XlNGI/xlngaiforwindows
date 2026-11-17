@@ -23,7 +23,7 @@ describe('production skill contracts', () => {
     expect(instructions).toContain('[]');
     expect(instructions).toContain('唯一IR是bindings=');
     expect(instructions).toContain('timing仅用于scene/shot');
-    expect(instructions).toContain('所有对象可联合创作和绑定');
+    expect(instructions).toContain('在同一任务内按用途串行创作');
     expect(instructions).toContain('Worker自动执行结构校验');
     expect(instructions).not.toContain('requirementAssessments');
     expect(instructions).toContain('bundle_readback_verified');

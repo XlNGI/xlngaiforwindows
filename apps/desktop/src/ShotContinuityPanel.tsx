@@ -19,6 +19,8 @@ export function ShotContinuityPanel(props: {
   onChange: (context: ShotContinuityContext) => void;
   onGenerate: (mode: 'image', context: ShotContinuityContext) => void;
   onAskAgent?: (context: ShotContinuityContext) => Promise<void> | void;
+  sourcesOnly?: boolean;
+  onPending?: (pending: boolean) => void;
 }) {
   const callWorker = projectWorker();
   const [context, setContext] = useState<ShotContinuityContext>();
@@ -224,8 +226,11 @@ export function ShotContinuityPanel(props: {
       setMessage('本镜头参考图片已确认绑定。');
     });
   return (
-    <section className="shot-continuity-panel" aria-label="镜头衔接">
-      <h2>镜头衔接</h2>
+    <section
+      className="shot-continuity-panel"
+      aria-label={props.sourcesOnly ? '参考来源' : '镜头衔接'}
+    >
+      <h2>{props.sourcesOnly ? '参考来源' : '镜头衔接'}</h2>
       {props.sourceDirty && <p role="status">本镜头内容有未保存修改，请先保存镜头提示词。</p>}
       <ContinuitySourceSelector
         key={`${props.projectId}:${props.shotId}`}
@@ -235,9 +240,46 @@ export function ShotContinuityPanel(props: {
         writable={writable}
         notes={notes}
         onConfirm={adopt}
-        onPending={setSelectionPending}
+        onPending={(pending) => {
+          setSelectionPending(pending);
+          props.onPending?.(pending);
+        }}
       />
-      {binding && (
+      {props.sourcesOnly && context?.stale && (
+        <div role="alert">
+          <p>来源或镜头内容已变化，旧正文与图片仍保留，请核对后再使用。</p>
+          {context.reconfirmable && (
+            <button
+              type="button"
+              disabled={!writable || selectionPending}
+              onClick={() => void reconfirm()}
+            >
+              确认沿用现有选帧
+            </button>
+          )}
+        </div>
+      )}
+      {props.sourcesOnly && binding && (
+        <button
+          type="button"
+          disabled={!writable}
+          onClick={() =>
+            void action(async () => {
+              const next = await callWorker('shot.continuity.clear', {
+                shotId: props.shotId,
+                expectedRowVersion: context.rowVersion,
+              });
+              if (alive.current) {
+                adopt(next);
+                changed();
+              }
+            })
+          }
+        >
+          移除额外参考来源
+        </button>
+      )}
+      {binding && !props.sourcesOnly && (
         <>
           <h3>已确认的衔接</h3>
           {context.stale &&

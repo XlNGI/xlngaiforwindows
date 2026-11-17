@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { AgentExecutionStore } from '@ai-video/persistence';
 import { hashAgentToolArguments, unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { reconcileTaskOutputAllocations, saveTaskPlan } from './agent-task-deliverables.js';
+import { taskOutputBindings } from './agent-output-slots.js';
 import {
   CREATION_BINDING_TOOLS,
   compatibleCreationTools,
@@ -146,6 +147,18 @@ function executeBusiness(
       )
       .get(projectId, taskId, ...implicitCandidates) as { operation_key: string } | undefined;
     const implicit = priorImplicit?.operation_key ?? implicitCandidates[0]!;
+    const bindings = taskOutputBindings(db, projectId, taskId).filter((binding) =>
+      compatibleTools.includes(binding.toolName),
+    );
+    if (
+      outputId === undefined &&
+      (outputIndex !== undefined ||
+        (!priorImplicit && bindings.reduce((sum, b) => sum + b.quantity, 0) > 1))
+    )
+      throw new Error(
+        'OUTPUT_IDENTITY_REQUIRED: Multiple independent outputs need an explicit outputKey (or outputId) and outputIndex. No write occurred. Current task bindings: ' +
+          JSON.stringify(bindings),
+      );
     if (outputId !== undefined) {
       const output =
         typeof outputId === 'string' ? store.output(projectId, taskId, outputId) : undefined;
@@ -172,7 +185,25 @@ function executeBusiness(
   }
   if (outputId !== undefined && !CREATES.includes(tool))
     throw new Error('outputId is only valid for creating a planned output.');
-  const serialize = (value: unknown) => unifiedAgentToolRegistry.serializeResult(value);
+  const serialize = (value: unknown) => {
+    if (
+      value &&
+      typeof value === 'object' &&
+      (value as { status?: string }).status === 'rejected' &&
+      CREATES.includes(tool) &&
+      outputId === undefined
+    ) {
+      return unifiedAgentToolRegistry.serializeResult({
+        ...value,
+        outputBindings: taskOutputBindings(db, projectId, taskId).filter((b) =>
+          compatibleCreationTools(tool).includes(b.toolName),
+        ),
+        outputIdentityInstruction:
+          'An implicit output already exists. For distinct user-requested work use its registered outputKey and outputIndex; register a new plan obligation only if the user requested additional output. For the same object read its current version and edit with CAS. Never choose a new slot just to retry a conflicting edit.',
+      });
+    }
+    return unifiedAgentToolRegistry.serializeResult(value);
+  };
   const commit = () => {
     const value = write(args);
     return inlinePlan

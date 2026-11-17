@@ -9,6 +9,8 @@ import {
   type ShotInfo,
   type WorkerMetricsSnapshot,
   type WorkerRequest,
+  type ProviderProfileInfo,
+  type ProviderModelInfo,
 } from '@ai-video/contracts';
 import {
   handleRequest,
@@ -145,6 +147,32 @@ describe('modelMatchesUnifiedAgentRequest', () => {
       ),
     ).toBe(false);
   });
+
+  it.each([false, true])(
+    'requires explicit image editing for a custom reference adapter (%s)',
+    (imageEditing) => {
+      expect(
+        modelMatchesUnifiedAgentRequest(
+          'image',
+          {
+            ...baseModel,
+            remoteModelId: 'vendor-image-model',
+            capabilities: { ...baseModel.capabilities, imageGeneration: true, imageEditing },
+          },
+          'custom',
+          [
+            {
+              provider: 'custom',
+              model: 'openai-images',
+              capability: 'REFERENCE_TO_IMAGE',
+              apiVersion: 'v1',
+            },
+          ],
+          true,
+        ),
+      ).toBe(imageEditing);
+    },
+  );
 });
 
 afterEach(async () => {
@@ -548,6 +576,132 @@ describe('worker handler', () => {
     } as unknown as WorkerRequest);
     expect(schema).toMatchObject({ ok: true });
     if (schema.ok) expect(schema.result).toMatchObject({ key: 'TEXT_TO_IMAGE:vidu:viduq2:v2' });
+  });
+
+  it('rejects a generation-only model before reference-image draft creation and accepts it after editing is enabled', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'handler-media-capabilities-'));
+    temporaryDirectories.push(directory);
+    try {
+      expect(
+        await handleRequest({
+          id: 'capability-project',
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          method: 'project.create',
+          params: { rootPath: join(directory, 'project'), name: 'Capabilities' },
+        }),
+      ).toMatchObject({ ok: true });
+      const created = await handleRequest({
+        id: 'capability-profile',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'provider.profile.create',
+        params: {
+          name: 'Capability image provider',
+          category: 'llm',
+          providerType: 'custom',
+          accessType: 'custom',
+          protocol: 'openai-chat-completions',
+          baseUrl: 'https://images.example/v1',
+        },
+      });
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const profile = created.result as ProviderProfileInfo;
+      expect(
+        await handleRequest({
+          id: 'capability-ready',
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          method: 'provider.connection.complete',
+          params: { profileId: profile.id, status: 'ready', models: [] },
+        }),
+      ).toMatchObject({ ok: true });
+      const createdModel = await handleRequest({
+        id: 'capability-model',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'provider.model.createManual',
+        params: {
+          profileId: profile.id,
+          remoteModelId: 'vendor-image-model',
+          enabled: true,
+          capabilities: {
+            text: false,
+            vision: false,
+            tools: false,
+            streaming: false,
+            reasoning: false,
+            structuredOutput: false,
+            embeddings: false,
+            imageGeneration: true,
+            imageEditing: false,
+            videoGeneration: false,
+          },
+        },
+      });
+      expect(createdModel.ok).toBe(true);
+      if (!createdModel.ok) return;
+      const model = createdModel.result as ProviderModelInfo;
+      const prepare = () =>
+        handleRequest({
+          id: 'capability-edit-prepare',
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          method: 'image.generate.prepare',
+          params: {
+            providerProfileId: profile.id,
+            modelId: model.id,
+            adapterKey: 'REFERENCE_TO_IMAGE:custom:openai-images:v1',
+            parameters: {
+              prompt: 'Preserve the character',
+              images: ['https://example.com/character.png'],
+            },
+          },
+        });
+      expect(await prepare()).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_PARAMETERS',
+          message: 'The selected model does not support this image adapter.',
+        },
+      });
+      expect(
+        await handleRequest({
+          id: 'capability-enable-edit',
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          method: 'provider.model.update',
+          params: {
+            profileId: profile.id,
+            modelId: model.id,
+            displayName: model.displayName,
+            enabled: true,
+            capabilities: { ...model.capabilities, imageEditing: true },
+          },
+        }),
+      ).toMatchObject({ ok: true });
+      expect(await prepare()).toMatchObject({
+        ok: true,
+        result: { status: 'running', adapterKey: 'REFERENCE_TO_IMAGE:custom:openai-images:v1' },
+      });
+      await handleRequest({
+        id: 'capability-profile-cleanup',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'provider.profile.update',
+        params: {
+          profileId: profile.id,
+          name: profile.name,
+          category: profile.category,
+          providerType: profile.providerType,
+          accessType: profile.accessType,
+          protocol: profile.protocol,
+          baseUrl: profile.baseUrl,
+          enabled: false,
+        },
+      });
+    } finally {
+      await handleRequest({
+        id: 'capability-project-close',
+        protocolVersion: IPC_PROTOCOL_VERSION,
+        method: 'project.close',
+        params: {},
+      });
+    }
   });
 
   it('rejects malformed adapter schema proposals before persistence', async () => {

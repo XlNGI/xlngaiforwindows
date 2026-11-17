@@ -23,15 +23,13 @@ describe('Agent visible progress guidance', () => {
     expect(withAgentResponseLanguageInstruction(instructions)).toBe(instructions);
   });
 });
-describe('Agent character image guidance', () => {
-  it('includes the sheet requirements for document authoring and direct image generation', () => {
-    const instructions = withAgentToolInstructions('', [
-      { name: 'document.submit_draft' },
-      { name: 'media.image.prepare' },
-    ]);
-    expect(instructions).toContain('# Agent character image deliverable');
-    expect(instructions).toContain(CHARACTER_SHEET_IMAGE_REQUIREMENTS);
-    expect(instructions).toContain('只放在备注或聊天解释里不会进入生图');
+describe('Agent prompt template policy', () => {
+  it('declares template precedence before any authoring tools are loaded', () => {
+    const instructions = withAgentToolInstructions('', [{ name: 'tools.load' }]);
+    expect(instructions).toContain('本轮明确修正优先');
+    expect(instructions).toContain('先用 prompt.generation.request 声明真实源版本与全部 purposes');
+    expect(instructions).toContain('通过 tools.load 的 workflow 声明对应图片类型');
+    expect(instructions).not.toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
   });
   it('requires current-session requirements in the final authored prompt', () => {
     const instructions = withAgentToolInstructions('', [
@@ -41,7 +39,8 @@ describe('Agent character image guidance', () => {
       { name: 'media.image.prepare' },
     ]);
     expect(instructions).toContain('# Agent final prompt coverage policy');
-    expect(instructions).toContain('本轮输入中的【本会话要求约束】和【用户本次请求】');
+    expect(instructions).toContain('本轮用户请求和按产物类型选择的专项模板');
+    expect(instructions).toContain('新任务没有通用创作模板');
     expect(instructions).toContain('剧情约束文档使用 documentKind=constraint');
     expect(instructions).toContain('将已读取且适用的剧情、人物行为和连续性条款落实到作品内容');
     expect(instructions).toContain('只写在 bindings、备注或普通回复');
@@ -50,70 +49,33 @@ describe('Agent character image guidance', () => {
       instructions,
     );
   });
-  it('does not add character sheet requirements to scene-only authoring', () => {
-    const instructions = withAgentToolInstructions('', [{ name: 'scene.submit_structure' }]);
-    expect(instructions).not.toContain('# Agent character image deliverable');
-  });
-  it('delivers the same requirements through lazy image-tool loading', () => {
-    expect(loadedToolGuidance(['media.image.prepare'])).toContain(
-      CHARACTER_SHEET_IMAGE_REQUIREMENTS,
-    );
-  });
+  it.each(['character-image', 'scene-image', 'prop-image', 'shot-image', 'video-prompt'])(
+    'keeps editable defaults out of system and tool policy for %s',
+    (workflow) => {
+      const names = [
+        'document.submit_draft',
+        'media.image.prepare',
+        'media.video.prepare',
+        'scene.submit_structure',
+      ];
+      for (const policy of [
+        withAgentToolInstructions(
+          '',
+          names.map((name) => ({ name })),
+          workflow,
+        ),
+        loadedToolGuidance(names, workflow),
+      ]) {
+        expect(policy).not.toContain(CHARACTER_SHEET_IMAGE_REQUIREMENTS);
+        expect(policy).not.toContain(SCENE_REFERENCE_IMAGE_REQUIREMENTS);
+        expect(policy).not.toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
+        expect(policy).toContain('用户清空或修改模板后，不补回默认创作要求');
+        expect(policy).toContain('只要求提示词不代表授权生成图片、视频或首帧');
+      }
+    },
+  );
 });
-describe('Agent scene reference image guidance', () => {
-  it.each([
-    'document.submit_draft',
-    'document.create_draft',
-    'document.update_draft',
-    'media.review.prepare',
-    'media.image.prepare',
-  ])('carries composite scene image guidance through %s and lazy tool loading', (name) => {
-    const workflow = name.startsWith('document.') ? 'scene-image' : undefined;
-    const instructions = withAgentToolInstructions('', [{ name }], workflow);
-    expect(instructions).toContain(SCENE_REFERENCE_IMAGE_REQUIREMENTS);
-    expect(instructions).toContain(
-      '每个场景默认只准备一个完整提示词并调用一次 media.image.prepare',
-    );
-    expect(instructions).toContain('不要为全景和特写分别发起图片请求');
-    expect(instructions).toContain('默认 n=1');
-    expect(loadedToolGuidance([name], workflow)).toContain(SCENE_REFERENCE_IMAGE_REQUIREMENTS);
-    expect(withAgentToolInstructions(instructions, [{ name }], workflow)).toBe(instructions);
-  });
-  it('keeps image requirements out of ordinary reads and scene/shot video authoring', () => {
-    for (const name of ['library.read', 'scene.submit_structure', 'media.video.prepare']) {
-      expect(withAgentToolInstructions('', [{ name }])).not.toContain(
-        SCENE_REFERENCE_IMAGE_REQUIREMENTS,
-      );
-    }
-  });
-});
-describe('Agent video prompt guidance', () => {
-  it.each([
-    'document.submit_draft',
-    'document.create_draft',
-    'document.update_draft',
-    'scene.submit_structure',
-    'scene.structure.stage',
-    'scene.update_shot_prompts',
-    'novel.episode.submit_structure',
-    'media.video.prepare',
-  ])('delivers the same video writing requirements through %s', (name) => {
-    const workflow = name.startsWith('document.') ? 'video-prompt' : undefined;
-    const instructions = withAgentToolInstructions('', [{ name }], workflow);
-    expect(instructions).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
-    expect(instructions).toContain(
-      '分段内容时长由 LLM 根据动作复杂度、对白长度、表演停顿、镜头运动和叙事节奏自主设计',
-    );
-    expect(loadedToolGuidance([name], workflow)).toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
-  });
-  it('keeps video writing defaults out of image-only and ordinary read tools', () => {
-    const instructions = withAgentToolInstructions('', [
-      { name: 'media.image.prepare' },
-      { name: 'library.read' },
-    ]);
-    expect(instructions).not.toContain(VIDEO_PROMPT_AUTHORING_REQUIREMENTS);
-  });
-});
+
 describe('Agent conversation input guidance', () => {
   it('declares the form protocol when conversation.ask is available', () => {
     const instructions = withAgentToolInstructions('', [{ name: 'conversation.ask' }]);

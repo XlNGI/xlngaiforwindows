@@ -1,0 +1,421 @@
+{
+  "generatedAt": "2026-11-16T12:20:50.187Z",
+  "methodology": {
+    "realProvider": true,
+    "entryPoint": "agent.run -> conversation.runtime.start -> packaged Worker -> Native Rust -> actual configured provider",
+    "physicalUiClick": false,
+    "protocol": "openai-chat-completions",
+    "providerName": "ergou-gpt-chat",
+    "configuredRemoteModel": "gpt-5.6-terra",
+    "installedWorkerSha256": "c6e8366ceb26409528fdfbee980015828ea607b526096cef6907f86937e7da7f",
+    "userRequestSha256": "6a8a7dcc2b5bf24143060823df9fe7f8ea9c4f44bbd10d4612b02cf510f86c7e",
+    "templateHashes": {
+      "general": "0602db90d11f2ae100d8b9fca7fa0b4e1381f96c16ecb68155ab5386b9568367",
+      "character-image": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905",
+      "prop-image": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0",
+      "scene-image": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187",
+      "shot-image": "8737f51c710a5d686a3e61895998740824235007272a9f3594d7f24602936b43",
+      "video-prompt": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051"
+    },
+    "sources": [
+      {
+        "documentId": "5adea846-778b-4c9d-a399-ffa8f2ffcef6",
+        "versionId": "db287455-5627-47db-80bf-e0ecfa22eacf",
+        "hash": "9de9b68d9ff011a6803f70ab9ed43656bec324f43b5900890b0e665a3e02e07a"
+      }
+    ],
+    "isolation": {
+      "documents": 12,
+      "activeDocuments": 2,
+      "scenes": 0,
+      "shots": 0,
+      "conversationHistory": 0,
+      "assetsCopied": false,
+      "originalProjectWritten": false
+    },
+    "differences": [
+      "Fresh isolated conversation without prior chat history; pre-task documents retain current archived/active states.",
+      "Native host is compiled from current source; test-only entry selection and fixture submission are adapted, credential and HTTP transport are unchanged.",
+      "Archived scenes/shots, media assets and conversation history were not copied. This is a fresh-conversation reproduction, not a byte-identical replay of historical context.",
+      "The harness submits the raw user request to Runtime whereas the original UI submitted composed input. The general template remains in runtime.prompt, but the new task has no separate session-constraints requirement entry."
+    ],
+    "outboundEvidence": "Actual Native request-body hashes, timestamps and provider-reported usage; persisted runtime configuration and requirements checked. Complete provider HTTP request bodies were not separately captured."
+  },
+  "identity": {
+    "taskId": "327215d4-820e-49f8-b5ce-f38ded2595af",
+    "originalTaskId": "973acb94-e79a-4637-806c-01a91febbca3",
+    "projectId": "c6363152-960d-469a-9617-3e625808b086",
+    "root": "C:\\Users\\MSI\\AppData\\Local\\Temp\\p22-prompt-live-20261116-1794831058193"
+  },
+  "execution": {
+    "status": "completed",
+    "startedAt": "2026-11-16T12:11:22.384Z",
+    "completedAt": "2026-11-16T12:18:33.688Z",
+    "elapsedSeconds": 431.304,
+    "providerRequests": 8,
+    "usage": {
+      "inputTokens": 165426,
+      "cachedInputTokens": 37400,
+      "outputTokens": 11980,
+      "reasoningTokens": 1280
+    },
+    "counts": {
+      "documents": 12,
+      "scenes": 4,
+      "shots": 8
+    },
+    "failedTools": [],
+    "finishReasons": [
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "tool_calls",
+      "stop"
+    ],
+    "structureReadbackAfterHostShutdown": {
+      "status": "bundle_readback_verified",
+      "verified": true,
+      "businessSaved": true,
+      "bundleId": "327215d4-820e-49f8-b5ce-f38ded2595af",
+      "fingerprint": "235d74dc086d7b68a875359c7fbfb641ba140d40c919710aa1c0c6567d3e2b85",
+      "counts": {
+        "character": 3,
+        "scene": 3,
+        "prop": 3,
+        "voice": 3,
+        "plan": 0,
+        "shot": 8,
+        "storyScene": 4
+      },
+      "failures": [],
+      "checkedAt": "2026-11-16T12:20:50.186Z",
+      "failureCount": 0
+    },
+    "mediaJobs": 0,
+    "sqlite": {
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0
+    },
+    "nativeTest": {
+      "name": "context_e2e::context_management_real_bundle_agent_run",
+      "passed": 1,
+      "failed": 0,
+      "elapsedSeconds": 433.09,
+      "exitCode": 0
+    }
+  },
+  "templateEvidence": {
+    "videoFrozenHashMatchesOriginal": true,
+    "videoTaskRequirementMatchesFrozen": true,
+    "allSavedConfigsRetainGeneralTemplate": true,
+    "configuredTemplateSnapshotCount": 8,
+    "requiredRelativeTimelineExcerpt": "- 动态流程：按本段相对时间从 0 秒写至自然内容结束，每个动作节拍明确起止秒数、起始姿态、谁对谁做什么、动作方向／力度、对方反应、重心与道具变化、镜头跟随、声音时点及与下一节拍的衔接；节拍时间标记不表示切镜。时间连续、因果清楚，明确区分开镜状态、动作过程、关键定格与收镜结果；整场多镜按顺序交代切镜及对应时段，每个独立生成分段使用自己的相对时间。分段内容时长由 LLM 根据动作复杂度、对白长度、表演停顿、镜头运动和叙事节奏自主设计；尊重用户或已有稿件锁定的时长，不套用示例秒数、固定分段、均匀切分或固定总时长。内容时间线及总时长与 timing.estimatedDurationSeconds 一致，模型请求时长及超限处理遵循前述规则。定稿应确定有依据的动作和道具，不用“手臂或兵刃”等互斥备选敷衍具体过程，不为出招凭空增加武器。",
+    "noUnresolvedAlternativesExcerpt": "- 动态流程：按本段相对时间从 0 秒写至自然内容结束，每个动作节拍明确起止秒数、起始姿态、谁对谁做什么、动作方向／力度、对方反应、重心与道具变化、镜头跟随、声音时点及与下一节拍的衔接；节拍时间标记不表示切镜。时间连续、因果清楚，明确区分开镜状态、动作过程、关键定格与收镜结果；整场多镜按顺序交代切镜及对应时段，每个独立生成分段使用自己的相对时间。分段内容时长由 LLM 根据动作复杂度、对白长度、表演停顿、镜头运动和叙事节奏自主设计；尊重用户或已有稿件锁定的时长，不套用示例秒数、固定分段、均匀切分或固定总时长。内容时间线及总时长与 timing.estimatedDurationSeconds 一致，模型请求时长及超限处理遵循前述规则。定稿应确定有依据的动作和道具，不用“手臂或兵刃”等互斥备选敷衍具体过程，不为出招凭空增加武器。"
+  },
+  "literalChecks": {
+    "shots": [
+      {
+        "id": "93c73229-15dd-4c39-a97c-22079f3ca854",
+        "title": "镜头01｜发布会数据争议",
+        "sceneId": "1134757a-5c58-4ef4-846e-3e5124f2062d",
+        "characters": 388,
+        "textHash": "03ef8df4218efe0b641336ecd41264ed7e9af05b667cdb96871f2bf456f679d1",
+        "timing": {
+          "estimatedDurationSeconds": 25
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          }
+        ]
+      },
+      {
+        "id": "5cf8011e-f1c6-48af-ad6b-007ea06cd435",
+        "title": "镜头02｜站到顾承川身后",
+        "sceneId": "1134757a-5c58-4ef4-846e-3e5124f2062d",
+        "characters": 336,
+        "textHash": "5b3bc924cb95336545a1afc0b72f99eba7a82e0c3e4b41c0d1b4c05f6de173f8",
+        "timing": {
+          "estimatedDurationSeconds": 20
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          }
+        ]
+      },
+      {
+        "id": "124a7f4b-f851-4703-a4d9-f2581eb71b0a",
+        "title": "镜头03｜职位与名誉迅速失去",
+        "sceneId": "25331113-c69c-4b70-a776-a6758e5ff068",
+        "characters": 310,
+        "textHash": "f5eeacee75b647d661ca5aa368dced79a413a34a7bb32ec2cb5018abd8c7bd29",
+        "timing": {
+          "estimatedDurationSeconds": 15
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "0d709555-ffac-4f5a-a501-5bf3f833c356",
+            "title": "林砚的手机"
+          }
+        ]
+      },
+      {
+        "id": "f0171b6d-20e9-44b3-8592-4c055ea2b9c8",
+        "title": "镜头04｜被撤回的求助信息",
+        "sceneId": "25331113-c69c-4b70-a776-a6758e5ff068",
+        "characters": 299,
+        "textHash": "7621ca4dc35ab586fe891e0052174d270026425a3128564dabcb89fd9b21c9eb",
+        "timing": {
+          "estimatedDurationSeconds": 15
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "0d709555-ffac-4f5a-a501-5bf3f833c356",
+            "title": "林砚的手机"
+          }
+        ]
+      },
+      {
+        "id": "a0e3e1c8-a4c2-4049-9d77-293ef99fafdb",
+        "title": "镜头05｜授权书前醒来",
+        "sceneId": "50107d81-784f-411f-ae1d-e262150eb068",
+        "characters": 283,
+        "textHash": "71fe7d69b3e5e3c3d0e637ab6b6b65d25972f32b21ff0ffc65bba1215a140f8b",
+        "timing": {
+          "estimatedDurationSeconds": 18
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          },
+          {
+            "id": "13c55273-ad51-4306-9eca-6ca9c147a97d",
+            "title": "授权签署用笔"
+          }
+        ]
+      },
+      {
+        "id": "fe727a5c-053d-4320-8ffb-eaf207b456d1",
+        "title": "镜头06｜递笔催签",
+        "sceneId": "50107d81-784f-411f-ae1d-e262150eb068",
+        "characters": 293,
+        "textHash": "f64e2cdcb09f86ddf8ff5ffddaa6f01a85a0c62e389051fa0cdf2e845bbab23b",
+        "timing": {
+          "estimatedDurationSeconds": 17
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          },
+          {
+            "id": "13c55273-ad51-4306-9eca-6ca9c147a97d",
+            "title": "授权签署用笔"
+          }
+        ]
+      },
+      {
+        "id": "16e624b0-eb71-4b68-845d-2388e3ff64e9",
+        "title": "镜头07｜握笔而不落笔",
+        "sceneId": "d62450b0-1bae-4355-9c17-817738086528",
+        "characters": 296,
+        "textHash": "c7ebbbe40efad4b5f49ade12b62a5583253aa9fee66c051117d1ce67efa92674",
+        "timing": {
+          "estimatedDurationSeconds": 20
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 0,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          },
+          {
+            "id": "13c55273-ad51-4306-9eca-6ca9c147a97d",
+            "title": "授权签署用笔"
+          }
+        ]
+      },
+      {
+        "id": "f51dbdac-c20f-4061-9e43-d02af62737af",
+        "title": "镜头08｜要求完整版本",
+        "sceneId": "d62450b0-1bae-4355-9c17-817738086528",
+        "characters": 352,
+        "textHash": "f1b2e5c24471e69d47bddd6e439e3ae64bb39e665e5e9ed3167136325d3cf53c",
+        "timing": {
+          "estimatedDurationSeconds": 20
+        },
+        "hasRelativeSeconds": false,
+        "hasAtmosphereSection": false,
+        "hasDynamicFlowSection": false,
+        "hasImageInputHeading": true,
+        "keyDialogueCount": 1,
+        "propBindings": [
+          {
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "title": "核心项目授权书"
+          },
+          {
+            "id": "13c55273-ad51-4306-9eca-6ca9c147a97d",
+            "title": "授权签署用笔"
+          }
+        ]
+      }
+    ],
+    "scenes": [
+      {
+        "id": "1134757a-5c58-4ef4-846e-3e5124f2062d",
+        "title": "场次一｜发布会失控",
+        "timing": {
+          "estimatedDurationSeconds": 45,
+          "locked": true
+        },
+        "childrenTotalSeconds": 45,
+        "completeChildTextsInOrder": true
+      },
+      {
+        "id": "25331113-c69c-4b70-a776-a6758e5ff068",
+        "title": "场次二｜名誉崩塌",
+        "timing": {
+          "estimatedDurationSeconds": 30,
+          "locked": true
+        },
+        "childrenTotalSeconds": 30,
+        "completeChildTextsInOrder": true
+      },
+      {
+        "id": "50107d81-784f-411f-ae1d-e262150eb068",
+        "title": "场次三｜回到三年前",
+        "timing": {
+          "estimatedDurationSeconds": 35,
+          "locked": true
+        },
+        "childrenTotalSeconds": 35,
+        "completeChildTextsInOrder": true
+      },
+      {
+        "id": "d62450b0-1bae-4355-9c17-817738086528",
+        "title": "场次四｜拒签授权",
+        "timing": {
+          "estimatedDurationSeconds": 40,
+          "locked": true
+        },
+        "childrenTotalSeconds": 40,
+        "completeChildTextsInOrder": true
+      }
+    ]
+  },
+  "manualFindings": [
+    {
+      "id": "F1",
+      "result": "fail",
+      "finding": "All eight video prompt bodies omit relative-second beat ranges, atmosphere/image-quality section and explicit dynamic-flow section. Numeric timing alone does not implement the requested body structure.",
+      "affected": [
+        "93c73229-15dd-4c39-a97c-22079f3ca854",
+        "5cf8011e-f1c6-48af-ad6b-007ea06cd435",
+        "124a7f4b-f851-4703-a4d9-f2581eb71b0a",
+        "f0171b6d-20e9-44b3-8592-4c055ea2b9c8",
+        "a0e3e1c8-a4c2-4049-9d77-293ef99fafdb",
+        "fe727a5c-053d-4320-8ffb-eaf207b456d1",
+        "16e624b0-eb71-4b68-845d-2388e3ff64e9",
+        "f51dbdac-c20f-4061-9e43-d02af62737af"
+      ]
+    },
+    {
+      "id": "F2",
+      "result": "fail",
+      "finding": "Scene reference prompts include character actions and plot-prop close-ups. Post-event location explicitly requests mobile-phone UI close-ups, contrary to the read Skill.",
+      "excerpt": "侧栏特写仅取主图中真实存在且有剧情依据的手机界面局部"
+    },
+    {
+      "id": "F3",
+      "result": "fail",
+      "finding": "Unresolved action/location alternatives survive into final video text.",
+      "excerpts": [
+        "沈砚舟在她对面或近旁",
+        "顾承川的压力从画外或对面传来",
+        "笔被放回桌面或停在纸面上方"
+      ]
+    },
+    {
+      "id": "F4",
+      "result": "fail",
+      "finding": "The first two press-conference shots bind the three-years-earlier authorization document as their adverse-evidence document. The source does not establish that these are the same prop.",
+      "affected": [
+        "93c73229-15dd-4c39-a97c-22079f3ca854",
+        "5cf8011e-f1c6-48af-ad6b-007ea06cd435"
+      ]
+    },
+    {
+      "id": "F5",
+      "result": "fail",
+      "finding": "All eight prompt bodies include an input-image heading describing document bindings even though this run provided no image attachments. The binding declarations do not establish real image inputs."
+    },
+    {
+      "id": "P1",
+      "result": "pass",
+      "finding": "This run retains the key finale dialogue in exactly one shot; the historical adjacent-shot repetition did not recur."
+    },
+    {
+      "id": "P2",
+      "result": "pass",
+      "finding": "All four scene timings equal child-shot totals; total shot estimate is 150 seconds. This does not validate natural performance speed."
+    },
+    {
+      "id": "P3",
+      "result": "pass",
+      "finding": "Each scene includes its child prompt texts in order. Saved prompt bodies match submitted candidates after Worker shutdown."
+    }
+  ],
+  "interpretation": {
+    "confirmed": [
+      "The real model generated and saved noncompliant prompt text while structural verification completed successfully.",
+      "The task used the same selected outline and frozen templates with the same packaged Worker/model configuration.",
+      "The source is an episode outline with undeclared visual and audio details; the model treated these undeclared items as restrictions and repeatedly kept them open instead of producing a determinate production description."
+    ],
+    "limits": [
+      "One new-conversation run cannot isolate the causal contribution of model capability, instruction density, history or wording.",
+      "The structural-only validation is an already-confirmed product decision; this diagnosis does not authorize or introduce a semantic-review gate."
+    ]
+  }
+}

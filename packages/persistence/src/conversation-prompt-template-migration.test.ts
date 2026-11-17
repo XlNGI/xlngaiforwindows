@@ -7,6 +7,51 @@ import { CURRENT_SCHEMA_VERSION } from './schema.js';
 import { MIGRATION_V55 } from './migration-v55.js';
 
 describe('conversation prompt template migration', () => {
+  it('upgrades scoped templates without rewriting legacy text and rolls back a failed v79', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scoped-templates-'));
+    const database = openProjectDatabase(join(directory, 'project.sqlite'));
+    try {
+      migrateDatabase(database);
+      database.exec(`DROP TABLE conversation_prompt_template_variants;
+        DROP TRIGGER IF EXISTS conversation_prompt_template_variants_project_insert;
+        DROP TRIGGER IF EXISTS conversation_prompt_template_variants_project_update;
+        DELETE FROM schema_migrations WHERE version>=79;
+        INSERT INTO projects(id,name,created_at,updated_at) VALUES('a','A','now','now'),('b','B','now','now');
+        INSERT INTO conversations(id,project_id,scope_type,title,created_at,updated_at) VALUES('chat','a','project','Chat','now','now');
+        INSERT INTO conversation_prompt_templates VALUES('chat','a','旧模板原文',7,'created','updated');
+        CREATE TRIGGER fail_scoped_upgrade BEFORE INSERT ON schema_migrations WHEN NEW.version=79 BEGIN SELECT RAISE(ABORT,'injected failure'); END;`);
+      expect(() => migrateDatabase(database)).toThrow('injected failure');
+      expect(getSchemaVersion(database)).toBe(78);
+      expect(
+        database
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE name='conversation_prompt_template_variants'",
+          )
+          .get(),
+      ).toBeUndefined();
+      database.exec('DROP TRIGGER fail_scoped_upgrade');
+      migrateDatabase(database);
+      expect(
+        database.prepare('SELECT content,row_version FROM conversation_prompt_templates').get(),
+      ).toEqual({ content: '旧模板原文', row_version: 7 });
+      const insert = database.prepare(
+        'INSERT INTO conversation_prompt_template_variants VALUES(?,?,?)',
+      );
+      expect(() => insert.run('chat', 'b', '{}')).toThrow('project mismatch');
+      insert.run('chat', 'a', '{"video-prompt":""}');
+      expect(() =>
+        database.prepare("UPDATE conversation_prompt_template_variants SET project_id='b'").run(),
+      ).toThrow('project mismatch');
+      database.prepare("DELETE FROM conversations WHERE id='chat'").run();
+      expect(database.prepare('SELECT * FROM conversation_prompt_template_variants').all()).toEqual(
+        [],
+      );
+      expect(database.pragma('foreign_key_check')).toEqual([]);
+    } finally {
+      database.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it('creates a project-scoped template table and rolls back v55 atomically', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'conversation-prompt-template-'));
     const database = openProjectDatabase(join(directory, 'project.sqlite'));

@@ -77,6 +77,9 @@ import { MIGRATION_V73 } from './migration-v73.js';
 import { applyMigrationV74 } from './migration-v74.js';
 import { applyMigrationV75 } from './migration-v75.js';
 import { applyMigrationV77 } from './migration-v77.js';
+import { applyMigrationV78 } from './migration-v78.js';
+import { MIGRATION_V79 } from './migration-v79.js';
+import { applyMigrationV80 } from './migration-v80.js';
 import { applyMigrationV76 } from './migration-v76.js';
 import { rewriteLegacyContextSnapshots } from './migration-v16.js';
 import { widenAgentTaskToolCallLimit } from './migration-v18.js';
@@ -860,6 +863,30 @@ export function migrateDatabase(
       database
         .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
         .run(77, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 78) {
+    database.transaction(() => {
+      applyMigrationV78(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(78, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 79) {
+    database.transaction(() => {
+      database.exec(MIGRATION_V79);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(79, now);
+    })();
+  }
+  if (getSchemaVersion(database) < 80) {
+    database.transaction(() => {
+      applyMigrationV80(database);
+      database
+        .prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)')
+        .run(80, now);
     })();
   }
   return getSchemaVersion(database);

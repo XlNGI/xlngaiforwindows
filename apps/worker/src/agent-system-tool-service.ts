@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { executeAgentBusiness } from './agent-business-execution.js';
 import { ProductionBundleService } from './production-bundle-service.js';
+import { PromptGenerationService } from './prompt-generation-service.js';
 import { savedProductionReceipts } from './agent-saved-production-receipts.js';
 import { taskCheckpoint } from './agent-task-checkpoints.js';
 import { inspectAgentTask } from './agent-task-inspection.js';
@@ -130,7 +131,8 @@ export class AgentSystemToolService {
   availableOperations(): SystemAgentToolOperation[] {
     return SYSTEM_AGENT_TOOLS.map((tool) => tool.name as SystemAgentToolOperation).filter(
       (name) => {
-        if (name.startsWith('shot.continuity.')) return Boolean(this.continuity);
+        if (name.startsWith('shot.continuity.') || name.startsWith('shot.image.'))
+          return Boolean(this.continuity);
         if (name.startsWith('media.review.') || name === 'media.audio.read')
           return Boolean(this.mediaReviews);
         if (name.startsWith('novel.chapter.batch.')) return Boolean(this.batches);
@@ -159,16 +161,19 @@ export class AgentSystemToolService {
   ): Record<string, unknown> {
     this.assertIdentity(identity);
     const args = requireArguments(rawArguments);
+    if (operation === 'prompt.generation.request' || operation === 'prompt.generation.submit') {
+      if (!this.documents) throw unavailable('Document workflow');
+      return new PromptGenerationService(this.projects, this.content, this.documents, (value) =>
+        unifiedAgentToolRegistry.serializeResult(value),
+      ).execute(operation === 'prompt.generation.request' ? 'request' : 'submit', args, identity);
+    }
     if (operation === 'production.bundle' || operation === 'production.bundle.submit') {
       if (!this.documents) throw unavailable('Document workflow');
       return new ProductionBundleService(this.projects, this.content, this.documents, (value) =>
         unifiedAgentToolRegistry.serializeResult(value),
       ).execute(args, identity, operation === 'production.bundle.submit');
     }
-    if (
-      identity.taskId &&
-      unifiedAgentToolRegistry.require(operation).executionLane !== 'parallel-readonly'
-    )
+    if (identity.taskId && unifiedAgentToolRegistry.executionMode(operation, args) !== 'parallel')
       return this.projects.access(
         true,
         (db, project) =>
@@ -192,9 +197,41 @@ export class AgentSystemToolService {
     identity: AgentSystemToolIdentity,
   ): Record<string, unknown> {
     switch (operation) {
+      case 'prompt.generation.request':
+      case 'prompt.generation.submit':
+        throw new Error('Prompt generation requires the dedicated atomic boundary.');
       case 'production.bundle':
       case 'production.bundle.submit':
         throw new Error('Bundle operations require the dedicated atomic boundary.');
+      case 'shot.image.read':
+        rejectUnknown(args, ['shotId', 'includeImages']);
+        if (args.includeImages !== undefined && typeof args.includeImages !== 'boolean')
+          throw new Error('includeImages must be boolean.');
+        if (!this.continuity) throw unavailable('Shot image');
+        return this.continuity.readImageForAgent(requiredString(args.shotId, 'shotId', 200));
+      case 'shot.image.save': {
+        rejectUnknown(args, [
+          'shotId',
+          'expectedRowVersion',
+          'sourceToken',
+          'prompt',
+          'purpose',
+          'intent',
+          'bindings',
+        ]);
+        if (!this.continuity) throw unavailable('Shot image');
+        const saved = this.continuity.saveImage(
+          args as unknown as import('@ai-video/contracts').ShotImageSaveParams,
+        );
+        return {
+          status: 'shot_image_prompt_saved',
+          shotId: saved.shotId,
+          rowVersion: saved.rowVersion,
+          prompt: saved.prompt,
+          purpose: saved.purpose,
+          bindings: saved.bindings,
+        };
+      }
       case 'shot.continuity.read':
         rejectUnknown(args, ['shotId', 'includeImages']);
         if (args.includeImages !== undefined && typeof args.includeImages !== 'boolean')
@@ -460,6 +497,7 @@ export class AgentSystemToolService {
     expectedRowVersion: number,
     identity: AgentSystemToolIdentity & { generationId: string },
     sourceToken: string,
+    independent = false,
   ) {
     this.assertIdentity(identity);
     if (!this.continuity) throw unavailable('Shot continuity');
@@ -480,7 +518,7 @@ export class AgentSystemToolService {
         .some((model) => model.id === selection.model_id && model.capabilities.vision)
     )
       throw new Error('请选择支持看图的会话模型来读取参考画面。');
-    return this.continuity.imagesForAgent(shotId, expectedRowVersion, sourceToken);
+    return this.continuity.imagesForAgent(shotId, expectedRowVersion, sourceToken, independent);
   }
 
   private reviewSummary(form: import('@ai-video/contracts').MediaReviewSummary) {

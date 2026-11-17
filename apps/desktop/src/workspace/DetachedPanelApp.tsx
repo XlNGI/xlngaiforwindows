@@ -374,7 +374,16 @@ function DetachedConversationPanel({
         dispatch({ panelId: 'conversation', type: 'conversation-composer', value })
       }
       onPromptTemplateChange={(value) =>
-        dispatch({ panelId: 'conversation', type: 'conversation-prompt-template', value })
+        dispatch({
+          panelId: 'conversation',
+          type: 'conversation-prompt-template',
+          value,
+          kind: snapshot.promptTemplateKind,
+        })
+      }
+      promptTemplateKind={snapshot.promptTemplateKind}
+      onPromptTemplateKindChange={(kind) =>
+        dispatch({ panelId: 'conversation', type: 'conversation-prompt-template-kind', kind })
       }
       onSavePromptTemplate={() =>
         dispatch({ panelId: 'conversation', type: 'conversation-prompt-template-save' })

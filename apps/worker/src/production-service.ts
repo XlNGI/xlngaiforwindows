@@ -5,6 +5,8 @@ import {
   productionShotReferenceIds,
   productionFrameInputConflict,
   seedProductionInputs,
+  productionImageBindingPrompt,
+  stripProductionImageBindingPrompt,
   type PromptBindingIR,
   type ProductionCompileParams,
   type ProductionCompileResult,
@@ -25,7 +27,12 @@ import {
   resolveProductionDuration,
   parseProductionDefaults,
 } from '@ai-video/generation-adapters';
-import { createRepositories, readShotContinuity } from '@ai-video/persistence';
+import {
+  createRepositories,
+  readShotContinuity,
+  readShotImage,
+  readShotVideoImages,
+} from '@ai-video/persistence';
 import { continuityReferenceImageIds, continuitySourceImageIds } from '@ai-video/contracts';
 import { ContentService } from './content-service.js';
 import { ProjectService, resolveProjectRelativePath } from './project-service.js';
@@ -33,6 +40,7 @@ import { resolveSceneMedia } from './scene-media-service.js';
 import { resolvePromptMaterialBindings } from './prompt-binding-media.js';
 import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import { productionMediaView } from './production-media-view.js';
+import { shotImageSourceToken } from './shot-image-source.js';
 const hash = (value: unknown) =>
   createHash('sha256')
     .update(
@@ -298,7 +306,11 @@ export class ProductionService {
     });
   }
   /** Shared saved binding projection for compilation and the Agent's on-demand media view. */
-  private resolveSceneInputs(target: ProductionTarget, shotIds?: string[]) {
+  private resolveSceneInputs(
+    target: ProductionTarget,
+    shotIds?: string[],
+    imageScope?: PromptBindingIR,
+  ) {
     return this.projects.access(false, (db, project) => {
       const content = new ContentService(this.projects);
       let materialReferences: Array<{
@@ -330,7 +342,9 @@ export class ProductionService {
               : allShots;
         const scopedReferences = scopedShots.map((shot) => ({
           shot,
-          references: productionShotReferenceIds(shot),
+          references: productionShotReferenceIds(
+            imageScope ? { ...shot, bindings: imageScope } : shot,
+          ),
         }));
         materialReferences = [
           ...new Map(
@@ -514,22 +528,121 @@ export class ProductionService {
       imageBindings,
       materialReferences,
       {
-        imageGeneration: this.defaultImages(target, false),
-        videoGeneration: this.defaultImages(target, true),
+        imageGeneration: target.kind === 'shot' ? this.imageInputs(target.id) : undefined,
+        videoGeneration: target.kind === 'shot' ? this.videoInputs(target.id) : undefined,
       },
     );
+  }
+  /** The image scope never falls back to the video cast. Sources are ordinary references. */
+  imageInputs(shotId: string): import('@ai-video/contracts').ProductionImageSelection[] {
+    const target = { kind: 'shot' as const, id: shotId };
+    const record = this.projects.access(false, (db, project) =>
+      readShotImage(db, project.id, shotId),
+    );
+    const { imageBindings } = this.resolveSceneInputs(
+      target,
+      undefined,
+      record.bindings ?? { schemaVersion: 1 },
+    );
+    const sourceImages = this.defaultImages(target, false);
+    return [
+      ...new Map(
+        [
+          ...imageBindings.map((binding) => ({
+            assetId: binding.assetId,
+            role:
+              binding.role === 'character' || binding.role === 'scene'
+                ? binding.role
+                : ('reference' as const),
+            label: binding.label,
+          })),
+          ...sourceImages,
+        ].map((image) => [image.assetId, image]),
+      ).values(),
+    ];
+  }
+  videoInputs(shotId: string): import('@ai-video/contracts').ProductionImageSelection[] {
+    const adopted = this.projects.access(false, (db, project) =>
+      readShotVideoImages(db, project.id, shotId),
+    );
+    if (adopted.selections !== undefined) return adopted.selections;
+    const legacy = this.defaultImages({ kind: 'shot', id: shotId }, true);
+    if (legacy.length) return legacy;
+    return this.resolveSceneInputs({ kind: 'shot', id: shotId }).imageBindings.map((binding) => ({
+      assetId: binding.assetId,
+      role:
+        binding.role === 'character' || binding.role === 'scene'
+          ? binding.role
+          : ('reference' as const),
+      label: binding.label,
+    }));
+  }
+  promptPreview(
+    shotId: string,
+    kind: 'image' | 'video',
+    overrides?: import('@ai-video/contracts').ProductionImageSelection[],
+    draft?: string,
+  ) {
+    const read = this.read({ kind: 'shot', id: shotId });
+    const prompt =
+      draft ??
+      (kind === 'image'
+        ? this.projects.access(false, (db, project) => readShotImage(db, project.id, shotId).prompt)
+        : (read.prompt ?? ''));
+    if (!prompt.trim())
+      throw new Error(kind === 'image' ? '请先编写本镜图片提示词。' : '请先编写本镜视频提示词。');
+    const inputImages =
+      overrides ?? (kind === 'image' ? this.imageInputs(shotId) : this.videoInputs(shotId));
+    return {
+      prompt: productionImageBindingPrompt(
+        stripProductionImageBindingPrompt(prompt),
+        inputImages.length,
+        inputImages.map((image, index) => ({
+          imageIndex: index + 1,
+          role: image.role,
+          label: image.label,
+        })),
+        (index) => `图片${index}`,
+      ),
+      inputImages,
+    };
   }
   compile(params: ProductionCompileParams): ProductionCompileResult {
     const adapter = getAdapter(params.adapterKey);
     if (!adapter) throw new Error('制作模型不存在。');
-    const read = this.read(params.target, params.shotIds);
+    const video = adapter.capability.endsWith('_VIDEO');
+    let read = this.read(params.target, params.shotIds);
+    const imageRecord =
+      params.target.kind === 'shot' && !video
+        ? this.projects.access(false, (db, project) =>
+            readShotImage(db, project.id, params.target.id),
+          )
+        : undefined;
+    if (imageRecord)
+      read = {
+        ...read,
+        prompt: imageRecord.prompt,
+        compiledPrompt: imageRecord.prompt,
+        bindings: imageRecord.bindings,
+        timing: undefined,
+        estimatedDurationSeconds: undefined,
+        issues: read.issues.filter(
+          (issue) => !['MISSING_PROMPT', 'INVALID_BINDING_REFERENCE'].includes(issue.code),
+        ),
+      };
+    if (imageRecord && !imageRecord.prompt.trim())
+      read.issues.push({
+        code: 'MISSING_PROMPT',
+        message: '请先保存本镜图片提示词。',
+        target: params.target,
+      });
     const selected =
       params.inputImages ??
-      this.defaultImages(params.target, adapter.capability.endsWith('_VIDEO'));
-    const source = this.formSource(params.target, params.shotIds, selected);
+      (imageRecord ? this.imageInputs(params.target.id) : this.defaultImages(params.target, video));
+    const source = this.formSource(params.target, params.shotIds, selected, Boolean(imageRecord));
     if (params.expectedToken && params.expectedToken !== source.token)
       throw new Error('制作来源已变化，请重新适配。');
-    if (!read.compiledPrompt && ['scene', 'shot'].includes(params.target.kind)) {
+    if (!read.compiledPrompt?.trim() && ['scene', 'shot'].includes(params.target.kind)) {
       const { sceneInputs } = this.resolveSceneInputs(params.target, params.shotIds);
       return {
         ...read,
@@ -540,27 +653,51 @@ export class ProductionService {
     }
     return this.projects.access(false, (db, project) => {
       const issues = [...read.issues];
+      if (imageRecord) {
+        if (imageRecord.bindings)
+          validatePromptBindingReferences(db, project.id, imageRecord.bindings);
+        if (
+          imageRecord.sourceToken &&
+          imageRecord.sourceToken !==
+            shotImageSourceToken(
+              db,
+              project.id,
+              params.target.id,
+              this.imageInputs(params.target.id),
+            )
+        )
+          throw new Error('图片创作依据已变化，请在本镜参考图中核对正文后再填表。');
+      }
+      if (
+        video &&
+        params.target.kind === 'shot' &&
+        readShotVideoImages(db, project.id, params.target.id).conflicts.length
+      )
+        throw new Error('旧图片用途存在冲突，请在本镜参考图中明确确认采用图片。');
       const notices: ProductionIssue[] = [];
       const continuityState =
         params.target.kind === 'shot'
           ? readShotContinuity(db, project.id, params.target.id)
           : undefined;
-      const continuity = continuityState?.binding;
-      const video = adapter.capability.endsWith('_VIDEO');
-      const { sceneInputs, imageBindings } = this.resolveSceneInputs(params.target, params.shotIds);
+      const { sceneInputs, imageBindings } = this.resolveSceneInputs(
+        params.target,
+        params.shotIds,
+        imageRecord ? (imageRecord.bindings ?? { schemaVersion: 1 }) : undefined,
+      );
       const ir = { prompt: read.compiledPrompt ?? '', timing: read.timing };
       const compiled = compileProductionParameters(ir, adapter, {
-        prompt:
-          !video && continuity?.imagePrompt !== undefined
-            ? (continuity.imagePrompt ?? read.compiledPrompt ?? ir.prompt)
-            : (read.compiledPrompt ?? ir.prompt),
+        prompt: read.compiledPrompt ?? ir.prompt,
         estimatedDurationSeconds: read.estimatedDurationSeconds,
         generation: this.getDefaults().settings.generation,
       });
       issues.push(...compiled.issues);
       notices.push(...compiled.notices);
       const inputs =
-        selected.length || params.inputImages !== undefined
+        selected.length ||
+        params.inputImages !== undefined ||
+        imageRecord ||
+        (params.target.kind === 'shot' &&
+          readShotVideoImages(db, project.id, params.target.id).selections !== undefined)
           ? selected.map((image) => ({ ...image, url: `project-asset://${image.assetId}` }))
           : imageBindings.map((binding) => ({
               role:
@@ -649,12 +786,17 @@ export class ProductionService {
     if (!activeShot) throw new Error('制作镜头已归档或不存在，请先恢复。');
     return activeShot;
   }
-  private defaultImages(target: ProductionTarget, video: boolean) {
+  private defaultImages(
+    target: ProductionTarget,
+    video: boolean,
+  ): import('@ai-video/contracts').ProductionImageSelection[] {
     if (target.kind !== 'shot') return [];
     return this.projects.access(false, (db, project) => {
       const binding = readShotContinuity(db, project.id, target.id).binding;
-      if (!binding) return [];
       if (video) {
+        const adopted = readShotVideoImages(db, project.id, target.id);
+        if (adopted.selections !== undefined) return adopted.selections;
+        if (!binding) return [];
         return [
           ...continuityReferenceImageIds(binding)
             .filter((id) => id !== binding.firstFrameAssetId)
@@ -664,6 +806,7 @@ export class ProductionService {
             : []),
         ];
       }
+      if (!binding) return [];
       return !video
         ? continuitySourceImageIds(binding).map((assetId) => ({
             assetId,
@@ -676,6 +819,7 @@ export class ProductionService {
     target: ProductionTarget,
     shotIds?: string[],
     inputImages?: ProductionFormSource['inputImages'],
+    imageMode = false,
   ): ProductionFormSource {
     const normalizedImages = inputImages?.map((image) => ({ ...image }));
     const token = this.projects.access(false, (db, project) => {
@@ -689,7 +833,28 @@ export class ProductionService {
       );
       const continuity =
         target.kind === 'shot' ? readShotContinuity(db, project.id, target.id) : undefined;
-      return hash([this.queryVersion(target), shotIds, normalizedImages, imageState, continuity]);
+      const image =
+        target.kind === 'shot' && imageMode ? readShotImage(db, project.id, target.id) : undefined;
+      const adopted =
+        target.kind === 'shot' && !imageMode
+          ? readShotVideoImages(db, project.id, target.id)
+          : undefined;
+      return hash([
+        this.queryVersion(target),
+        shotIds,
+        normalizedImages,
+        imageState,
+        continuity?.binding && (imageMode || adopted?.selections === undefined)
+          ? {
+              rowVersion: continuity.rowVersion,
+              frames: continuity.binding.frames,
+              sourceImages: continuity.binding.sourceImages,
+              sourceVideos: continuity.binding.sourceVideos,
+            }
+          : undefined,
+        image,
+        adopted,
+      ]);
     });
     return {
       mode: 'form',

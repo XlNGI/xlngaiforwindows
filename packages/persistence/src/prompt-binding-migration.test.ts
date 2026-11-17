@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { afterEach, expect, it } from 'vitest';
 import { migrateDatabase, getSchemaVersion } from './database.js';
-import { MIGRATION_V1 } from './schema.js';
+import { CURRENT_SCHEMA_VERSION, MIGRATION_V1 } from './schema.js';
 
 const databases: Database.Database[] = [];
 afterEach(() => {
@@ -81,7 +81,7 @@ function fixture() {
 }
 it('preserves text bytes, explicit bindings, audition text, duration and row versions while dropping all former IR columns', () => {
   const db = fixture();
-  expect(migrateDatabase(db)).toBe(77);
+  expect(migrateDatabase(db)).toBe(CURRENT_SCHEMA_VERSION);
   const shot = db
     .prepare('SELECT prompt,bindings_json,timing_json,row_version FROM shots')
     .get() as { prompt: string; bindings_json: string; timing_json: string; row_version: number };
@@ -115,7 +115,7 @@ it('preserves text bytes, explicit bindings, audition text, duration and row ver
       expect(columns).not.toContain(column);
   }
   const before = shot;
-  expect(migrateDatabase(db)).toBe(77);
+  expect(migrateDatabase(db)).toBe(CURRENT_SCHEMA_VERSION);
   expect(
     db.prepare('SELECT prompt,bindings_json,timing_json,row_version FROM shots').get(),
   ).toEqual(before);
@@ -137,7 +137,7 @@ it('rolls back the whole conversion when the migration fails and retries with th
     ),
   ).toBe(false);
   db.exec('DROP TRIGGER fail_v77');
-  expect(migrateDatabase(db)).toBe(77);
+  expect(migrateDatabase(db)).toBe(CURRENT_SCHEMA_VERSION);
 });
 it('retires pre-rebuild candidates without changing their original result IDs, bytes or hashes', () => {
   const db = fixture();

@@ -216,6 +216,8 @@ describe('NovelWorkspace', () => {
       '原小说大纲',
     );
     fireEvent.click(screen.getByRole('button', { name: '编辑小说资料标题 都市小说大纲' }));
+    expect(screen.queryByLabelText('小说资料标题')).not.toBeInTheDocument();
+    fireEvent.doubleClick(screen.getByRole('button', { name: '编辑小说资料标题 都市小说大纲' }));
     fireEvent.change(screen.getByLabelText('小说资料标题'), {
       target: { value: '城市故事大纲' },
     });
@@ -355,6 +357,8 @@ describe('NovelWorkspace', () => {
     render(<NovelWorkspace projectId="project-1" writable />);
     await screen.findByRole('region', { name: '章节内容预览' });
     fireEvent.click(screen.getByRole('button', { name: '编辑章节标题 Chapter 1 Opening' }));
+    expect(screen.queryByLabelText('章节标题')).not.toBeInTheDocument();
+    fireEvent.doubleClick(screen.getByRole('button', { name: '编辑章节标题 Chapter 1 Opening' }));
     fireEvent.change(screen.getByLabelText('章节标题'), {
       target: { value: '本地未保存标题' },
     });

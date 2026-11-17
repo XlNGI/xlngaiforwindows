@@ -37,6 +37,7 @@ import {
   supportsProductionAudioUpload,
   prepareSceneReferenceImageProposal,
   sceneReferenceImageParameters,
+  modelSupportsGenerationAdapter,
 } from '@ai-video/contracts';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { adapterBindsCatalogModel, getAdapter } from '@ai-video/generation-adapters';
@@ -1034,12 +1035,7 @@ export function modelSupportsMediaAdapter(
   model: ProviderModelInfo,
   adapter: AdapterDescriptor,
 ): boolean {
-  if (adapter.capability === 'REFERENCE_TO_IMAGE') {
-    return model.capabilities.imageGeneration || model.capabilities.imageEditing === true;
-  }
-  if (adapter.capability.endsWith('TO_IMAGE')) return model.capabilities.imageGeneration;
-  if (adapter.capability.endsWith('TO_VIDEO')) return model.capabilities.videoGeneration;
-  return false;
+  return modelSupportsGenerationAdapter(model, adapter);
 }
 function costNotice(pricing: ModelPricingInfo[], model: ProviderModelInfo) {
   const configured = pricing.find((item) => item.modelId === model.id);

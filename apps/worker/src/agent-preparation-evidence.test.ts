@@ -22,3 +22,42 @@ it('compares a loaded tool set independently of request order and loading guidan
     taskEvidenceKey('tools.load', { loaded: ['a', 'b'], newlyLoaded: [], instructions: 'reuse' }),
   );
 });
+
+it('identifies actual navigation scope without counting display or empty pagination changes as progress', () => {
+  const result = {
+    status: 'succeeded',
+    detail: 'compact',
+    resourceMap: {
+      projectId: 'p',
+      revision: 'r',
+      resources: [],
+      offset: 0,
+      limit: 20,
+      filters: { kind: 'shot', parentId: 'scene:a', includeArchived: false },
+    },
+  };
+  const key = taskEvidenceKey('project.structure.get', result);
+  expect(
+    taskEvidenceKey('project.structure.get', {
+      ...result,
+      detail: 'full',
+      structure: { prose: 'expanded' },
+      resourceMap: { ...result.resourceMap, offset: 100, limit: 1 },
+    }),
+  ).toBe(key);
+  expect(
+    taskEvidenceKey('project.structure.get', {
+      ...result,
+      resourceMap: {
+        ...result.resourceMap,
+        filters: { ...result.resourceMap.filters, parentId: 'scene:b' },
+      },
+    }),
+  ).not.toBe(key);
+  expect(
+    taskEvidenceKey('project.structure.get', {
+      ...result,
+      resourceMap: { ...result.resourceMap, revision: 'r2' },
+    }),
+  ).not.toBe(key);
+});

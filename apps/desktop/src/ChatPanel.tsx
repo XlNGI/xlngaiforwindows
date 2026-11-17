@@ -17,7 +17,11 @@ import {
   updatePromptParameter,
   type PromptReference,
 } from './prompt-references';
-import { seedProductionInputs, productionImagesFromParameters } from '@ai-video/contracts';
+import {
+  seedProductionInputs,
+  productionImagesFromParameters,
+  type PromptTemplateKind,
+} from '@ai-video/contracts';
 import { parameterScalarText, StructuredParameterField } from './StructuredParameterField';
 import {
   AlertTriangle,
@@ -39,13 +43,11 @@ import {
   Square,
   Terminal,
 } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AssistantReply } from './AssistantReply';
 import { ComposerTextarea } from './ComposerTextarea';
-import {
-  SCENE_PROMPT_CONSTRAINT_TEMPLATE,
-  splitComposedConversationPrompt,
-} from './conversation-prompt-template';
+import { ConversationPromptTemplateEditor } from './ConversationPromptTemplateEditor';
+import { splitComposedConversationPrompt } from './conversation-prompt-template';
 import type {
   AgentResearchMode,
   AgentInputSubmitResult,
@@ -171,8 +173,10 @@ interface ChatPanelProps {
   onResearchModeChange?: (mode: AgentResearchMode) => void;
   onOpenProviderSettings: () => void;
   onComposerChange: (value: string) => void;
-  /** Editable instructions appended to every request in this conversation. */
+  /** Currently edited purpose-specific template; selection only changes the editor. */
   promptTemplate?: string;
+  promptTemplateKind?: PromptTemplateKind;
+  onPromptTemplateKindChange?: (kind: PromptTemplateKind) => void;
   onPromptTemplateChange?: (value: string) => void;
   onSavePromptTemplate?: () => void;
   promptTemplateBusy?: boolean;
@@ -267,6 +271,8 @@ export function ChatPanel({
   onOpenProviderSettings,
   onComposerChange,
   promptTemplate = '',
+  promptTemplateKind = 'character-image',
+  onPromptTemplateKindChange,
   onPromptTemplateChange,
   onSavePromptTemplate,
   promptTemplateBusy = false,
@@ -316,17 +322,62 @@ export function ChatPanel({
    * the overflow menu so the bar stays focused on picking and creating chats.
    */
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
+  const [conversationPickerOpen, setConversationPickerOpen] = useState(false);
+  const conversationPickerRef = useRef<HTMLDivElement>(null);
+  const conversationPickerButtonRef = useRef<HTMLButtonElement>(null);
+  const conversationListId = useId();
+  const [conversationTitleEdit, setConversationTitleEdit] = useState<{
+    projectId: string;
+    conversationId: string;
+    title: string;
+  }>();
+  const editingConversationTitle = Boolean(
+    conversationTitleEdit &&
+    conversationTitleEdit.projectId === conversation?.projectId &&
+    conversationTitleEdit.conversationId === conversation?.id &&
+    writable &&
+    scopeAvailable,
+  );
+  useEffect(() => {
+    setConversationTitleEdit(undefined);
+    setConversationPickerOpen(false);
+  }, [conversation?.projectId, conversation?.id, writable, scopeAvailable]);
+  const beginConversationTitleEdit = () => {
+    setConversationMenuOpen(false);
+    setConversationPickerOpen(false);
+    if (!conversation || !writable || !scopeAvailable || !onRenameConversation) return;
+    setConversationTitleEdit({
+      projectId: conversation.projectId,
+      conversationId: conversation.id,
+      title: conversation.title,
+    });
+  };
+  const commitConversationTitleEdit = () => {
+    setConversationTitleEdit(undefined);
+    if (!editingConversationTitle || !conversationTitleEdit || !conversation) return;
+    const title = conversationTitleEdit.title.trim();
+    if (title && title !== conversation.title) onRenameConversation?.(conversation.id, title);
+  };
   const conversationMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!conversationMenuOpen) return;
+    if (!conversationMenuOpen && !conversationPickerOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
       if (!conversationMenuRef.current?.contains(event.target as Node)) {
         setConversationMenuOpen(false);
       }
+      if (!conversationPickerRef.current?.contains(event.target as Node)) {
+        setConversationPickerOpen(false);
+      }
     };
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [conversationMenuOpen]);
+  }, [conversationMenuOpen, conversationPickerOpen]);
+  const selectDirectoryConversation = (id: string) => {
+    setConversationPickerOpen(false);
+    const selected = conversations.find((item) => item.id === id);
+    if (selected && selected.id !== conversation?.id) onSelectConversation(selected);
+    conversationPickerButtonRef.current?.focus();
+  };
   const selectedProfile = llmProfiles.find((profile) => profile.id === selectedLlmProfileId);
   const selectedModel = llmModels.find(
     (model) => model.id === selectedLlmModelId && model.providerProfileId === selectedLlmProfileId,
@@ -575,10 +626,12 @@ export function ChatPanel({
                 ) : composedPrompt ? (
                   <>
                     <p className="message-user-input">{composedPrompt.request}</p>
-                    <details className="message-session-constraints">
-                      <summary>约束 · {composedPrompt.constraints.length} 字</summary>
-                      <p>{composedPrompt.constraints}</p>
-                    </details>
+                    {composedPrompt.constraints && (
+                      <details className="message-session-constraints">
+                        <summary>约束 · {composedPrompt.constraints.length} 字</summary>
+                        <p>{composedPrompt.constraints}</p>
+                      </details>
+                    )}
                   </>
                 ) : (
                   <p>{item.content}</p>
@@ -706,21 +759,98 @@ export function ChatPanel({
         </div>
       )}
       <div className="conversation-bar">
-        <select
-          value={conversation?.id ?? ''}
-          onChange={(event) => {
-            const selected = conversations.find((item) => item.id === event.target.value);
-            if (selected) onSelectConversation(selected);
-          }}
-          disabled={!scopeAvailable}
-        >
-          <option value="">{scopeAvailable ? '选择项目会话' : '请先打开项目'}</option>
-          {conversations.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.archivedAt ? `${item.title}（已归档）` : item.title}
-            </option>
-          ))}
-        </select>
+        {editingConversationTitle && conversationTitleEdit ? (
+          <input
+            className="conversation-title-input"
+            type="text"
+            aria-label="会话标题"
+            autoFocus
+            value={conversationTitleEdit.title}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) =>
+              setConversationTitleEdit({ ...conversationTitleEdit, title: event.target.value })
+            }
+            onBlur={commitConversationTitleEdit}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.currentTarget.blur();
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                setConversationTitleEdit(undefined);
+              }
+            }}
+          />
+        ) : (
+          <div
+            className="conversation-picker"
+            ref={conversationPickerRef}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget))
+                setConversationPickerOpen(false);
+            }}
+          >
+            <button
+              ref={conversationPickerButtonRef}
+              className="conversation-picker-button"
+              type="button"
+              role="combobox"
+              aria-label="会话目录"
+              aria-haspopup="listbox"
+              aria-expanded={conversationPickerOpen}
+              aria-controls={conversationListId}
+              title={conversation && writable ? '双击修改会话标题' : undefined}
+              onClick={() => setConversationPickerOpen((open) => !open)}
+              onDoubleClick={beginConversationTitleEdit}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                  event.preventDefault();
+                  setConversationPickerOpen(true);
+                }
+              }}
+              disabled={!scopeAvailable}
+            >
+              <span>
+                {conversation
+                  ? `${conversation.title}${conversation.archivedAt ? '（已归档）' : ''}`
+                  : scopeAvailable
+                    ? '选择项目会话'
+                    : '请先打开项目'}
+              </span>
+              <ChevronDown size={12} aria-hidden="true" />
+            </button>
+            {conversationPickerOpen && (
+              <select
+                id={conversationListId}
+                className="conversation-picker-list"
+                aria-label="选择会话"
+                size={Math.max(2, Math.min(8, conversations.length))}
+                autoFocus
+                value={conversation?.id ?? ''}
+                onChange={(event) => selectDirectoryConversation(event.target.value)}
+                onClick={(event) => selectDirectoryConversation(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setConversationPickerOpen(false);
+                    conversationPickerButtonRef.current?.focus();
+                  } else if (event.key === 'Enter') {
+                    event.preventDefault();
+                    selectDirectoryConversation(event.currentTarget.value);
+                  }
+                }}
+              >
+                {!conversation && <option value="">选择项目会话</option>}
+                {conversations.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.archivedAt ? `${item.title}（已归档）` : item.title}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
         <button
           className="icon-button"
           type="button"
@@ -747,14 +877,8 @@ export function ChatPanel({
               <button
                 type="button"
                 role="menuitem"
-                disabled={!writable || !conversation}
-                onClick={() => {
-                  const current = conversation;
-                  setConversationMenuOpen(false);
-                  if (!current) return;
-                  const title = window.prompt('新会话名称', current.title);
-                  if (title?.trim()) onRenameConversation?.(current.id, title.trim());
-                }}
+                disabled={!writable || !scopeAvailable || !conversation || !onRenameConversation}
+                onClick={beginConversationTitleEdit}
               >
                 <Pencil size={14} />
                 <span>重命名会话</span>
@@ -1255,88 +1379,22 @@ export function ChatPanel({
           </div>
         )}
         {onPromptTemplateChange && (
-          <details className="conversation-prompt-template">
-            <summary>
-              <span>本会话要求约束</span>
-              <small>
-                {promptTemplateLoading
-                  ? ' · 加载中'
-                  : promptTemplate.trim()
-                    ? ` · ${promptTemplate.length} 字，发送时附加`
-                    : ' · 当前为空'}
-              </small>
-            </summary>
-            <div className="conversation-prompt-template-body">
-              <small>发送前自动保存并附加；清空后不携带约束。</small>
-              <textarea
-                aria-label="本会话要求约束"
-                value={promptTemplate}
-                onChange={(event) => onPromptTemplateChange(event.target.value)}
-                placeholder="例如：固定故事时间与视觉风格；每个镜头写清时间、地点、动作、景别、运镜、对白和连续性；不要为了凑时长改变剧情逻辑。"
-                rows={5}
-                disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-              />
-              <div className="conversation-prompt-template-actions">
-                {promptTemplateDirty && <small role="status">有未保存修改</small>}
-                {onSavePromptTemplate && (
-                  <button
-                    className="button secondary"
-                    type="button"
-                    onClick={onSavePromptTemplate}
-                    disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-                  >
-                    {promptTemplateLoading
-                      ? '加载中…'
-                      : promptTemplateBusy
-                        ? '保存中…'
-                        : '保存会话约束'}
-                  </button>
-                )}
-                <details className="conversation-prompt-template-tools">
-                  <summary>模板与清理</summary>
-                  <div className="conversation-prompt-template-tools-body">
-                    <button
-                      className="button secondary"
-                      type="button"
-                      onClick={() => onPromptTemplateChange(SCENE_PROMPT_CONSTRAINT_TEMPLATE)}
-                      disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-                    >
-                      套用最新版分镜模板
-                    </button>
-                    <button
-                      className="button secondary"
-                      type="button"
-                      onClick={() => onPromptTemplateChange('')}
-                      disabled={!conversation || !writable || isArchived || promptTemplateBusy}
-                    >
-                      清空约束
-                    </button>
-                    {onReloadPromptTemplate && (
-                      <button
-                        className="button secondary"
-                        type="button"
-                        disabled={promptTemplateBusy}
-                        onClick={onReloadPromptTemplate}
-                      >
-                        重新加载已保存约束
-                      </button>
-                    )}
-                    <details>
-                      <summary>查看最新版分镜制作模板</summary>
-                      <textarea
-                        aria-label="最新版分镜制作模板"
-                        value={SCENE_PROMPT_CONSTRAINT_TEMPLATE}
-                        readOnly
-                        rows={8}
-                      />
-                      <small>套用模板会替换当前编辑内容。</small>
-                    </details>
-                  </div>
-                </details>
-              </div>
-              {promptTemplateError && <small role="alert">{promptTemplateError}</small>}
-            </div>
-          </details>
+          <ConversationPromptTemplateEditor
+            key={`${conversation?.projectId ?? ''}:${conversation?.id ?? ''}`}
+            conversation={conversation}
+            writable={writable}
+            scopeAvailable={scopeAvailable}
+            value={promptTemplate}
+            kind={promptTemplateKind}
+            onChange={onPromptTemplateChange}
+            onKindChange={onPromptTemplateKindChange}
+            onSave={onSavePromptTemplate}
+            onReload={onReloadPromptTemplate}
+            busy={promptTemplateBusy}
+            loading={promptTemplateLoading}
+            dirty={promptTemplateDirty}
+            error={promptTemplateError}
+          />
         )}
         <ComposerTextarea
           key={conversation?.id ?? 'no-conversation'}
@@ -1677,6 +1735,8 @@ function agentTaskForAssistantMessage(
   generation: LlmGenerationInfo | undefined,
   liveTask: AgentTaskDetail | undefined,
 ): AgentTaskDetail | undefined {
+  const ownedTask = tasks.find((detail) => detail.assistantMessageIds?.includes(messageId));
+  if (ownedTask) return ownedTask;
   const recordedTask = tasks.find((detail) =>
     detail.events.some((event) => event.messageBoundary?.messageId === messageId),
   );
@@ -1684,6 +1744,7 @@ function agentTaskForAssistantMessage(
   if (
     generation?.assistantMessage.id === messageId &&
     liveTask &&
+    (!liveTask.assistantMessageIds?.length || liveTask.assistantMessageIds.includes(messageId)) &&
     (!liveTask.task.userMessageId || liveTask.task.userMessageId === generation.userMessage.id)
   )
     return liveTask;
@@ -1694,8 +1755,26 @@ function agentTaskForAssistantMessage(
     ? messages.find((item) => item.id === replyToMessageId && item.role === 'user')
     : [...messages.slice(0, index)].reverse().find((item) => item.role === 'user');
   if (!user) return undefined;
+  // Retries share a user message, but own different assistant messages. Never
+  // attach a newer execution (or its writing child task) to every retry reply.
+  if (tasks.some((item) => item.task.userMessageId === user.id && item.assistantMessageIds?.length))
+    return undefined;
+  const replies = messages.filter((item, replyIndex) => {
+    if (item.role !== 'assistant') return false;
+    if (item.replyToMessageId) return item.replyToMessageId === user.id;
+    return (
+      [...messages.slice(0, replyIndex)].reverse().find((prior) => prior.role === 'user')?.id ===
+      user.id
+    );
+  });
+  if (replies.length !== 1) return undefined;
   return tasks
-    .filter((item) => item.task.userMessageId === user.id)
+    .filter(
+      (item) =>
+        item.task.userMessageId === user.id &&
+        !item.assistantMessageIds?.length &&
+        !item.events.some((event) => event.messageBoundary),
+    )
     .sort((left, right) => right.task.updatedAt.localeCompare(left.task.updatedAt))[0];
 }
 

@@ -325,16 +325,16 @@ function SceneEntry({
             aria-current={selected && !shotId ? 'page' : undefined}
             aria-expanded={expanded}
             aria-controls={shotsId}
-            onClick={() => {
-              if (selected && !shotId && writable && onRenameScene) {
-                onBeginTitleEdit(sceneTitleKey, scene.title);
-                return;
-              }
+            onClick={(event) => {
+              if (event.detail > 1) return;
               setExpanded((open) => !open);
               if (!selected || shotId) {
                 titleSelection.current = true;
                 onSelectScene(scene);
               }
+            }}
+            onDoubleClick={() => {
+              if (writable && onRenameScene) onBeginTitleEdit(sceneTitleKey, scene.title);
             }}
           >
             <Clapperboard size={13} />
@@ -382,11 +382,10 @@ function SceneEntry({
                     title={shot.title}
                     aria-current={selected && shotId === shot.id ? 'page' : undefined}
                     onClick={() => {
-                      if (selected && shotId === shot.id && writable && onRenameShot) {
-                        onBeginTitleEdit(`shot:${shot.id}`, shot.title);
-                        return;
-                      }
-                      onSelectShot(scene, shot);
+                      if (!selected || shotId !== shot.id) onSelectShot(scene, shot);
+                    }}
+                    onDoubleClick={() => {
+                      if (writable && onRenameShot) onBeginTitleEdit(`shot:${shot.id}`, shot.title);
                     }}
                   >
                     <Aperture size={13} />

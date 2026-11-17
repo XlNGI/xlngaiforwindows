@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentTaskDetail,
@@ -468,27 +468,71 @@ describe('TaskLogView', () => {
     confirm.mockRestore();
   });
 
-  it.each(['关闭任务详情', '返回列表', 'Escape'])(
+  it.each(['收起任务详情', '再次点击', 'Escape'])(
     'returns to the selected task with %s without reloading the list',
     async (action) => {
       render(<TaskLogView projectId="project-1" />);
       const taskRow = await screen.findByRole('button', { name: /项目大纲草稿/ });
       fireEvent.click(taskRow);
       expect(await screen.findByRole('heading', { name: '事件时间线' })).toBeInTheDocument();
+      expect(taskRow).toHaveAttribute('aria-expanded', 'true');
+      expect(taskRow.nextElementSibling).toBe(screen.getByRole('region', { name: '任务详情' }));
+      expect(screen.getByRole('button', { name: /文本生成图片/ })).toBeVisible();
 
       if (action === 'Escape') {
-        fireEvent.keyDown(screen.getByRole('heading', { name: '项目大纲草稿' }), { key: 'Escape' });
+        fireEvent.keyDown(taskRow, { key: 'Escape' });
+      } else if (action === '再次点击') {
+        fireEvent.click(taskRow);
       } else {
         fireEvent.click(screen.getByRole('button', { name: action }));
       }
 
       expect(screen.queryByRole('heading', { name: '事件时间线' })).not.toBeInTheDocument();
+      expect(taskRow).toHaveAttribute('aria-expanded', 'false');
       await waitFor(() => expect(taskRow).toHaveFocus());
       expect(
         vi.mocked(callWorker).mock.calls.filter(([method]) => method === 'task.log.list'),
       ).toHaveLength(1);
     },
   );
+
+  it('ignores a late detail response after collapsing or opening a different task', async () => {
+    let resolveAgent!: (value: AgentTaskDetail) => void;
+    vi.mocked(callWorker).mockImplementation((method) => {
+      if (method === 'file.task.list' || method === 'novel.export.list') return Promise.resolve([]);
+      if (method === 'task.log.list') return Promise.resolve({ items: [agentItem, imageItem] });
+      if (method === 'agent.task.get')
+        return new Promise((resolve) => {
+          resolveAgent = resolve;
+        });
+      if (method === 'image.generate.get') return Promise.resolve(imageJob);
+      if (method === 'generation.job.events.list')
+        return Promise.resolve({ events: [], nextSequence: 0, hasMore: false });
+      return Promise.reject(new Error(method));
+    });
+    render(<TaskLogView projectId="project-1" />);
+    const agent = await screen.findByRole('button', { name: /项目大纲草稿/ });
+    fireEvent.click(agent);
+    fireEvent.click(agent);
+    await act(async () => {
+      resolveAgent(agentDetail);
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('region', { name: '任务详情' })).not.toBeInTheDocument();
+
+    fireEvent.click(agent);
+    const image = screen.getByRole('button', { name: /文本生成图片/ });
+    fireEvent.click(image);
+    await screen.findByRole('heading', { name: '图片产物' });
+    await act(async () => {
+      resolveAgent(agentDetail);
+      await Promise.resolve();
+    });
+    expect(screen.getAllByRole('region', { name: '任务详情' })).toHaveLength(1);
+    expect(image.nextElementSibling).toBe(screen.getByRole('region', { name: '任务详情' }));
+    expect(screen.queryByRole('heading', { name: '事件时间线' })).not.toBeInTheDocument();
+    expect(agent).toHaveAttribute('aria-expanded', 'false');
+  });
 
   it('filters by kind and loads the next cursor page', async () => {
     vi.mocked(callWorker).mockImplementation((method, params) => {
@@ -525,6 +569,43 @@ describe('TaskLogView', () => {
       expect(screen.queryByRole('button', { name: /项目大纲草稿/ })).not.toBeInTheDocument(),
     );
   });
+
+  it.each(['project', 'filter'])(
+    'ignores an old pagination response after changing the %s',
+    async (change) => {
+      let resolvePage!: (value: { items: TaskLogItem[] }) => void;
+      let listCalls = 0;
+      vi.mocked(callWorker).mockImplementation((method, params) => {
+        if (method === 'file.task.list' || method === 'novel.export.list')
+          return Promise.resolve([]);
+        if (method !== 'task.log.list') return Promise.reject(new Error(method));
+        if ((params as { cursor?: string }).cursor)
+          return new Promise((resolve) => {
+            resolvePage = resolve;
+          });
+        listCalls += 1;
+        return Promise.resolve(
+          listCalls === 1 ? { items: [agentItem], nextCursor: 'old-page' } : { items: [imageItem] },
+        );
+      });
+      const mounted = render(<TaskLogView projectId="project-1" />);
+      await screen.findByRole('button', { name: /项目大纲草稿/ });
+      fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
+      await waitFor(() => expect(resolvePage).toBeDefined());
+      if (change === 'project') mounted.rerender(<TaskLogView projectId="project-2" />);
+      else
+        fireEvent.change(screen.getByRole('combobox', { name: '任务类型筛选' }), {
+          target: { value: 'image' },
+        });
+      await screen.findByRole('button', { name: /文本生成图片/ });
+      await act(async () => {
+        resolvePage({ items: [{ ...agentItem, id: 'old-task', title: '旧列表迟到的任务' }] });
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole('button', { name: /旧列表迟到的任务/ })).not.toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: /文本生成图片/ })).toHaveLength(1);
+    },
+  );
 
   it('registers an auto-refresh interval while a project is open', () => {
     const setIntervalSpy = vi.spyOn(window, 'setInterval');

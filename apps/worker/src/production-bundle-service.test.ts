@@ -7,6 +7,7 @@ import {
 import { ProductionBundleService, bundleCompletion } from './production-bundle-service.js';
 import { loadBundle } from './production-bundle-state.js';
 import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
+import { AgentInputService } from './agent-input-service.js';
 
 const fixtures: Awaited<ReturnType<typeof productionBundleFixture>>[] = [];
 afterEach(async () => {
@@ -189,5 +190,27 @@ it('reports a changed saved record as unverified and asks for another independen
         nextAction: { toolName: 'production.bundle', arguments: { operation: 'readback' } },
       },
     ]),
+  );
+  const input = new AgentInputService(fixture.project);
+  const question = {
+    key: 'after-bundle',
+    title: '下一步',
+    questions: [{ id: 'next', type: 'text', prompt: '接下来做什么？' }],
+  };
+  for (const purpose of [undefined, 'next_step'])
+    expect(() =>
+      input.prepare({ ...question, ...(purpose ? { purpose } : {}) }, fixture.identity),
+    ).toThrow('TASK_REPAIR_REQUIRED');
+  fixture.project.access(false, (db) =>
+    expect(
+      db
+        .prepare(
+          "SELECT count(*) n FROM agent_task_events WHERE task_id=? AND event_type='agent.user_input.requested'",
+        )
+        .get(fixture.task.taskId),
+    ).toEqual({ n: 0 }),
+  );
+  expect(input.prepare({ ...question, purpose: 'clarification' }, fixture.identity).status).toBe(
+    'pending',
   );
 });

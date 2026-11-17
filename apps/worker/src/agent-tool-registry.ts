@@ -136,8 +136,25 @@ export class AgentToolRegistry {
     };
   }
 
-  executionMode(name: string): 'parallel' | 'sequential' {
-    return this.require(name).executionLane === 'parallel-readonly' ? 'parallel' : 'sequential';
+  executionMode(name: string, args?: unknown): 'parallel' | 'sequential' {
+    const registration = this.require(name);
+    // Only immutable Result Store pages are independent reads. State reconciles
+    // progress; checkpoint writes and malformed/unknown operations remain serial.
+    if (name === 'conversation.task.checkpoint') {
+      try {
+        const value: unknown = typeof args === 'string' ? JSON.parse(args) : args;
+        if (
+          value &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          (value as Record<string, unknown>).operation === 'result'
+        )
+          return 'parallel';
+      } catch {
+        /* Invalid arguments stay on the serial validation path. */
+      }
+    }
+    return registration.executionLane === 'parallel-readonly' ? 'parallel' : 'sequential';
   }
 
   assertResultText(text: string): void {

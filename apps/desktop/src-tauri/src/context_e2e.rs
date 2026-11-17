@@ -4,6 +4,333 @@ use super::*;
 use serde_json::{json, Value};
 use std::time::Instant;
 
+/// Two real runs in one conversation, with a saved CAS template edit between runs.
+#[test]
+#[ignore = "Requires isolated template-edit-cases.json and explicit real-provider authorization"]
+fn context_management_real_prompt_template_edit() {
+    let directory = PathBuf::from(std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").unwrap());
+    let fixture: Value =
+        serde_json::from_slice(&std::fs::read(directory.join("template-edit-cases.json")).unwrap())
+            .unwrap();
+    let root = directory.join("project-template-edit");
+    assert!(!root.exists(), "Requires a fresh isolated project");
+    let state = WorkerState::new(directory.clone()).unwrap();
+    let mut serial = 0;
+    let mut call = |method: &str, params: Value| -> Value {
+        serial += 1;
+        let response = state.request(&json!({"id":format!("template-edit-{serial}"),"protocolVersion":1,"method":method,"params":params})).unwrap();
+        assert_eq!(response["ok"], true, "{method}: {response}");
+        response["result"].clone()
+    };
+    call(
+        "project.create",
+        json!({"rootPath":root,"name":"的撒发生｜专项约束两轮隔离验收"}),
+    );
+    let source = call(
+        "document.draft.save",
+        json!({"kind":"plan","title":fixture["sourceTitle"],"contentMarkdown":fixture["source"]}),
+    );
+    let conversation = call(
+        "conversation.create",
+        json!({"scopeType":"project","title":"专项模板修改前后真实对照"}),
+    );
+    let mut version = json!(0);
+    let mut reports = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        let template = call(
+            "conversation.promptTemplate.save",
+            json!({"conversationId":conversation["id"],"content":"","templates":case["templates"],"expectedRowVersion":version}),
+        );
+        version = template["rowVersion"].clone();
+        let started = call(
+            "agent.run",
+            json!({"conversationId":conversation["id"],"prompt":fixture["prompt"],"promptTemplateVersion":version,"providerProfileId":fixture["profile"],"modelId":fixture["model"],"capability":"text","researchMode":"network_disabled"}),
+        );
+        assert_eq!(started["status"], "started", "{started}");
+        let mut runtime = started["stream"].clone();
+        runtime["taskId"] = started["agentTaskId"].clone();
+        runtime["mode"] = json!("document");
+        runtime["prompt"] = fixture["prompt"].clone();
+        call("conversation.runtime.start", runtime);
+        let identity = json!({"id":id,"started":started,"projectRoot":root,"source":source,"conversationId":conversation["id"],"templateVersion":version});
+        std::fs::write(
+            directory.join(format!("{id}-identity.json")),
+            serde_json::to_vec_pretty(&identity).unwrap(),
+        )
+        .unwrap();
+        let started_at = Instant::now();
+        let report = loop {
+            let generation = call(
+                "llm.generation.get",
+                json!({"generationId":started["stream"]["generationId"]}),
+            );
+            let task = call("agent.task.get", json!({"taskId":started["agentTaskId"]}));
+            let report = json!({"identity":identity,"elapsedSeconds":started_at.elapsed().as_secs_f64(),"generation":generation,"task":task});
+            std::fs::write(
+                directory.join(format!("{id}-live.json")),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+            if ["complete", "failed", "cancelled"]
+                .contains(&generation["status"].as_str().unwrap_or_default())
+            {
+                break report;
+            }
+            if started_at.elapsed() > Duration::from_secs(600)
+                || task["providerSteps"]
+                    .as_array()
+                    .is_some_and(|steps| steps.len() > 14)
+            {
+                call(
+                    "llm.generation.cancel",
+                    json!({"generationId":started["stream"]["generationId"]}),
+                );
+                panic!("Real template-edit acceptance exceeded its bounded window: {id}");
+            }
+            thread::sleep(Duration::from_secs(2));
+        };
+        println!(
+            "Template edit {id}: status={}, elapsed={}s",
+            report["generation"]["status"], report["elapsedSeconds"]
+        );
+        reports.push(report);
+        std::fs::write(
+            directory.join("template-edit-reports.json"),
+            serde_json::to_vec_pretty(&reports).unwrap(),
+        )
+        .unwrap();
+    }
+    state.shutdown();
+    assert!(
+        reports
+            .iter()
+            .all(|r| r["generation"]["status"] == "complete"
+                && r["task"]["task"]["status"] == "completed"),
+        "Inspect retained reports; task completion alone does not establish content compliance"
+    );
+}
+
+/// Both prompt-generation entry points, with a fresh project for every real run.
+#[test]
+#[ignore = "Requires isolated prompt-generation-cases.json and explicit real-provider authorization"]
+fn context_management_real_unified_prompt_generation() {
+    let directory = PathBuf::from(std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").unwrap());
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(directory.join("prompt-generation-cases.json")).unwrap(),
+    )
+    .unwrap();
+    let state = WorkerState::new(directory.clone()).unwrap();
+    let mut serial = 0;
+    let mut call = |method: &str, params: Value| -> Value {
+        serial += 1;
+        let response = state.request(&json!({"id":format!("unified-live-{serial}"),"protocolVersion":1,"method":method,"params":params})).unwrap();
+        assert_eq!(response["ok"], true, "{method}: {response}");
+        response["result"].clone()
+    };
+    let mut reports = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        let root = directory.join(format!("project-{id}"));
+        assert!(!root.exists(), "Each case requires a fresh project");
+        call(
+            "project.create",
+            json!({"rootPath":root,"name":format!("统一生成真实验收 {id}")}),
+        );
+        let source = call(
+            "document.draft.save",
+            json!({"kind":"plan","title":fixture["sourceTitle"],"contentMarkdown":fixture["source"]}),
+        );
+        call(
+            "document.draft.save",
+            json!({"kind":"plan","title":"无关资料：外星港","contentMarkdown":"ISOLATION_SENTINEL_20261117：本资料与六秒走廊剧本无关。外星港有紫色沙地与三名宇航员，不能进入走廊创作。"}),
+        );
+        let conversation = call(
+            "conversation.create",
+            json!({"scopeType":"project","title":format!("统一生成真实验收 {id}")}),
+        );
+        let template = call(
+            "conversation.promptTemplate.save",
+            json!({"conversationId":conversation["id"],"content":fixture["generalTemplate"],"templates":fixture["templates"],"expectedRowVersion":0}),
+        );
+        let prompt = if case["buttonPrompt"] == true {
+            format!("根据本次所选剧本全文，一次生成所需角色、地点、独立道具、音色及全部剧情场次和镜头的完整提示词与显式绑定关系。遵循本次通用及对应用途模板。只保存可编辑草稿，不自动发布、创建媒体表单或生成媒体。所选来源：\n{}", json!([{"id":source["id"],"documentId":source["id"],"title":source["title"],"kind":source["kind"],"versionId":source["currentVersion"]["id"],"state":"draft"}]))
+        } else {
+            fixture["prompt"].as_str().unwrap().to_string()
+        };
+        let mut params = json!({"conversationId":conversation["id"],"prompt":prompt,"promptTemplateVersion":template["rowVersion"],"providerProfileId":fixture["profile"],"modelId":fixture["model"],"capability":"text","researchMode":"network_disabled"});
+        if case["entry"] == "one-click" {
+            params["productionSkillId"] = json!("script-to-media");
+            params["productionWorkflowVersion"] = json!(2);
+            params["productionSources"] =
+                json!([{"documentId":source["id"],"versionId":source["currentVersion"]["id"]}]);
+            params["productionRequestedAt"] = fixture["runRequestedAt"].clone();
+        }
+        let started_at = Instant::now();
+        let started = call("agent.run", params);
+        assert_eq!(started["status"], "started", "{started}");
+        let mut runtime = started["stream"].clone();
+        runtime["taskId"] = started["agentTaskId"].clone();
+        runtime["mode"] = json!("document");
+        runtime["prompt"] = json!(prompt);
+        call("conversation.runtime.start", runtime);
+        std::fs::write(directory.join(format!("{id}-identity.json")), serde_json::to_vec_pretty(&json!({"started":started,"projectRoot":root,"source":source,"entry":case["entry"]})).unwrap()).unwrap();
+        let mut report = loop {
+            let generation = call(
+                "llm.generation.get",
+                json!({"generationId":started["stream"]["generationId"]}),
+            );
+            let task = call("agent.task.get", json!({"taskId":started["agentTaskId"]}));
+            let report = json!({"id":id,"entry":case["entry"],"projectRoot":root,"elapsedSeconds":started_at.elapsed().as_secs_f64(),"generation":generation,"task":task});
+            std::fs::write(
+                directory.join(format!("{id}-live.json")),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+            if ["complete", "failed", "cancelled"]
+                .contains(&generation["status"].as_str().unwrap_or_default())
+            {
+                break report;
+            }
+            if started_at.elapsed() > Duration::from_secs(600)
+                || task["providerSteps"]
+                    .as_array()
+                    .is_some_and(|steps| steps.len() > 14)
+            {
+                call(
+                    "llm.generation.cancel",
+                    json!({"generationId":started["stream"]["generationId"]}),
+                );
+                panic!("Real acceptance exceeded its bounded observation window: {id}");
+            }
+            thread::sleep(Duration::from_secs(2));
+        };
+        let scenes = call("scene.list", json!({}));
+        let mut outputs = Vec::new();
+        for scene in scenes.as_array().unwrap() {
+            let shots = call("shot.list", json!({"sceneId":scene["id"]}));
+            for shot in shots.as_array().unwrap() {
+                let image = call("shot.image.get", json!({"shotId":shot["id"]}));
+                outputs.push(json!({"scene":scene,"shot":shot,"image":image}));
+            }
+        }
+        report["outputs"] = json!(outputs);
+        println!(
+            "Unified live {id}: status={}, elapsed={}s",
+            report["generation"]["status"], report["elapsedSeconds"]
+        );
+        reports.push(report);
+        std::fs::write(
+            directory.join("unified-live-reports.json"),
+            serde_json::to_vec_pretty(&reports).unwrap(),
+        )
+        .unwrap();
+    }
+    state.shutdown();
+    assert!(
+        reports
+            .iter()
+            .all(|report| report["generation"]["status"] == "complete"
+                && report["task"]["task"]["status"] == "completed"
+                && report["task"]["deliveryReview"]["bundle"]["businessSaved"] == true
+                && report["task"]["deliveryReview"]["bundle"]["readbackVerified"] == true),
+        "Inspect unified-live-reports.json; failed calls are retained"
+    );
+}
+
+/// Opt-in user-template contrasts through the ordinary Agent, Native credential
+/// boundary and provider HTTP transport. Fixture/project/settings are isolated.
+#[test]
+#[ignore = "Requires isolated template-contrasts.json and real provider credentials"]
+fn context_management_real_template_contrasts() {
+    let directory = PathBuf::from(std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").unwrap());
+    let fixture: Value =
+        serde_json::from_slice(&std::fs::read(directory.join("template-contrasts.json")).unwrap())
+            .unwrap();
+    let root = PathBuf::from(fixture["projectRoot"].as_str().unwrap());
+    assert!(root
+        .canonicalize()
+        .unwrap()
+        .starts_with(directory.canonicalize().unwrap()));
+    let state = WorkerState::new(directory.clone()).unwrap();
+    let mut serial = 0;
+    let mut call = |method: &str, params: Value| -> Value {
+        serial += 1;
+        let response = state.request(&json!({"id":format!("template-contrast-{serial}"),"protocolVersion":1,"method":method,"params":params})).unwrap();
+        assert_eq!(response["ok"], true, "{method}: {response}");
+        response["result"].clone()
+    };
+    call("project.open", json!({"rootPath":root}));
+    let mut reports = Vec::new();
+    let purpose = fixture["purpose"].as_str().unwrap_or("character-image");
+    for case in fixture["cases"].as_array().unwrap() {
+        let conversation = call(
+            "conversation.create",
+            json!({"scopeType":"project","title":format!("模板真实对照 {}",case["id"].as_str().unwrap())}),
+        );
+        let mut scoped_templates = json!({});
+        scoped_templates[purpose] = case["template"].clone();
+        let template = call(
+            "conversation.promptTemplate.save",
+            json!({"conversationId":conversation["id"],"content":fixture["general"],"templates":scoped_templates,"expectedRowVersion":0}),
+        );
+        let started = call(
+            "agent.run",
+            json!({"conversationId":conversation["id"],"prompt":fixture["prompt"],"promptWorkflow":purpose,"promptTemplateVersion":template["rowVersion"],"providerProfileId":fixture["profile"],"modelId":fixture["model"],"capability":"text","researchMode":"project_only"}),
+        );
+        assert_eq!(started["status"], "started", "{started}");
+        let mut runtime = started["stream"].clone();
+        runtime["taskId"] = started["agentTaskId"].clone();
+        runtime["mode"] = json!("document");
+        runtime["prompt"] = fixture["prompt"].clone();
+        call("conversation.runtime.start", runtime);
+        let started_at = Instant::now();
+        let report = loop {
+            let generation = call(
+                "llm.generation.get",
+                json!({"generationId":started["stream"]["generationId"]}),
+            );
+            let task = call("agent.task.get", json!({"taskId":started["agentTaskId"]}));
+            let report = json!({"id":case["id"],"elapsedSeconds":started_at.elapsed().as_secs_f64(),"generation":generation,"task":task});
+            std::fs::write(
+                directory.join("contrast-live.json"),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .unwrap();
+            if ["complete", "failed", "cancelled"]
+                .contains(&generation["status"].as_str().unwrap_or_default())
+            {
+                break report;
+            }
+            assert!(
+                started_at.elapsed() < Duration::from_secs(900),
+                "Contrast remains resumable: {}",
+                directory.display()
+            );
+            thread::sleep(Duration::from_secs(2));
+        };
+        println!(
+            "Contrast {}: status={}, elapsed={}s",
+            case["id"], report["generation"]["status"], report["elapsedSeconds"]
+        );
+        reports.push(report);
+        std::fs::write(
+            directory.join("contrast-reports.json"),
+            serde_json::to_vec_pretty(&reports).unwrap(),
+        )
+        .unwrap();
+    }
+    state.shutdown();
+    assert!(
+        reports
+            .iter()
+            .all(|r| r["generation"]["status"] == "complete"),
+        "Inspect contrast-reports.json; a provider/task failure is not a content success"
+    );
+}
+
 fn has_shot_number(text: &str, number: usize) -> bool {
     if text.lines().any(|line| {
         let line = line.trim();
@@ -536,6 +863,16 @@ fn context_management_real_long_requirements() {
 #[test]
 #[ignore = "Requires an isolated captured bundle, real provider credentials and explicit acceptance environment"]
 fn context_management_real_bundle_agent_run() {
+    run_real_bundle_fixture(false);
+}
+
+#[test]
+#[ignore = "Requires an isolated user-template bundle fixture and real provider credentials"]
+fn context_management_real_template_bundle() {
+    run_real_bundle_fixture(true);
+}
+
+fn run_real_bundle_fixture(template_acceptance: bool) {
     let directory = PathBuf::from(
         std::env::var("AI_VIDEO_CONTEXT_E2E_APP_DATA_DIR").expect("isolated settings directory"),
     );
@@ -549,10 +886,15 @@ fn context_management_real_bundle_agent_run() {
         .unwrap()
         .starts_with(directory.canonicalize().unwrap()));
     let prompt = fixture["prompt"].as_str().unwrap();
-    assert!(
-        prompt.chars().count() > 8500,
-        "Must use the frozen full prompt"
-    );
+    if template_acceptance {
+        assert_eq!(fixture["acceptanceScope"], "user-template-purposes");
+        assert!(!prompt.is_empty());
+    } else {
+        assert!(
+            prompt.chars().count() > 8500,
+            "Must use the frozen full prompt"
+        );
+    }
     let state = WorkerState::new(directory.clone()).expect("native Worker host");
     let mut serial = 0;
     let mut call = |method: &str, params: Value| -> Value {
@@ -568,22 +910,31 @@ fn context_management_real_bundle_agent_run() {
         "conversation.create",
         json!({"scopeType":"project","title":"隔离整包真实验收"}),
     );
+    let template = if template_acceptance {
+        call(
+            "conversation.promptTemplate.save",
+            json!({"conversationId":conversation["id"],"content":fixture["generalTemplate"],"templates":fixture["templates"],"expectedRowVersion":0}),
+        )
+    } else {
+        Value::Null
+    };
     let requested_at = fixture["runRequestedAt"].as_str().unwrap();
-    let started = call(
-        "agent.run",
-        json!({
-            "conversationId":conversation["id"],
-            "prompt":prompt,
-            "providerProfileId":fixture["profile"],
-            "modelId":fixture["model"],
-            "capability":"text",
-            "productionSkillId":"script-to-media",
-            "productionWorkflowVersion":2,
-            "productionSources":fixture["productionSources"],
-            "productionRequestedAt":requested_at,
-            "researchMode":"network_disabled"
-        }),
-    );
+    let mut params = json!({
+        "conversationId":conversation["id"],
+        "prompt":prompt,
+        "providerProfileId":fixture["profile"],
+        "modelId":fixture["model"],
+        "capability":"text",
+        "productionSkillId":"script-to-media",
+        "productionWorkflowVersion":2,
+        "productionSources":fixture["productionSources"],
+        "productionRequestedAt":requested_at,
+        "researchMode":"network_disabled"
+    });
+    if template_acceptance {
+        params["promptTemplateVersion"] = template["rowVersion"].clone();
+    }
+    let started = call("agent.run", params);
     assert_eq!(started["status"], "started", "{started}");
     let mut runtime = started["stream"].clone();
     runtime["taskId"] = started["agentTaskId"].clone();
@@ -640,6 +991,29 @@ fn context_management_real_bundle_agent_run() {
             directory.display()
         );
         thread::sleep(Duration::from_secs(2));
+    }
+    if template_acceptance && fixture["expectShotImages"] == true {
+        let scenes = call("scene.list", json!({}));
+        let mut images = Vec::new();
+        for scene in scenes.as_array().unwrap() {
+            let shots = call("shot.list", json!({"sceneId":scene["id"]}));
+            for shot in shots.as_array().unwrap() {
+                let image = call("shot.image.get", json!({"shotId":shot["id"]}));
+                images.push(image);
+            }
+        }
+        std::fs::write(
+            directory.join("template-bundle-images.json"),
+            serde_json::to_vec_pretty(&images).unwrap(),
+        )
+        .unwrap();
+        assert!(!images.is_empty());
+        assert!(
+            images.iter().all(|image| image["prompt"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())),
+            "Independent static text is missing; see template-bundle-images.json"
+        );
     }
     state.shutdown();
 }

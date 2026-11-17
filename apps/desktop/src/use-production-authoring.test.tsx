@@ -67,6 +67,25 @@ function useForm(
   };
 }
 describe('production form local compilation', () => {
+  it('opens, switches models and submits using only local compilation without a model request', async () => {
+    const prompt = '已保存全文，哈哈110\n\n保持换行';
+    vi.mocked(callWorker).mockResolvedValue(compiled({ parameters: { prompt, duration: 5 } }));
+    const second = { ...adapter, key: 'model-b' };
+    const { result, rerender } = renderHook(({ selected }) => useForm({ adapter: selected }), {
+      initialProps: { selected: adapter },
+    });
+    await waitFor(() => expect(result.current.parameters.prompt).toBe(prompt));
+    act(() => result.current.edit('prompt', '人工确认的完整正文'));
+    await result.current.beforeSubmit();
+    expect(result.current.parameters.prompt).toBe('人工确认的完整正文');
+    rerender({ selected: second });
+    await waitFor(() => expect(result.current.parameters.prompt).toBe(prompt));
+    await result.current.beforeSubmit();
+    expect(vi.mocked(callWorker).mock.calls.map(([method]) => method)).toEqual([
+      'production.compile',
+      'production.compile',
+    ]);
+  });
   it('fills the newly confirmed continuity prompt instead of an old saved form, while retaining other preferences', async () => {
     const selectedAdapter = {
       ...adapter,

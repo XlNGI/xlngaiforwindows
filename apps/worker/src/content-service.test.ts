@@ -495,6 +495,81 @@ describe('ContentService', () => {
       }),
     ).toThrow('Archived conversations');
   });
+  it('saves scoped templates atomically, preserves legacy edits and respects explicit clearing', async () => {
+    const { content, projects } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const original = '旧模板原文\n含引号 " 和空白  ';
+    content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: original,
+      templates: { 'character-image': '只要单幅立绘', 'video-prompt': '' },
+      expectedRowVersion: 0,
+    });
+    const legacySave = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: original,
+      expectedRowVersion: 1,
+    });
+    expect(legacySave.templates).toEqual({ 'character-image': '只要单幅立绘', 'video-prompt': '' });
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: '错误覆盖',
+        templates: { 'video-prompt': '旧版本' },
+        expectedRowVersion: 1,
+      }),
+    ).toThrow('CONFLICT');
+    expect(content.getConversationPromptTemplate(conversation.id).content).toBe(original);
+    const cleared = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: '',
+      templates: {},
+      expectedRowVersion: 2,
+    });
+    expect(cleared).toMatchObject({ content: '', templates: {}, rowVersion: 3 });
+    expect(() =>
+      content.saveConversationPromptTemplate({
+        conversationId: conversation.id,
+        content: '',
+        templates: { invalid: 'bad' } as never,
+        expectedRowVersion: 3,
+      }),
+    ).toThrow('invalid');
+    expect(content.getConversationPromptTemplate(conversation.id)).toEqual(cleared);
+    expect(projects.current()).toBeTruthy();
+  });
+  it('reads a locked v78 template without migrating or reseeding scoped defaults', async () => {
+    const { content, projects } = await setup();
+    const conversation = content.createConversation({ scopeType: 'project' });
+    const saved = content.saveConversationPromptTemplate({
+      conversationId: conversation.id,
+      content: '旧用户模板  ',
+      expectedRowVersion: 0,
+    });
+    projects.access(true, (db) =>
+      db.exec(
+        'DROP TABLE conversation_prompt_template_variants; DELETE FROM schema_migrations WHERE version>=79',
+      ),
+    );
+    const reader = new ProjectService({
+      recentProjectsPath: join(projects.current()!.rootPath, '..', 'reader.json'),
+    });
+    projectServices.push(reader);
+    expect(reader.open(projects.current()!.rootPath)).toMatchObject({
+      mode: 'read-only',
+      schemaVersion: 78,
+    });
+    expect(new ContentService(reader).getConversationPromptTemplate(conversation.id)).toEqual(
+      saved,
+    );
+    reader.access(false, (db) =>
+      expect(
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE name='conversation_prompt_template_variants'")
+          .get(),
+      ).toBeUndefined(),
+    );
+  });
   it('pages conversations with a deterministic cursor', async () => {
     const { content } = await setup();
     vi.useFakeTimers();

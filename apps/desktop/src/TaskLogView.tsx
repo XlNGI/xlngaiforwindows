@@ -1,6 +1,6 @@
 import {
   AlertCircle,
-  ArrowLeft,
+  ChevronUp,
   AudioLines,
   ChevronDown,
   Clock3,
@@ -11,9 +11,10 @@ import {
   ListChecks,
   RefreshCw,
   Video,
-  X,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { preserveInlineDetailPosition } from './inline-detail-position';
+import { PROMPT_TEMPLATE_LABELS } from '@ai-video/contracts';
 import type {
   AgentLibrarySourceInfo,
   AgentTaskDetail,
@@ -271,6 +272,24 @@ function AgentTaskDetailPanel({
         completionState={task.completionState}
       />
 
+      {detail.promptAuthoring && (
+        <p role="status">
+          当前用途：
+          {detail.promptAuthoring.purpose
+            ? PROMPT_TEMPLATE_LABELS[detail.promptAuthoring.purpose]
+            : '读取或讨论阶段'}
+          ； 使用模板：
+          {[
+            detail.promptAuthoring.generalApplied ? '通用' : '',
+            detail.promptAuthoring.scopedApplied && detail.promptAuthoring.purpose
+              ? PROMPT_TEMPLATE_LABELS[detail.promptAuthoring.purpose]
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' + ') || '未设置'}
+          （发送时版本 v{detail.promptAuthoring.templateVersion}）
+        </p>
+      )}
       <dl className="task-log-detail-meta">
         <div>
           <dt>任务 ID</dt>
@@ -853,22 +872,25 @@ export function TaskLogView({
   const [message, setMessage] = useState('');
   const [detailMessage, setDetailMessage] = useState('');
   const detailRequestRef = useRef(0);
+  const listRequestRef = useRef(0);
+  const loadingMoreRequestRef = useRef<number | undefined>(undefined);
   const selectedRowRef = useRef<HTMLButtonElement | null>(null);
-  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const detailId = useId();
   const observedTaskRevisionRef = useRef(taskRevision);
   const [kindFilter, setKindFilter] = useState<TaskLogItem['kind'] | ''>('');
   const [statusFilter, setStatusFilter] = useState('');
   const [nextCursor, setNextCursor] = useState<string>();
   const [loadingMore, setLoadingMore] = useState(false);
 
-  useEffect(() => {
-    if (selectedItem) detailHeadingRef.current?.focus({ preventScroll: true });
-  }, [selectedItem?.id]);
-
   const refresh = useCallback(async () => {
+    const requestId = ++listRequestRef.current;
+    loadingMoreRequestRef.current = undefined;
+    setLoadingMore(false);
     if (!projectId) {
       setItems([]);
       setNextCursor(undefined);
+      setBusy(false);
       return;
     }
     setBusy(true);
@@ -879,15 +901,17 @@ export function TaskLogView({
         kind: kindFilter || undefined,
         status: statusFilter || undefined,
       });
+      if (requestId !== listRequestRef.current) return;
       setItems(page.items);
       setNextCursor(page.nextCursor);
       setSelectedItem((current) =>
         current && page.items.some((item) => item.id === current.id) ? current : undefined,
       );
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : '任务日志读取失败');
+      if (requestId === listRequestRef.current)
+        setMessage(reason instanceof Error ? reason.message : '任务日志读取失败');
     } finally {
-      setBusy(false);
+      if (requestId === listRequestRef.current) setBusy(false);
     }
   }, [projectId, kindFilter, statusFilter]);
 
@@ -901,6 +925,9 @@ export function TaskLogView({
     setDetailMessage('');
     setDetailBusy(false);
     void refresh();
+    return () => {
+      listRequestRef.current += 1;
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -919,6 +946,7 @@ export function TaskLogView({
   }, [taskRevision, refresh, busy, detailBusy, loadingMore]);
 
   const openDetails = async (item: TaskLogItem) => {
+    preserveInlineDetailPosition(listRef.current, selectedRowRef.current);
     const requestId = ++detailRequestRef.current;
     setSelectedItem(item);
     setDetail(null);
@@ -976,18 +1004,22 @@ export function TaskLogView({
   };
 
   const closeDetails = () => {
+    preserveInlineDetailPosition(listRef.current, selectedRowRef.current);
     detailRequestRef.current += 1;
     setSelectedItem(undefined);
     setDetail(null);
     setMediaDetail(null);
     setMediaEvents([]);
+    setDubbingDetail(null);
     setDetailMessage('');
     setDetailBusy(false);
     window.requestAnimationFrame(() => selectedRowRef.current?.focus({ preventScroll: true }));
   };
 
   const loadMore = async () => {
-    if (!projectId || !nextCursor) return;
+    if (!projectId || !nextCursor || busy || loadingMoreRequestRef.current !== undefined) return;
+    const requestId = listRequestRef.current;
+    loadingMoreRequestRef.current = requestId;
     setLoadingMore(true);
     setMessage('');
     try {
@@ -997,17 +1029,107 @@ export function TaskLogView({
         kind: kindFilter || undefined,
         status: statusFilter || undefined,
       });
+      if (requestId !== listRequestRef.current) return;
       setItems((current) => {
         const known = new Set(current.map((item) => item.id));
         return [...current, ...page.items.filter((item) => !known.has(item.id))];
       });
       setNextCursor(page.nextCursor);
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : '任务日志加载失败');
+      if (requestId === listRequestRef.current)
+        setMessage(reason instanceof Error ? reason.message : '任务日志加载失败');
     } finally {
-      setLoadingMore(false);
+      if (requestId === listRequestRef.current) {
+        loadingMoreRequestRef.current = undefined;
+        setLoadingMore(false);
+      }
     }
   };
+
+  const taskDetails = selectedItem ? (
+    <section className="task-log-detail" id={detailId} aria-label="任务详情">
+      <div className="inline-detail-header">
+        <span>任务详情</span>
+        <button
+          type="button"
+          className="inline-detail-collapse"
+          aria-label="收起任务详情"
+          onClick={closeDetails}
+        >
+          <ChevronUp size={14} /> 收起
+        </button>
+      </div>
+      {detailBusy ? (
+        <div className="task-log-detail-loading">正在读取任务详情…</div>
+      ) : detailMessage ? (
+        <div className="task-log-detail-error task-log-detail-error-block" role="alert">
+          <AlertCircle size={15} />
+          <span>{detailMessage}</span>
+        </div>
+      ) : selectedItem.kind === 'dubbing' && dubbingDetail ? (
+        <div className="task-log-detail-body">
+          <TaskLogStatus status={dubbingDetail.status} />
+          {dubbingDetail.error && <p role="alert">{dubbingDetail.error}</p>}
+          <dl className="task-log-detail-meta">
+            <div>
+              <dt>场次</dt>
+              <dd>{dubbingDetail.sceneId}</dd>
+            </div>
+            <div>
+              <dt>费用</dt>
+              <dd>
+                {dubbingDetail.budget.state === 'estimated'
+                  ? `${dubbingDetail.budget.currency} ${dubbingDetail.budget.estimatedTotal ?? '未知'}（估算）`
+                  : '单价未知，按单次确认执行'}
+              </dd>
+            </div>
+            <div>
+              <dt>结果</dt>
+              <dd>
+                {dubbingDetail.outputAssetId
+                  ? '成片已保存，可在场次配音面板试听采用'
+                  : dubbingDetail.outputAudioId
+                    ? '配音已保存，可在台词中试听采用'
+                    : '尚未完成'}
+              </dd>
+            </div>
+          </dl>
+          <ol className="task-log-event-list">
+            {(dubbingDetail.steps ?? []).map((step) => (
+              <li key={step.id}>
+                <strong>
+                  {step.kind === 'speech'
+                    ? '生成配音'
+                    : step.kind === 'lipsync'
+                      ? '口型处理'
+                      : step.kind === 'compose'
+                        ? '成片合成'
+                        : '制作步骤'}
+                </strong>
+                <span>
+                  第 {step.attempt} 次 · {statusLabel[step.status] ?? step.status}
+                </span>
+                {step.error && <p>{step.error}</p>}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : selectedItem.kind !== 'agent-document' && mediaDetail ? (
+        <MediaTaskDetailPanel item={selectedItem} detail={mediaDetail} events={mediaEvents} />
+      ) : selectedItem.kind === 'agent-document' && detail ? (
+        <AgentTaskDetailPanel
+          detail={detail}
+          onOpenDocument={onOpenDocument}
+          onOpenConversation={onOpenConversation}
+          onOpenLibrarySource={onOpenLibrarySource}
+        />
+      ) : selectedItem.kind === 'agent-document' ? (
+        <div className="task-log-detail-loading">暂无任务详情。</div>
+      ) : (
+        <SourceHint item={selectedItem} />
+      )}
+    </section>
+  ) : null;
 
   return (
     <section
@@ -1103,38 +1225,43 @@ export function TaskLogView({
           )}
         </div>
       ) : (
-        <div className={`task-log-content${selectedItem ? ' has-detail' : ''}`}>
-          <div className="task-log-list" aria-label="任务日志列表">
+        <div className="task-log-content">
+          <div ref={listRef} className="task-log-list" aria-label="任务日志列表">
             {items.map((item) => {
               const KindIcon = kindIcon[item.kind];
               return (
-                <button
-                  className={`task-log-row${selectedItem?.id === item.id ? ' is-selected' : ''}`}
-                  key={item.id}
-                  type="button"
-                  title="查看任务详情"
-                  aria-pressed={selectedItem?.id === item.id}
-                  onClick={(event) => {
-                    selectedRowRef.current = event.currentTarget;
-                    void openDetails(item);
-                  }}
-                >
-                  <div className="task-log-kind">
-                    <KindIcon size={14} aria-hidden="true" />
-                    {kindLabel[item.kind]}
-                  </div>
-                  <div className="task-log-main">
-                    <strong title={item.title}>{item.title}</strong>
-                    <time dateTime={item.createdAt}>{formatDate(item.createdAt)}</time>
-                  </div>
-                  <span className={`task-status task-status-${item.status}`}>
-                    {!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status) &&
-                    item.scheduling?.waitReason &&
-                    scheduleWaitLabel[item.scheduling.waitReason]
-                      ? scheduleWaitLabel[item.scheduling.waitReason]
-                      : (statusLabel[item.status] ?? generationStatusLabel(item.status))}
-                  </span>
-                </button>
+                <div className="task-log-entry" key={item.id}>
+                  <button
+                    className={`task-log-row${selectedItem?.id === item.id ? ' is-selected' : ''}`}
+                    type="button"
+                    title={selectedItem?.id === item.id ? '收起任务详情' : '查看任务详情'}
+                    aria-expanded={selectedItem?.id === item.id}
+                    aria-controls={selectedItem?.id === item.id ? detailId : undefined}
+                    aria-pressed={selectedItem?.id === item.id}
+                    onClick={(event) => {
+                      selectedRowRef.current = event.currentTarget;
+                      if (selectedItem?.id === item.id) closeDetails();
+                      else void openDetails(item);
+                    }}
+                  >
+                    <div className="task-log-kind">
+                      <KindIcon size={14} aria-hidden="true" />
+                      {kindLabel[item.kind]}
+                    </div>
+                    <div className="task-log-main">
+                      <strong title={item.title}>{item.title}</strong>
+                      <time dateTime={item.createdAt}>{formatDate(item.createdAt)}</time>
+                    </div>
+                    <span className={`task-status task-status-${item.status}`}>
+                      {!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(item.status) &&
+                      item.scheduling?.waitReason &&
+                      scheduleWaitLabel[item.scheduling.waitReason]
+                        ? scheduleWaitLabel[item.scheduling.waitReason]
+                        : (statusLabel[item.status] ?? generationStatusLabel(item.status))}
+                    </span>
+                  </button>
+                  {selectedItem?.id === item.id && taskDetails}
+                </div>
               );
             })}
             {nextCursor && (
@@ -1150,108 +1277,6 @@ export function TaskLogView({
               </button>
             )}
           </div>
-          {selectedItem && (
-            <aside className="task-log-detail" aria-label="任务详情">
-              <div className="task-log-detail-header">
-                <button
-                  className="button secondary task-log-back"
-                  type="button"
-                  onClick={closeDetails}
-                >
-                  <ArrowLeft size={14} />
-                  返回列表
-                </button>
-                <div>
-                  <span>{kindLabel[selectedItem.kind]}</span>
-                  <h2 ref={detailHeadingRef} tabIndex={-1}>
-                    {selectedItem.title}
-                  </h2>
-                </div>
-                <button
-                  className="icon-button"
-                  type="button"
-                  title="关闭任务详情"
-                  aria-label="关闭任务详情"
-                  onClick={closeDetails}
-                >
-                  <X size={16} />
-                </button>
-              </div>
-              {detailBusy ? (
-                <div className="task-log-detail-loading">正在读取任务详情…</div>
-              ) : detailMessage ? (
-                <div className="task-log-detail-error task-log-detail-error-block" role="alert">
-                  <AlertCircle size={15} />
-                  <span>{detailMessage}</span>
-                </div>
-              ) : selectedItem.kind === 'dubbing' && dubbingDetail ? (
-                <div className="task-log-detail-body">
-                  <TaskLogStatus status={dubbingDetail.status} />
-                  {dubbingDetail.error && <p role="alert">{dubbingDetail.error}</p>}
-                  <dl className="task-log-detail-meta">
-                    <div>
-                      <dt>场次</dt>
-                      <dd>{dubbingDetail.sceneId}</dd>
-                    </div>
-                    <div>
-                      <dt>费用</dt>
-                      <dd>
-                        {dubbingDetail.budget.state === 'estimated'
-                          ? `${dubbingDetail.budget.currency} ${dubbingDetail.budget.estimatedTotal ?? '未知'}（估算）`
-                          : '单价未知，按单次确认执行'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>结果</dt>
-                      <dd>
-                        {dubbingDetail.outputAssetId
-                          ? '成片已保存，可在场次配音面板试听采用'
-                          : dubbingDetail.outputAudioId
-                            ? '配音已保存，可在台词中试听采用'
-                            : '尚未完成'}
-                      </dd>
-                    </div>
-                  </dl>
-                  <ol className="task-log-event-list">
-                    {(dubbingDetail.steps ?? []).map((step) => (
-                      <li key={step.id}>
-                        <strong>
-                          {step.kind === 'speech'
-                            ? '生成配音'
-                            : step.kind === 'lipsync'
-                              ? '口型处理'
-                              : step.kind === 'compose'
-                                ? '成片合成'
-                                : '制作步骤'}
-                        </strong>
-                        <span>
-                          第 {step.attempt} 次 · {statusLabel[step.status] ?? step.status}
-                        </span>
-                        {step.error && <p>{step.error}</p>}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              ) : selectedItem.kind !== 'agent-document' && mediaDetail ? (
-                <MediaTaskDetailPanel
-                  item={selectedItem}
-                  detail={mediaDetail}
-                  events={mediaEvents}
-                />
-              ) : selectedItem.kind === 'agent-document' && detail ? (
-                <AgentTaskDetailPanel
-                  detail={detail}
-                  onOpenDocument={onOpenDocument}
-                  onOpenConversation={onOpenConversation}
-                  onOpenLibrarySource={onOpenLibrarySource}
-                />
-              ) : selectedItem.kind === 'agent-document' ? (
-                <div className="task-log-detail-loading">暂无任务详情。</div>
-              ) : (
-                <SourceHint item={selectedItem} />
-              )}
-            </aside>
-          )}
         </div>
       )}
       {message && <div className="inline-status">{message}</div>}

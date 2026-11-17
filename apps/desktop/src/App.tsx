@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { newerAgentTaskDetail } from './conversation-timeline';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { discardShotImageDraft } from './ShotImageWorkspace';
+import { pickProjectDirectory } from './project-directory-client';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
@@ -70,6 +71,7 @@ import type {
 } from '@ai-video/contracts';
 import {
   composeSceneReferenceImagePrompt,
+  stripProductionImageBindingPrompt,
   inferUnifiedAgentCapabilityHint,
   productionShotReferenceIds,
   productionSkillPrompt,
@@ -112,6 +114,7 @@ import { MaintenanceDialog } from './MaintenanceDialog';
 import { ChatPanel, type ChatAttachment } from './ChatPanel';
 import { composeConversationPrompt } from './conversation-prompt-template';
 import { useConversationPromptTemplate } from './use-conversation-prompt-template';
+import { ConversationPromptTemplateEditor } from './ConversationPromptTemplateEditor';
 import { SettingsCenter } from './SettingsCenter';
 import { ProductionNavigation } from './ProductionNavigation';
 import { providerProfileClient } from './provider-profile-client';
@@ -729,6 +732,7 @@ export function App() {
   const [projectPath, setProjectPath] = useState('');
   const [projectMessage, setProjectMessage] = useState('');
   const [projectBusy, setProjectBusy] = useState(false);
+  const directoryPickerPending = useRef(false);
   const [projectRenameOpen, setProjectRenameOpen] = useState(false);
   const [projectRenameValue, setProjectRenameValue] = useState('');
   const [projectRenameBusy, setProjectRenameBusy] = useState(false);
@@ -752,7 +756,7 @@ export function App() {
   const [roughCutProjectId, setRoughCutProjectId] = useState<string>();
   const [roughCutImport, setRoughCutImport] = useState<RoughCutImportRequest>();
   const roughCutImportToken = useRef(0);
-  const [documentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
+  const [storedDocumentKindFilter, setDocumentKindFilter] = useState<'all' | DocumentKind>('all');
   const [documentDirectoryMode, setDocumentDirectoryMode] = useState<'active' | 'archived'>(
     'active',
   );
@@ -774,6 +778,8 @@ export function App() {
   const activeShotIdRef = useRef(shot?.id);
   activeShotIdRef.current = shot?.id;
   const [shotPrompt, setShotPrompt] = useState('');
+  const shotPromptDrafts = useRef(new Map<string, { prompt: string; rowVersion: number }>());
+  const [shotDirectoryOpen, setShotDirectoryOpen] = useState(true);
   const [constraints, setConstraints] = useState<ConstraintInfo[]>([]);
   const [shotStoryboard, setShotStoryboard] = useState<DocumentDetail>();
   const [shotStoryboardTitle, setShotStoryboardTitle] = useState('');
@@ -1064,7 +1070,6 @@ export function App() {
     characterVoicePrompt,
     documentEditorWritable,
     setDocuments,
-    setDocumentKind,
     setDocumentTitle,
     setDocumentContent,
     setContentMessage,
@@ -2466,18 +2471,18 @@ export function App() {
     });
   };
   const selectProjectDirectory = async (openAfterSelection = false) => {
+    if (directoryPickerPending.current) return;
+    directoryPickerPending.current = true;
     setProjectMessage('');
     try {
-      const selected = await openDialog({
-        directory: true,
-        multiple: false,
-        title: openAfterSelection ? '选择要打开的项目目录' : '选择项目目录',
-      });
+      const selected = await pickProjectDirectory(openAfterSelection);
       if (typeof selected !== 'string') return;
       setProjectPath(selected);
       if (openAfterSelection) await openProject(selected);
     } catch (reason) {
       setProjectMessage(reason instanceof Error ? reason.message : '无法打开目录选择器');
+    } finally {
+      directoryPickerPending.current = false;
     }
   };
   const closeProject = () =>
@@ -2733,6 +2738,11 @@ export function App() {
     const removedShots = new Set(
       targets.filter((item) => item.kind === 'shot').map((item) => item.id),
     );
+    for (const item of shots)
+      if (removedScenes.has(item.sceneId) || removedShots.has(item.id)) {
+        shotPromptDrafts.current.delete(`${expectedProjectId}:${item.id}`);
+        if (expectedProjectId) discardShotImageDraft(expectedProjectId, item.id);
+      }
     setScenes((rows) => rows.filter((item) => !removedScenes.has(item.id)));
     setShots((rows) =>
       rows.filter((item) => !removedScenes.has(item.sceneId) && !removedShots.has(item.id)),
@@ -2800,8 +2810,12 @@ export function App() {
     }
   };
   useEffect(() => {
-    setShotPrompt(shot?.prompt ?? '');
-  }, [shot?.id]);
+    setShotPrompt(
+      shot
+        ? (shotPromptDrafts.current.get(`${project?.id}:${shot.id}`)?.prompt ?? shot.prompt ?? '')
+        : '',
+    );
+  }, [project?.id, shot?.id]);
   const saveSceneVideoPrompt = async (nextPrompt: string) => {
     if (!scene) return false;
     const expectedProjectId = project?.id;
@@ -3002,9 +3016,11 @@ export function App() {
       setProductionCapability(images.length > 0 ? 'REFERENCE_TO_IMAGE' : 'TEXT_TO_IMAGE');
     } else {
       setProductionCapability(
-        inputImages.some((image) => image.role === 'first-frame')
-          ? 'IMAGE_TO_VIDEO'
-          : 'REFERENCE_TO_VIDEO',
+        inputImages.length === 0
+          ? 'TEXT_TO_VIDEO'
+          : inputImages.some((image) => image.role === 'first-frame')
+            ? 'IMAGE_TO_VIDEO'
+            : 'REFERENCE_TO_VIDEO',
       );
     }
   };
@@ -3023,7 +3039,8 @@ export function App() {
     if (!shot) return;
     const sourcePrompt = promptOverride ?? shotPrompt.trim();
     seedShotProduction(mode, refs, sourcePrompt);
-    if (sourcePrompt !== (shot.prompt ?? '')) await saveShotPrompt(sourcePrompt);
+    const rawPrompt = stripProductionImageBindingPrompt(sourcePrompt);
+    if (mode === 'video' && rawPrompt !== (shot.prompt ?? '')) await saveShotPrompt(rawPrompt);
   };
   const saveShotReferenceBindings = async (
     bindings: import('@ai-video/contracts').ShotReferenceBindingInfo | null,
@@ -3055,9 +3072,16 @@ export function App() {
         sceneId: targetShot.sceneId,
         title: targetShot.title,
         prompt: promptValue,
-        expectedRowVersion: targetShot.rowVersion,
+        expectedRowVersion:
+          shotPromptDrafts.current.get(`${expectedProjectId}:${targetShot.id}`)?.rowVersion ??
+          targetShot.rowVersion,
       });
       setShots((rows) => rows.map((row) => (row.id === targetShot.id ? updated : row)));
+      if (
+        shotPromptDrafts.current.get(`${expectedProjectId}:${targetShot.id}`)?.prompt ===
+        promptValue
+      )
+        shotPromptDrafts.current.delete(`${expectedProjectId}:${targetShot.id}`);
       if (
         activeProjectIdRef.current === expectedProjectId &&
         activeShotIdRef.current === targetShot.id
@@ -3120,6 +3144,36 @@ export function App() {
       '',
       targetConversation,
       false,
+    );
+  };
+  const requestShotAuthoring = async (
+    kind: 'shot-image' | 'video-prompt',
+    image?: import('@ai-video/contracts').ShotImageContext,
+  ) => {
+    if (!project || !shot) throw new Error('请先选择镜头。');
+    const projectId = project.id,
+      shotId = shot.id;
+    if (kind === 'video-prompt' && shotPrompt !== (shot.prompt ?? '') && !(await saveShotPrompt()))
+      return;
+    if (image?.inputImages.length && !selectedLlmModel?.capabilities.vision)
+      throw new Error('本次已有图片来源，请选择支持看图的会话模型；无图片来源时可使用文字模型。');
+    const target = conversation ?? (await createConversation());
+    if (!target || activeProjectIdRef.current !== projectId || activeShotIdRef.current !== shotId)
+      throw new Error('项目或镜头已切换。');
+    workspaceDispatch({ type: 'open', panelId: 'conversation' });
+    const instructions =
+      kind === 'shot-image'
+        ? '请编写本镜指定瞬间的完整静态图片提示词。加载 shot.image.read / shot.image.save，用途 workflow=shot-image。先读取独立图片记录和用户要求，按需读取实际人物、场景、道具资料。已有图片时用 includeImages=true 核对；没有图片时依据已读文本创作，不声称看过画面。明确本图实际出镜集合并提交 bindings，逐项核对本会话通用和镜头静态图模板要求后保存、读回。不覆盖视频正文，不生成媒体，不自动采用图片。'
+        : '请编写本镜完整视频提示词。用途 workflow=video-prompt。先用 production.read 读取当前镜头，按需读取项目资料及前后镜内容，写清开场、动态动作、机位、光照、对白声音和结束状态。通过 scene.update_shot_prompts 使用真实镜头 ID、CAS、明确出镜 bindings 和自然估时保存、读回。核对当前会话通用和视频模板要求。不覆盖静态图片正文，不直接生成媒体。';
+    await sendMessage(
+      `${instructions}\n\n${JSON.stringify({ projectId, sceneId: shot.sceneId, shotId, imagePurpose: image?.purpose, userIntent: image?.intent })}`,
+      undefined,
+      '',
+      target,
+      false,
+      undefined,
+      undefined,
+      { promptWorkflow: kind },
     );
   };
   const requestShotBindingRepair = async (promptValue: string) => {
@@ -3197,6 +3251,7 @@ export function App() {
       idempotencyKey: string;
     },
     requestMetadata?: {
+      promptWorkflow?: 'shot-image' | 'video-prompt';
       productionSkillId?: ProductionSkillId;
       productionWorkflowVersion?: 2;
       productionSources?: Array<{
@@ -3258,7 +3313,9 @@ export function App() {
         : '';
       // Wait for this conversation's template and persist the exact draft that
       // will be submitted. A failed load/save keeps the message available to retry.
-      const template = await conversationPromptTemplate.saveForSubmission(conversation);
+      const templateSnapshot =
+        await conversationPromptTemplate.saveForSubmissionSnapshot(conversation);
+      const template = templateSnapshot.content;
       if (continuation && activeProjectIdRef.current !== conversation.projectId)
         throw new Error('项目已切换，请回到原会话继续。');
       const promptForAgent = composeConversationPrompt(`${prompt}${attachmentContext}`, template);
@@ -3270,7 +3327,7 @@ export function App() {
           setAgentModelSelection(undefined);
           setAgentParameterRequest(undefined);
           const capability = 'text' as const;
-          const agentPrompt = promptForAgent;
+          const agentPrompt = `${prompt}${attachmentContext}`;
           const remembered = conversation
             ? agentModelPreferences[conversation.id]?.text
             : undefined;
@@ -3300,6 +3357,7 @@ export function App() {
           const runParams: UnifiedAgentRunParams = {
             ...(taskExecution === 'parallel' ? { taskExecution } : {}),
             conversationId: conversation.id,
+            promptTemplateVersion: templateSnapshot.rowVersion,
             prompt: agentPrompt || '请分析我提供的附件。',
             capability,
             idempotencyKey,
@@ -3309,6 +3367,9 @@ export function App() {
             ...(providerProfileId && modelId ? { providerProfileId, modelId } : {}),
             researchMode,
             ...(requestMetadata?.productionSkillId ? { ...requestMetadata } : {}),
+            ...(requestMetadata?.promptWorkflow
+              ? { promptWorkflow: requestMetadata.promptWorkflow }
+              : {}),
             ...(modelSelection?.adapterKey ? { adapterKey: modelSelection.adapterKey } : {}),
             ...(modelSelection?.parameters ? { parameters: modelSelection.parameters } : {}),
           };
@@ -3870,7 +3931,8 @@ export function App() {
         conversation,
         messages,
         composer,
-        promptTemplate: conversationPromptTemplate.content,
+        promptTemplate: conversationPromptTemplate.selectedContent,
+        promptTemplateKind: conversationPromptTemplate.kind,
         promptTemplateBusy: conversationPromptTemplate.busy,
         promptTemplateLoading: conversationPromptTemplate.loading,
         promptTemplateError: conversationPromptTemplate.error,
@@ -4183,7 +4245,9 @@ export function App() {
       setAgentModelSelection(undefined);
       setComposer(action.value);
     } else if (action.type === 'conversation-prompt-template') {
-      conversationPromptTemplate.change(action.value);
+      conversationPromptTemplate.change(action.value, action.kind);
+    } else if (action.type === 'conversation-prompt-template-kind') {
+      conversationPromptTemplate.selectKind(action.kind);
     } else if (action.type === 'conversation-prompt-template-save') {
       void saveConversationPromptTemplate();
     } else if (action.type === 'conversation-prompt-template-reload') {
@@ -4249,6 +4313,8 @@ export function App() {
     selectedLlmModelId,
     researchMode,
     conversationPromptTemplate.content,
+    conversationPromptTemplate.kind,
+    conversationPromptTemplate.selectedContent,
     conversationPromptTemplate.busy,
     conversationPromptTemplate.loading,
     conversationPromptTemplate.error,
@@ -4305,7 +4371,9 @@ export function App() {
       selectedLlmProfileId={selectedLlmProfileId}
       selectedLlmModelId={selectedLlmModelId}
       researchMode={researchMode}
-      promptTemplate={conversationPromptTemplate.content}
+      promptTemplate={conversationPromptTemplate.selectedContent}
+      promptTemplateKind={conversationPromptTemplate.kind}
+      onPromptTemplateKindChange={conversationPromptTemplate.selectKind}
       onPromptTemplateChange={conversationPromptTemplate.change}
       onSavePromptTemplate={() => void saveConversationPromptTemplate()}
       promptTemplateBusy={conversationPromptTemplate.busy}
@@ -4540,6 +4608,10 @@ export function App() {
   const hasForeignDocument =
     !documentMatchesWorkspace && Boolean(document || documentTitle || documentContent);
   const workspaceKinds = view === 'characters' ? CHARACTER_DOCUMENT_KINDS : SCRIPT_DOCUMENT_KINDS;
+  const documentKindFilter =
+    storedDocumentKindFilter !== 'all' && workspaceKinds.includes(storedDocumentKindFilter)
+      ? storedDocumentKindFilter
+      : 'all';
   const visibleDocuments = documents.filter(
     (item) =>
       item.domainScope !== 'novel' &&
@@ -4575,16 +4647,22 @@ export function App() {
    * primary project-document kind, rather than a `note` that the merged list
    * would not show.
    */
+  const activeDocumentKind =
+    documentKindFilter === 'all'
+      ? view === 'characters'
+        ? 'character'
+        : 'outline'
+      : documentKindFilter;
   const newDocumentOfActiveKind = () => {
-    if (newDocument() === false) return;
-    setDocumentKind(
-      documentKindFilter === 'all'
-        ? view === 'characters'
-          ? 'character'
-          : 'outline'
-        : documentKindFilter,
-    );
+    if (newDocument(activeDocumentKind) === false) return;
+    setEditingDocumentTitleId(null);
   };
+  const showNewDocumentInDirectory =
+    !document &&
+    !hasForeignDocument &&
+    documentDirectoryMode === 'active' &&
+    workspaceKinds.includes(documentKind) &&
+    (documentKindFilter === 'all' || documentKindFilter === documentKind);
   const moveDocumentToNovel = async () => {
     if (!document || !writable || contentBusy) return;
     setContentBusy(true);
@@ -4671,13 +4749,13 @@ export function App() {
               <button
                 className="button secondary markdown-import-button"
                 type="button"
-                aria-label="导入 Markdown"
-                title="导入 Markdown"
-                onClick={() => void importMarkdownDocument()}
+                aria-label="导入剧本"
+                title="导入 TXT 或 Markdown 剧本"
+                onClick={() => void importMarkdownDocument(activeDocumentKind)}
                 disabled={!writable || contentBusy}
               >
                 <FileUp size={15} />
-                <span>导入 Markdown</span>
+                <span>导入剧本</span>
               </button>
             )}
             {options?.showNew === false ? null : (
@@ -4685,7 +4763,7 @@ export function App() {
                 className="button secondary"
                 type="button"
                 onClick={newDocumentOfActiveKind}
-                disabled={!writable}
+                disabled={!writable || contentBusy}
               >
                 <FilePlus2 size={15} />
                 新建
@@ -4843,6 +4921,8 @@ export function App() {
         currentVersionId={document?.currentVersionId}
         message={contentMessage}
         assets={linkedAssets}
+        onImagesImported={() => setTaskCompletionRevision((revision) => revision + 1)}
+        onImagesRemoved={() => setTaskCompletionRevision((revision) => revision + 1)}
         boundScenes={scenes.filter((item) =>
           documentKind === 'scene'
             ? Boolean(
@@ -5663,7 +5743,7 @@ export function App() {
                                     type="button"
                                     title="新建角色或场景"
                                     onClick={newDocumentOfActiveKind}
-                                    disabled={!writable}
+                                    disabled={!writable || contentBusy}
                                   >
                                     <FilePlus2 size={14} />
                                   </button>
@@ -5737,6 +5817,23 @@ export function App() {
                             )}
                           </div>
                           <div className="document-directory-list">
+                            {showNewDocumentInDirectory && (
+                              <div className="tree-item with-kind document-directory-item selected">
+                                <FileText size={13} />
+                                <input
+                                  className="document-directory-title-input"
+                                  type="text"
+                                  aria-label="文档标题"
+                                  autoFocus
+                                  value={documentTitle}
+                                  readOnly={!documentEditorWritable || contentBusy}
+                                  onChange={(event) => setDocumentTitle(event.target.value)}
+                                />
+                                <small className="tree-item-kind">
+                                  {DOCUMENT_KIND_LABELS[documentKind]} · 未保存
+                                </small>
+                              </div>
+                            )}
                             {documentDirectoryMode === 'active'
                               ? visibleDocuments.map((item) => {
                                   if (view === 'characters') {
@@ -5789,11 +5886,14 @@ export function App() {
                                               selected && (!documentEditorWritable || contentBusy)
                                             }
                                             onClick={() => {
-                                              if (selected) setEditingDocumentTitleId(item.id);
-                                              else {
+                                              if (!selected) {
                                                 setEditingDocumentTitleId(null);
                                                 void openDocumentById(item.id);
                                               }
+                                            }}
+                                            onDoubleClick={() => {
+                                              if (writable && (!selected || documentEditorWritable))
+                                                setEditingDocumentTitleId(item.id);
                                             }}
                                           >
                                             <DocumentDirectoryTitleText
@@ -5866,11 +5966,14 @@ export function App() {
                                             selected && (!documentEditorWritable || contentBusy)
                                           }
                                           onClick={() => {
-                                            if (selected) setEditingDocumentTitleId(item.id);
-                                            else {
+                                            if (!selected) {
                                               setEditingDocumentTitleId(null);
                                               void openDocumentById(item.id);
                                             }
+                                          }}
+                                          onDoubleClick={() => {
+                                            if (writable && (!selected || documentEditorWritable))
+                                              setEditingDocumentTitleId(item.id);
                                           }}
                                         >
                                           <DocumentDirectoryTitleText
@@ -5920,7 +6023,7 @@ export function App() {
                                   </div>
                                 ))}
                             {(documentDirectoryMode === 'active'
-                              ? visibleDocuments.length
+                              ? visibleDocuments.length + (showNewDocumentInDirectory ? 1 : 0)
                               : visibleArchivedDocuments.length) === 0 && (
                               <small className="tree-empty">
                                 {documentDirectoryMode === 'archived'
@@ -5971,11 +6074,20 @@ export function App() {
                   </>
                 ) : view === 'shots' ? (
                   <>
-                    <div className="workspace-toolbar">
+                    <div className="workspace-toolbar shot-workspace-toolbar">
                       <div>
                         <span className="eyebrow">{shot ? scene?.title : '场次与镜头'}</span>
                         <h1>{shot?.title ?? scene?.title ?? '场次未选择'}</h1>
                       </div>
+                      <button
+                        className="button secondary shot-directory-trigger"
+                        type="button"
+                        aria-expanded={shotDirectoryOpen}
+                        aria-controls="shot-directory"
+                        onClick={() => setShotDirectoryOpen((value) => !value)}
+                      >
+                        目录
+                      </button>
                       <button
                         className="button primary"
                         type="button"
@@ -5987,41 +6099,47 @@ export function App() {
                       </button>
                     </div>
                     {project ? (
-                      <div className="directory-layout">
-                        <SceneShotDirectory
-                          projectId={project.id}
-                          scenes={scenes}
-                          sceneId={scene?.id}
-                          shotId={shot?.id}
-                          shots={shots}
-                          writable={writable}
-                          busy={shotStoryboardBusy}
-                          dirtySceneId={
-                            sceneVideoPrompt !== (scene?.prompt ?? '') ? scene?.id : undefined
-                          }
-                          dirtyShotId={
-                            shot &&
-                            (shotPrompt !== (shot.prompt ?? '') ||
-                              shotStoryboardTitle !== (shotStoryboard?.title ?? '') ||
-                              shotStoryboardContent !==
-                                (shotStoryboard?.currentVersion?.contentMarkdown ?? ''))
-                              ? shot.id
-                              : undefined
-                          }
-                          onLifecycleChanged={refreshProductionLifecycle}
-                          onAddScene={() => void addScene()}
-                          onRenameScene={(item, title) => void renameScene(item, title)}
-                          onRenameShot={(parent, item, title) =>
-                            void renameShot(parent, item, title)
-                          }
-                          onSelectScene={(item) => void selectScene(item)}
-                          onSelectShot={(parent, item) => {
-                            if (scene?.id === parent.id) {
-                              conversationRequest.current += 1;
-                              setShot(item);
-                            } else void selectScene(parent, item);
-                          }}
-                        />
+                      <div className="directory-layout shot-directory-layout">
+                        <div
+                          id="shot-directory"
+                          className="shot-directory-container"
+                          hidden={!shotDirectoryOpen}
+                        >
+                          <SceneShotDirectory
+                            projectId={project.id}
+                            scenes={scenes}
+                            sceneId={scene?.id}
+                            shotId={shot?.id}
+                            shots={shots}
+                            writable={writable}
+                            busy={shotStoryboardBusy}
+                            dirtySceneId={
+                              sceneVideoPrompt !== (scene?.prompt ?? '') ? scene?.id : undefined
+                            }
+                            dirtyShotId={
+                              shot &&
+                              (shotPrompt !== (shot.prompt ?? '') ||
+                                shotStoryboardTitle !== (shotStoryboard?.title ?? '') ||
+                                shotStoryboardContent !==
+                                  (shotStoryboard?.currentVersion?.contentMarkdown ?? ''))
+                                ? shot.id
+                                : undefined
+                            }
+                            onLifecycleChanged={refreshProductionLifecycle}
+                            onAddScene={() => void addScene()}
+                            onRenameScene={(item, title) => void renameScene(item, title)}
+                            onRenameShot={(parent, item, title) =>
+                              void renameShot(parent, item, title)
+                            }
+                            onSelectScene={(item) => void selectScene(item)}
+                            onSelectShot={(parent, item) => {
+                              if (scene?.id === parent.id) {
+                                conversationRequest.current += 1;
+                                setShot(item);
+                              } else void selectScene(parent, item);
+                            }}
+                          />
+                        </div>
                         <div className="directory-pane">
                           {scene && !shot ? (
                             <SceneWorkspace
@@ -6071,7 +6189,49 @@ export function App() {
                               storyboardContent={shotStoryboardContent}
                               storyboardBusy={shotStoryboardBusy}
                               hasStoryboard={Boolean(shotStoryboard)}
-                              onPromptChange={setShotPrompt}
+                              onPromptChange={(value) => {
+                                if (shot) {
+                                  const key = `${project.id}:${shot.id}`;
+                                  shotPromptDrafts.current.set(key, {
+                                    prompt: value,
+                                    rowVersion:
+                                      shotPromptDrafts.current.get(key)?.rowVersion ??
+                                      shot.rowVersion,
+                                  });
+                                }
+                                setShotPrompt(value);
+                              }}
+                              templateSource={
+                                conversation
+                                  ? `模板：当前会话「${conversation.title}」 · v${conversationPromptTemplate.rowVersion}${conversationPromptTemplate.dirty ? ' · 有未保存修改' : ''}`
+                                  : '模板：新会话默认模板（不继承旧会话）'
+                              }
+                              templateEditor={(kind) => (
+                                <ConversationPromptTemplateEditor
+                                  key={`${project.id}:${conversation?.id ?? ''}`}
+                                  triggerLabel="镜头创作约束"
+                                  onOpen={() => conversationPromptTemplate.selectKind(kind)}
+                                  conversation={conversation}
+                                  writable={writable}
+                                  scopeAvailable={scopeAvailable}
+                                  value={conversationPromptTemplate.selectedContent}
+                                  kind={conversationPromptTemplate.kind}
+                                  onChange={conversationPromptTemplate.change}
+                                  onKindChange={conversationPromptTemplate.selectKind}
+                                  onSave={() => void saveConversationPromptTemplate()}
+                                  onReload={() =>
+                                    void conversationPromptTemplate.reload().catch(() => undefined)
+                                  }
+                                  busy={conversationPromptTemplate.busy}
+                                  loading={conversationPromptTemplate.loading}
+                                  dirty={conversationPromptTemplate.dirty}
+                                  error={conversationPromptTemplate.error}
+                                />
+                              )}
+                              onAskImageAgent={(context) =>
+                                requestShotAuthoring('shot-image', context)
+                              }
+                              onAskVideoAgent={() => requestShotAuthoring('video-prompt')}
                               onSavePrompt={() => void saveShotPrompt()}
                               onRepairBindings={requestShotBindingRepair}
                               onAskContinuityAgent={requestContinuityAgent}

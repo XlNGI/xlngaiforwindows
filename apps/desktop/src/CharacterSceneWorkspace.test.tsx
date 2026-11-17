@@ -10,6 +10,27 @@ afterEach(() => {
 });
 
 describe('CharacterSceneWorkspace', () => {
+  it.each(['character', 'scene', 'prop'] as const)(
+    'offers local image binding on the %s page',
+    (kind) => {
+      render(
+        <CharacterSceneWorkspace
+          projectId="project"
+          documentId="document"
+          title="资料"
+          kind={kind}
+          content="提示词"
+          writable
+          assets={[]}
+          versions={[]}
+          onContentChange={vi.fn()}
+          onRestoreVersion={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole('region', { name: '绑定图片' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '添加图片' })).toBeEnabled();
+    },
+  );
   it('edits audition text on the voice document without exposing image or audio generation', () => {
     const onSampleTextChange = vi.fn();
     render(

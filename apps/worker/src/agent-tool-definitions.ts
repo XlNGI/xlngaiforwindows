@@ -9,10 +9,13 @@ import {
   productionTargetSchema,
   productionTimingSchema,
   promptBindingSchema,
-  SHOT_CAMERA_LIGHTING_REQUIREMENTS,
   SHOT_TIMING_REQUIREMENTS,
 } from '@ai-video/contracts';
 import { PRODUCTION_AUTHORING_GUIDANCE } from './production-authoring-guidance.js';
+import {
+  PROMPT_GENERATION_REQUEST_SCHEMA,
+  PROMPT_GENERATION_SUBMIT_SCHEMA,
+} from './prompt-generation-schema.js';
 import {
   PRODUCTION_BUNDLE_SCHEMA,
   PRODUCTION_BUNDLE_SUBMIT_SCHEMA,
@@ -63,6 +66,10 @@ const promptFields = () => ({
   timing: productionTimingSchema,
 });
 export type SystemAgentToolOperation =
+  | 'prompt.generation.request'
+  | 'prompt.generation.submit'
+  | 'shot.image.read'
+  | 'shot.image.save'
   | 'production.bundle'
   | 'production.bundle.submit'
   | 'conversation.ask'
@@ -478,6 +485,47 @@ export const PACKAGE_COMPLETE_AGENT_TOOL: LlmToolDefinition & {
 };
 export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
+    name: 'shot.image.read',
+    description:
+      'Read independent STATIC image prompt, purpose, explicit image cast/scope, current sourceToken and confirmed sources for a shot, including a first shot with no sources. Video text is context only. Candidate references are NOT the actual image cast. Set includeImages=true with a vision model to inspect selected pixels; when no images exist, author from retrieved text and do not claim visual verification. No generation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['shotId'],
+      properties: {
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        includeImages: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'shot.image.save',
+    description:
+      'Save the complete static image prompt, purpose and explicit actual character/scene/prop bindings independently of the VIDEO text. Retrieve necessary project documents on demand. Check all applicable common and shot-image template requirements, cast, simultaneous pose/objects, camera, light and negative constraints before saving. bindings must describe the actual visible scope, not every person appearing later in the video. Use current rowVersion and sourceToken from shot.image.read; after a conflict read and review again. Does not adopt images or generate media. Empty prompt explicitly clears only image text. Read back after saving.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'shotId',
+        'expectedRowVersion',
+        'sourceToken',
+        'prompt',
+        'purpose',
+        'intent',
+        'bindings',
+      ],
+      properties: {
+        shotId: { type: 'string', minLength: 1, maxLength: 200 },
+        expectedRowVersion: { type: 'integer', minimum: 0 },
+        sourceToken: { type: 'string', minLength: 64, maxLength: 64 },
+        prompt: { type: 'string', maxLength: 20000 },
+        purpose: { type: 'string', enum: ['composition', 'first-frame', 'last-frame'] },
+        intent: { type: 'string', maxLength: 4000 },
+        bindings: promptBindingSchema,
+      },
+    },
+  },
+  {
     name: 'shot.continuity.read',
     description:
       'Read shot continuity metadata and current reference-image workflow. Default metadata only: saved intent, prompt, confirmed frames and selected references. Set includeImages=true explicitly to inspect ordered pixels with a vision model; required before describing visible details or authoring an image prompt from visual evidence. A current binding and source checks still apply. Ask conversation.ask when the target moment or composition is unclear. No paid request.',
@@ -497,7 +545,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   },
   {
     name: 'shot.continuity.save',
-    description: `Save the user intent and complete editable STATIC reference-image prompt for an existing confirmed shot selection using its current rowVersion from shot.continuity.read. Use the actual visual inputs and user goal; preserve relevant visible state without inventing invisible geometry. A reference may show the start or a middle moment. Does not edit the shot VIDEO prompt, bind an image, or generate media. The user reviews/edits the saved prompt and fills the ordinary image form from the shot page. Re-read after conflicts; do not silently apply output based on an obsolete selection.\n${SHOT_CAMERA_LIGHTING_REQUIREMENTS}`,
+    description: `Save the user intent and complete editable STATIC reference-image prompt for an existing confirmed shot selection using its current rowVersion from shot.continuity.read. Use the actual visual inputs and user goal; preserve relevant visible state without inventing invisible geometry. A reference may show the start or a middle moment. Does not edit the shot VIDEO prompt, bind an image, or generate media. The user reviews/edits the saved prompt and fills the ordinary image form from the shot page. Re-read after conflicts; do not silently apply output based on an obsolete selection.`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -514,7 +562,7 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'conversation.ask',
     description:
-      'The structured interface whenever you ask the user to choose a direction, answer a clarification, or provide supplemental input. This includes optional next steps after completing a task, such as continuing the next chapter or reviewing the saved chapter, even if expressed in one sentence and not blocking the completed work. Present related questions and choices as one interactive form instead of asking in ordinary assistant text. Keep completion reports and content summaries as normal text; finish without a form when no user choice is needed. Do not repeat the form questions or options in text after creating it. Declare single-choice, multiple-choice, or free-text questions; every question also accepts a custom written answer. No option is selected automatically. Use a stable key to avoid duplicate forms. The user submits answers as their next conversation message, and the ordinary Agent continues the task. Form JSON must be at most 32768 UTF-8 bytes. This tool returns only a receipt, never user answers or permission to execute an unselected next step.',
+      'The structured interface whenever you ask the user to choose a direction, answer a clarification, or provide supplemental input. Declare purpose=clarification only for missing user information; use purpose=next_step for optional work after the current task. Complete all pending outputs and required current-version readback before asking next steps. Present related questions and choices as one interactive form instead of asking in ordinary assistant text. Keep completion reports and content summaries as normal text; finish without a form when no user choice is needed. Do not repeat the form questions or options in text after creating it. Declare single-choice, multiple-choice, or free-text questions; every question also accepts a custom written answer. No option is selected automatically. Use a stable key to avoid duplicate forms. The user submits answers as their next conversation message, and the ordinary Agent continues the task. Form JSON must be at most 32768 UTF-8 bytes. This tool returns only a receipt, never user answers or permission to execute an unselected next step.',
     parameters: AGENT_INPUT_DRAFT_SCHEMA,
   },
   {
@@ -561,13 +609,25 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
   {
     name: 'production.bundle',
     description:
-      'Version 2 script-to-media package controls. Submit ordinary prompt text and the single explicit bindings relationship IR through production.bundle.submit. Call begin once to freeze selected inputs; if a bundle already exists, read state and continue rather than beginning again. Source and candidate text are read on demand, not as commit prerequisites. read_many reads up to 20 explicit candidate keys within a 10000-character/UTF-8 response budget; use these reads only when needed. check validates structure, frozen-source identity, and target versions; it never reviews prompt meaning. complete=true triggers structural validation, atomic draft save with real IDs and independent database readback. saved pages actual IDs. Candidate storage does not mean business records are saved. Voice sampleText is editable audition text, never actual audio. Preserve unaffected candidates and use the exact current revision for writes.',
+      'Version 2 script-to-media package controls. Submit ordinary prompt text and the single explicit bindings relationship IR through production.bundle.submit. Call begin once to freeze selected inputs; for new tasks select each writing stage with operation=purpose, purpose, expectedStageVersion and a stable stageKey before submitting that purpose. The operation only persists stage metadata and leaves candidate revision unchanged. Use general for voice/plan, character-image for character, scene-image for location, prop-image for prop, video-prompt for scene/shot, and optional shot-image for independent static shot text; if a bundle already exists, read state and continue rather than beginning again. Source and candidate text are read on demand, not as commit prerequisites. read_many reads up to 20 explicit candidate keys within a 10000-character/UTF-8 response budget; use these reads only when needed. check validates structure, frozen-source identity, and target versions; it never reviews prompt meaning. complete=true triggers structural validation, atomic draft save with real IDs and independent database readback. saved pages actual IDs. Candidate storage does not mean business records are saved. Voice sampleText is editable audition text, never actual audio. Preserve unaffected candidates and use the exact current revision for writes.',
     parameters: PRODUCTION_BUNDLE_SCHEMA,
+  },
+  {
+    name: 'prompt.generation.request',
+    description:
+      'For source-based prompt generation, select actual current document/version IDs through the project directory or library search, then declare sources, optional reused reference documents, purposes and additional requirements. The Worker loads full bodies and frozen scoped templates, then asks for all complete prompts once. This enters a dedicated prompt authoring phase in the same task and ends after atomic save/readback; include all requested prompt purposes. Does not generate media. Original user requirements are always retained. Queries and explicit edits of saved prompts can use their existing read/CAS tools.',
+    parameters: PROMPT_GENERATION_REQUEST_SCHEMA,
+  },
+  {
+    name: 'prompt.generation.submit',
+    description:
+      'Return the complete requested prompt set once with requestHash, ordinary full prompt strings and explicit binding IR. The Worker owns partitioning, revisions, purpose transitions, validation, atomic draft saving and independent readback. No content IR, prose extraction or media generation. A failed submission saves no business objects; return the complete corrected set on retry.',
+    parameters: PROMPT_GENERATION_SUBMIT_SCHEMA,
   },
   {
     name: 'production.bundle.submit',
     description:
-      'Submit one prompts list of at most 12 {localKey,kind,title,prompt,bindings?,sampleText?,sceneKey?,timing?,existing?} objects per call. Split larger packages into ordered chunks with distinct partKey values and the latest expectedRevision; set complete=true only on the final chunk. kind is character/location/prop/voice/plan for reference documents, scene for story scenes, or shot for shots. location means a location image prompt; shot requires sceneKey pointing to a scene. All bodies are ordinary prompt text. sampleText belongs only to voice; numeric timing only to scene/shot. Do not use documents/scenes/shots or contentMarkdown fields or nested shots. Shot bindings require schemaVersion=1 and characterDocumentIds/sceneDocumentIds/propDocumentIds arrays (use [] when empty); references are {localKey} or {existingId}. Only references are resolved on save. Repairs submit changed complete objects using their stable localKey, new partKey and current expectedRevision. Candidate persistence is not business saving or review approval.',
+      'Submit one prompts list of at most 12 {localKey,kind,title,prompt,bindings?,sampleText?,sceneKey?,timing?,imagePurpose?,intent?,imageRowVersion?,sourceToken?,existing?} objects per call. Split larger packages into ordered chunks with distinct partKey values and the latest expectedRevision; omit complete on every non-final chunk (do not pass false); set complete=true only after all requested purposes, including optional shot-image, have been submitted. If static shot text is requested, keep the video submission unsealed and finalize on the last shot-image submission. kind is character/location/prop/voice/plan for reference documents, scene for story scenes, shot for video shots, or shot-image for optional independent static text on an existing candidate shot localKey. shot-image requires imagePurpose (composition/first-frame/last-frame), intent and its own visual bindings; use imageRowVersion/sourceToken when updating an existing saved image. location means a location image prompt; shot requires sceneKey pointing to a scene. All bodies are ordinary prompt text. sampleText belongs only to voice; numeric timing only to scene/shot. Do not use documents/scenes/shots or contentMarkdown fields or nested shots. Shot bindings require schemaVersion=1 and characterDocumentIds/sceneDocumentIds/propDocumentIds arrays (use [] when empty); references are {localKey} or {existingId}. Only references are resolved on save. Repairs submit changed complete objects using their stable localKey, new partKey and current expectedRevision. Candidate persistence is not business saving or review approval.',
     parameters: PRODUCTION_BUNDLE_SUBMIT_SCHEMA,
   },
   {
@@ -981,7 +1041,12 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
         },
         documentId: { type: 'string', minLength: 1, maxLength: 200 },
         expectedDocumentRowVersion: { type: 'integer', minimum: 0 },
-        baseVersionId: { type: ['string', 'null'], maxLength: 200 },
+        baseVersionId: {
+          type: ['string', 'null'],
+          maxLength: 200,
+          description:
+            'Existing output document CAS only: its current version ID, or null only when that existing document has no version. Omit for a new document; never use a source document version.',
+        },
         bindingRole: {
           type: 'string',
           enum: ['work-outline', 'character-bible', 'world-bible', 'timeline', 'style-guide'],
@@ -1173,7 +1238,11 @@ export const SYSTEM_AGENT_TOOLS: LlmToolDefinition[] = [
             'conversation',
           ],
         },
-        parentId: { type: 'string' },
+        parentId: {
+          type: 'string',
+          description:
+            'Parent resource ID returned by this tool: scene:<id> for shots, document:<id> for structure nodes, workspace:<name> for top-level resources. Must exist in the current visible project.',
+        },
         query: { type: 'string' },
         offset: { type: 'integer', minimum: 0 },
         limit: {
@@ -1868,6 +1937,8 @@ export type RegisteredAgentToolPolicy = {
   executionLane: AgentToolExecutionLane;
 };
 export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
+  'shot.image.read': readPolicy(),
+  'shot.image.save': writePolicy(),
   'shot.continuity.read': readPolicy(),
   'shot.continuity.save': writePolicy(),
   'conversation.ask': writePolicy(),
@@ -1888,6 +1959,8 @@ export const AGENT_TOOL_POLICIES: Record<string, RegisteredAgentToolPolicy> = {
   'production.skill.read': readPolicy(),
   'production.bundle': writePolicy(),
   'production.bundle.submit': writePolicy(),
+  'prompt.generation.request': writePolicy(),
+  'prompt.generation.submit': writePolicy(),
   'media.review.prepare': writePolicy(),
   'media.review.list': readPolicy(),
   'media.review.read': readPolicy(),

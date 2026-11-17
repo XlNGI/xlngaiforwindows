@@ -288,7 +288,7 @@ describe('scene and shot directory', () => {
     expect(screen.queryByLabelText('场次绑定场景')).not.toBeInTheDocument();
   });
 
-  it('edits the selected scene title directly in the directory', async () => {
+  it('edits the selected scene title on double click in the directory', async () => {
     const onRenameScene = vi.fn().mockResolvedValue(undefined);
     render(
       <SceneShotDirectory
@@ -305,6 +305,9 @@ describe('scene and shot directory', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: scene.title }));
+    expect(screen.queryByRole('textbox', { name: '场次标题' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: scene.title }), { detail: 2 });
+    fireEvent.doubleClick(screen.getByRole('button', { name: scene.title }));
     const input = screen.getByRole('textbox', { name: '场次标题' });
     fireEvent.change(input, { target: { value: '第一场（修改）' } });
     fireEvent.keyDown(input, { key: 'Enter' });
@@ -312,7 +315,7 @@ describe('scene and shot directory', () => {
     await waitFor(() => expect(onRenameScene).toHaveBeenCalledWith(scene, '第一场（修改）'));
   });
 
-  it('edits the selected shot title directly in the directory', async () => {
+  it('edits the selected shot title on double click in the directory', async () => {
     const onRenameShot = vi.fn().mockResolvedValue(undefined);
     render(
       <SceneShotDirectory
@@ -330,6 +333,8 @@ describe('scene and shot directory', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: shot.title }));
+    expect(screen.queryByRole('textbox', { name: '镜头标题' })).not.toBeInTheDocument();
+    fireEvent.doubleClick(screen.getByRole('button', { name: shot.title }));
     const input = screen.getByRole('textbox', { name: '镜头标题' });
     fireEvent.change(input, { target: { value: '第一场近景（修改）' } });
     fireEvent.keyDown(input, { key: 'Enter' });

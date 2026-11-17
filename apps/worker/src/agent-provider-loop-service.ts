@@ -332,14 +332,23 @@ export class AgentProviderLoopService {
         const reads =
           params.finishReason === 'tool_calls'
             ? (database
-                .prepare('SELECT tool_name FROM agent_tool_calls WHERE provider_step_id=?')
+                .prepare(
+                  `SELECT c.tool_name,(SELECT r.arguments_json FROM agent_context_results r
+                   WHERE r.project_id=c.project_id AND r.task_id=c.task_id
+                     AND r.call_id=c.provider_call_id AND r.tool_name=c.tool_name
+                   ORDER BY r.version DESC LIMIT 1) AS arguments_json
+                   FROM agent_tool_calls c WHERE c.provider_step_id=?`,
+                )
                 .all(step.id) as Array<{
                 tool_name: string;
+                arguments_json: string | null;
               }>)
             : [];
         if (
           reads.some(
-            (call) => unifiedAgentToolRegistry.executionMode(call.tool_name) !== 'parallel',
+            (call) =>
+              unifiedAgentToolRegistry.executionMode(call.tool_name, call.arguments_json) !==
+              'parallel',
           )
         )
           throw new Error(
@@ -390,6 +399,7 @@ export class AgentProviderLoopService {
       sources: ProductionBundleSource[];
       requestedAt?: string;
     },
+    managedPromptGeneration = false,
   ): PreparedAgentLoop {
     return this.projects.access(true, (database, project) =>
       database.transaction(() => {
@@ -610,6 +620,7 @@ export class AgentProviderLoopService {
                     productionRequestedAt: productionBundle.requestedAt,
                     productionBundleLimits: PRODUCTION_BUNDLE_LIMITS,
                     productionSkillRevision: PRODUCTION_BUNDLE_SKILL_REVISION,
+                    ...(managedPromptGeneration ? { promptGenerationVersion: 1 } : {}),
                   }
                 : {}),
               modelSelection: agentModelSelectionSnapshot(
@@ -858,7 +869,7 @@ export class AgentProviderLoopService {
     if (params.calls.every((call) => isSystemOperation(call.name))) {
       const execution = this.executeSystemTools(params);
       for (const call of params.calls) {
-        if (call.name !== 'shot.continuity.read') continue;
+        if (call.name !== 'shot.continuity.read' && call.name !== 'shot.image.read') continue;
         if (
           (
             JSON.parse(call.argumentsJson) as {
@@ -873,15 +884,22 @@ export class AgentProviderLoopService {
           shotId?: string;
           rowVersion?: number;
           stale?: boolean;
+          sourceStale?: boolean;
           binding?: unknown;
           sourceToken: string;
         };
-        if (result.shotId && result.rowVersion !== undefined && result.binding && !result.stale) {
+        if (
+          result.shotId &&
+          result.rowVersion !== undefined &&
+          (result.binding || call.name === 'shot.image.read') &&
+          !(call.name === 'shot.image.read' ? result.sourceStale : result.stale)
+        ) {
           output.images = await this.systemTools!.readContinuityImages(
             result.shotId,
             result.rowVersion,
             params,
             result.sourceToken,
+            call.name === 'shot.image.read',
           );
           if (
             execution.continuation!.outputs.reduce(
@@ -1791,7 +1809,8 @@ export class AgentProviderLoopService {
     if (
       params.calls.length > 1 &&
       params.calls.some(
-        (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'sequential',
+        (call) =>
+          unifiedAgentToolRegistry.executionMode(call.name, call.argumentsJson) === 'sequential',
       )
     ) {
       throw new AgentToolPolicyError(
@@ -2168,7 +2187,8 @@ export class AgentProviderLoopService {
           );
         }
         const readonlySystemStep = params.calls.every(
-          (call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel',
+          (call) =>
+            unifiedAgentToolRegistry.executionMode(call.name, call.argumentsJson) === 'parallel',
         );
         if (pauseForUserInput) {
           // A pending durable form is a user-review boundary. End the current
@@ -3990,6 +4010,31 @@ export class AgentProviderLoopService {
     this.projects.access(true, (database, project) =>
       database.transaction(() => {
         const task = this.requireTask(database, project.id, identity.generationId);
+        const frozen = JSON.parse(task.request_snapshot_json) as Record<string, unknown>;
+        if (frozen.promptGenerationVersion !== 1) {
+          const rejectedRequests = database
+            .prepare(
+              `SELECT COUNT(*) n FROM (
+            SELECT call_id FROM agent_context_results WHERE project_id=? AND task_id=? AND tool_name='prompt.generation.request' AND status='failed'
+            UNION SELECT provider_call_id FROM agent_tool_calls WHERE project_id=? AND task_id=? AND tool_name='prompt.generation.request' AND status='failed'
+          )`,
+            )
+            .get(project.id, task.id, project.id, task.id) as { n: number };
+          if (rejectedRequests.n >= 3)
+            throw new Error(
+              'PROMPT_GENERATION_REQUEST_LIMIT: three source/schema preparation attempts failed. No prompt generation was completed.',
+            );
+        }
+        if (frozen.promptGenerationVersion === 1) {
+          const attempts = Number(frozen.promptGenerationAttempts ?? 0);
+          if (attempts >= 3)
+            throw new Error(
+              'PROMPT_GENERATION_ATTEMPT_LIMIT: three authoring attempts failed to complete. No further model request was sent; inspect the reported structural or capacity error.',
+            );
+          database
+            .prepare('UPDATE agent_tasks SET request_snapshot_json=? WHERE id=?')
+            .run(JSON.stringify({ ...frozen, promptGenerationAttempts: attempts + 1 }), task.id);
+        }
         const now = new Date().toISOString();
         const reserved = database
           .prepare(
@@ -4314,8 +4359,8 @@ export class AgentProviderLoopService {
           .prepare(
             `UPDATE agent_tasks SET status = 'completed', outcome = CASE WHEN EXISTS (
                SELECT 1 FROM agent_tool_calls WHERE task_id = ? AND status = 'succeeded'
-                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.chapter.update_metadata', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'scene.update_shot_timings', 'scene.update_shot_prompts', 'production.bundle')
-                 AND (tool_name!='production.bundle' OR json_extract(result_summary_json,'$.businessSaved')=1)
+                 AND tool_name IN ('document.submit_draft', 'novel.chapter.write_draft', 'novel.chapter.update_metadata', 'novel.episode.submit_structure', 'scene.submit_structure', 'scene.structure.stage', 'scene.update_shot_timings', 'scene.update_shot_prompts', 'production.bundle', 'production.bundle.submit', 'prompt.generation.submit')
+                 AND (tool_name NOT IN ('production.bundle','production.bundle.submit','prompt.generation.submit') OR json_extract(result_summary_json,'$.businessSaved')=1)
                  AND (tool_name NOT IN ('scene.submit_structure', 'scene.structure.stage') OR json_extract(result_summary_json,'$.status')='scene_structure_saved')
              ) THEN NULL ELSE 'read-only' END, completion_state = ?, error_message = ?,
              completed_at = ?, updated_at = ?, row_version = row_version + 1
@@ -4614,7 +4659,8 @@ export class AgentProviderLoopService {
         TOOL_SCHEMA_VERSION,
         hash(handle),
         authorization.maxCallUses ??
-          (unifiedAgentToolRegistry.executionMode(authorization.operation) === 'parallel' &&
+          ((unifiedAgentToolRegistry.executionMode(authorization.operation) === 'parallel' ||
+            authorization.operation === 'conversation.task.checkpoint') &&
           isSystemOperation(authorization.operation)
             ? 8
             : isLibraryOperation(authorization.operation)
@@ -5603,6 +5649,10 @@ function authorizationSpecsForTask(
     ? (JSON.parse(snapshotRow.request_snapshot_json) as Record<string, unknown>)
     : {};
   const bundleOnly = requestSnapshot.productionSkillId === 'script-to-media';
+  if (requestSnapshot.promptGenerationVersion === 1)
+    return includeSystemTools && includeSystemTools.includes('prompt.generation.submit')
+      ? [{ operation: 'prompt.generation.submit' }]
+      : [];
   const productionDraftOnly = requestSnapshot.productionSkillId === 'script-to-media';
   const availableSystemTools = includeSystemTools
     ? includeSystemTools.filter(
@@ -5617,11 +5667,15 @@ function authorizationSpecsForTask(
     ...(bundleOnly ? [] : [primary]),
     ...availableSystemTools
       .filter((operation) =>
-        operation === 'production.bundle.submit'
-          ? bundleOnly
-          : !bundleOnly ||
-            unifiedAgentToolRegistry.require(operation).executionLane === 'parallel-readonly' ||
-            ['production.bundle', 'conversation.task.checkpoint'].includes(operation),
+        operation === 'prompt.generation.submit'
+          ? false
+          : operation === 'prompt.generation.request'
+            ? !bundleOnly && requestSnapshot.agentMode === 'document'
+            : operation === 'production.bundle.submit' || operation === 'production.bundle'
+              ? bundleOnly
+              : !bundleOnly ||
+                unifiedAgentToolRegistry.require(operation).executionLane === 'parallel-readonly' ||
+                ['production.bundle', 'conversation.task.checkpoint'].includes(operation),
       )
       .filter(
         (operation) =>

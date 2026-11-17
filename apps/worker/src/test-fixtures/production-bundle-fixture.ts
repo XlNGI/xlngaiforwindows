@@ -16,6 +16,7 @@ import {
 import { stageBundle } from '../production-bundle-state.js';
 export async function productionBundleFixture(
   protocol: 'openai-responses' | 'openai-chat-completions' = 'openai-responses',
+  contractRevision = 33, // Existing persistence tests also cover frozen historical packages.
 ) {
   const root = await mkdtemp(join(tmpdir(), 'production-bundle-'));
   const project = new ProjectService({ recentProjectsPath: join(root, 'recent.json') });
@@ -90,6 +91,17 @@ export async function productionBundleFixture(
       requestedAt: new Date(Date.now() - 5000).toISOString(),
     },
   );
+  project.access(true, (db) => {
+    const row = db
+      .prepare('SELECT request_snapshot_json FROM agent_tasks WHERE id=?')
+      .get(task.taskId) as { request_snapshot_json: string };
+    const frozen = JSON.parse(row.request_snapshot_json) as Record<string, unknown>;
+    frozen.productionSkillRevision = contractRevision;
+    db.prepare('UPDATE agent_tasks SET request_snapshot_json=? WHERE id=?').run(
+      JSON.stringify(frozen),
+      task.taskId,
+    );
+  });
   const identity = { ...prepared.stream, taskId: task.taskId, toolCallId: crypto.randomUUID() };
   project.access(true, (db, p) => {
     new AgentContextStore(db).saveTask(p.id, prepared.stream.generationId, conversation.id, {

@@ -134,6 +134,72 @@ const order = (container: HTMLElement) =>
 
 const expandProcess = () => fireEvent.click(screen.getByRole('button', { name: /^用时 / }));
 
+it.each([false, true])(
+  'keeps retry progress on its own reply when both replies share one user message, boundaries=%s',
+  (boundaries) => {
+    vi.mocked(callWorker).mockResolvedValue([] as never);
+    const error = 'Provider HTTP 500: original request failed';
+    const failedReply = {
+      ...assistant,
+      replyToMessageId: user.id,
+      status: 'failed' as const,
+      content: error,
+    };
+    const retryReply = {
+      ...assistant,
+      id: 'retry-reply',
+      replyToMessageId: user.id,
+      content: '重试已完成。',
+      createdAt: at(4),
+    };
+    const original = {
+      ...detail,
+      assistantMessageIds: [failedReply.id],
+      task: { ...detail.task, status: 'failed' as const, errorMessage: error, updatedAt: at(3) },
+      events: [],
+    };
+    const retry = {
+      ...detail,
+      assistantMessageIds: [retryReply.id],
+      task: { ...detail.task, id: 'retry-task' },
+      events: [
+        { eventType: 'agent.tool.started', summary: '正在调用工具：library.search' },
+        { eventType: 'agent.tool.succeeded', summary: '已完成资料检索。' },
+        ...(boundaries
+          ? [
+              {
+                eventType: 'agent.assistant.started',
+                summary: '阶段回复',
+                messageBoundary: { messageId: retryReply.id, startOffset: 0 },
+              },
+            ]
+          : []),
+      ].map((event, sequence) => ({
+        ...event,
+        id: `retry-event-${sequence}`,
+        taskId: 'retry-task',
+        sequence,
+        level: 'info' as const,
+        createdAt: at(sequence + 5),
+      })),
+    };
+    render(
+      <ChatPanel
+        {...props()}
+        messages={[user, failedReply, retryReply]}
+        agentTasks={[original, retry]}
+      />,
+    );
+    for (const button of screen.queryAllByRole('button', { name: /^用时 / }))
+      fireEvent.click(button);
+    for (const button of screen.getAllByRole('button', { name: /^(已调用 .* 个工具|调用了工具)$/ }))
+      if (button.getAttribute('aria-expanded') === 'false') fireEvent.click(button);
+    expect(screen.getAllByText('检索项目资料')).toHaveLength(1);
+    expect(screen.getAllByText(/模型服务暂时异常（HTTP 500）/)).toHaveLength(1);
+    expect(screen.getAllByText(error)).toHaveLength(1);
+  },
+);
+
 it('shows automatic recovery before expanding details and keeps the task running', () => {
   vi.mocked(callWorker).mockResolvedValue([] as never);
   const task = {

@@ -1098,6 +1098,37 @@ function openAiImagesAdapters(): AdapterDescriptor[] {
   });
 }
 
+function openAiImageEditAdapters(): AdapterDescriptor[] {
+  return openAiImagesAdapters().map((generation) => {
+    const schema = structuredClone(generation.parameterSchema);
+    delete schema.properties.style;
+    schema.required = ['prompt', 'images'];
+    schema.properties.images = {
+      type: 'array',
+      title: '参考图片',
+      description: '按顺序提供 1–16 张 PNG、JPEG 或 WebP 参考图；总大小受上传限制。',
+      minItems: 1,
+      maxItems: 16,
+      items: { type: 'string', format: 'uri', pattern: '^(https://|data:image/|project-asset://)' },
+    };
+    return {
+      ...generation,
+      key: generation.key.replace('TEXT_TO_IMAGE:', 'REFERENCE_TO_IMAGE:'),
+      capability: 'REFERENCE_TO_IMAGE',
+      capabilityLabel: '参考生图',
+      endpoint: 'https://api.openai.com/v1/images/edits',
+      documentationUrl: 'https://developers.openai.com/api/reference/resources/images/methods/edit',
+      parameterSchema: schema,
+      uiSchema: {
+        fields: [
+          ...generation.uiSchema.fields.filter((field) => field.key !== 'style'),
+          { key: 'images', control: 'url-list', group: 'basic', order: 15 },
+        ],
+      },
+    };
+  });
+}
+
 function openAiCompatibleVideoAdapters(): AdapterDescriptor[] {
   return (['TEXT_TO_VIDEO', 'IMAGE_TO_VIDEO'] as const).map((capability) => ({
     key: `${capability}:custom:openai-compatible-video:v1`,
@@ -1510,6 +1541,7 @@ const catalogAdapters = [
   ...speechAdapters,
   ...adapters,
   ...openAiImagesAdapters(),
+  ...openAiImageEditAdapters(),
   ...openAiCompatibleVideoAdapters(),
   ...unicompAdapters,
   ...contractAdapters,

@@ -27,6 +27,7 @@ const TOOLS = [
   'novel.episode.submit_structure',
   'scene.structure.stage',
   'shot.continuity.save',
+  'shot.image.save',
   'production.bundle',
 ];
 const FIELDS = [

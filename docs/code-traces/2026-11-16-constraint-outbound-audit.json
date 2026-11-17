@@ -1,0 +1,222 @@
+{
+  "generatedAt": "2026-11-16T12:44:12.046Z",
+  "conclusion": "Applicable constraints were complete in all four captured Worker requests and actual Native HTTP POST bodies received by a loopback listener. This is a new transport verification, not recovery of the historical provider request bodies.",
+  "methodology": {
+    "workerSha256": "c6e8366ceb26409528fdfbee980015828ea607b526096cef6907f86937e7da7f",
+    "worker": "same frozen installed executable as the real run",
+    "templateSource": "original real-run frozen template fixture",
+    "native": "same temporary Native source checkout used for the real run, with an added test only",
+    "protocol": "openai-chat-completions",
+    "phases": [
+      "initial",
+      "after production.skill.read",
+      "after production.bundle begin",
+      "after production.bundle source"
+    ],
+    "modelReplies": "scripted tool calls only",
+    "http": "real WinHTTP POST to 127.0.0.1, dummy local credential and scripted SSE response",
+    "realProviderCalls": 0,
+    "originalProjectWritten": false,
+    "productCodeChanged": false
+  },
+  "constraints": [
+    {
+      "kind": "general",
+      "characters": 166,
+      "sha256": "0602db90d11f2ae100d8b9fca7fa0b4e1381f96c16ecb68155ab5386b9568367",
+      "included": true,
+      "location": "messages[].role=user; prefix before the current request"
+    },
+    {
+      "kind": "character-image",
+      "characters": 881,
+      "sha256": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905",
+      "included": true,
+      "location": "taskState.userRequirements[].text in a user message"
+    },
+    {
+      "kind": "prop-image",
+      "characters": 82,
+      "sha256": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0",
+      "included": true,
+      "location": "taskState.userRequirements[].text in a user message"
+    },
+    {
+      "kind": "scene-image",
+      "characters": 368,
+      "sha256": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187",
+      "included": true,
+      "location": "taskState.userRequirements[].text in a user message"
+    },
+    {
+      "kind": "shot-image",
+      "characters": 680,
+      "sha256": "8737f51c710a5d686a3e61895998740824235007272a9f3594d7f24602936b43",
+      "included": false,
+      "location": "not applicable to this bundle workflow"
+    },
+    {
+      "kind": "video-prompt",
+      "characters": 3487,
+      "sha256": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051",
+      "included": true,
+      "location": "taskState.userRequirements[].text in a user message"
+    }
+  ],
+  "applicableConstraintCharacters": 4984,
+  "nativeHttp": {
+    "method": "actual Native WinHTTP POST to a loopback listener, dummy local key, scripted SSE response",
+    "providerCalls": 0,
+    "requests": [
+      {
+        "generalComplete": true,
+        "label": "initial",
+        "nativeHashMatchesReceived": true,
+        "requestBodyBytes": 51004,
+        "requestBodySha256": "4158653ecf4715fe4933682d1ec8b443f9aba4513178b9c04bc6008d44d8a662",
+        "scopedTemplates": [
+          {
+            "characters": 881,
+            "complete": true,
+            "kind": "character-image",
+            "sha256": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905"
+          },
+          {
+            "characters": 368,
+            "complete": true,
+            "kind": "scene-image",
+            "sha256": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187"
+          },
+          {
+            "characters": 82,
+            "complete": true,
+            "kind": "prop-image",
+            "sha256": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0"
+          },
+          {
+            "characters": 3487,
+            "complete": true,
+            "kind": "video-prompt",
+            "sha256": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051"
+          }
+        ],
+        "shotImageOmitted": true
+      },
+      {
+        "generalComplete": true,
+        "label": "after production.skill.read ",
+        "nativeHashMatchesReceived": true,
+        "requestBodyBytes": 58568,
+        "requestBodySha256": "728b2d2c1983767f52c52d8f15c9cfefbc065ad93413e5f50addbd57ff23ed42",
+        "scopedTemplates": [
+          {
+            "characters": 881,
+            "complete": true,
+            "kind": "character-image",
+            "sha256": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905"
+          },
+          {
+            "characters": 368,
+            "complete": true,
+            "kind": "scene-image",
+            "sha256": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187"
+          },
+          {
+            "characters": 82,
+            "complete": true,
+            "kind": "prop-image",
+            "sha256": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0"
+          },
+          {
+            "characters": 3487,
+            "complete": true,
+            "kind": "video-prompt",
+            "sha256": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051"
+          }
+        ],
+        "shotImageOmitted": true
+      },
+      {
+        "generalComplete": true,
+        "label": "after production.bundle begin",
+        "nativeHashMatchesReceived": true,
+        "requestBodyBytes": 61213,
+        "requestBodySha256": "52ec291eb9c5a14a34c72572d25ab1567c8200c7064ef889ccacb839d439c4d8",
+        "scopedTemplates": [
+          {
+            "characters": 881,
+            "complete": true,
+            "kind": "character-image",
+            "sha256": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905"
+          },
+          {
+            "characters": 368,
+            "complete": true,
+            "kind": "scene-image",
+            "sha256": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187"
+          },
+          {
+            "characters": 82,
+            "complete": true,
+            "kind": "prop-image",
+            "sha256": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0"
+          },
+          {
+            "characters": 3487,
+            "complete": true,
+            "kind": "video-prompt",
+            "sha256": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051"
+          }
+        ],
+        "shotImageOmitted": true
+      },
+      {
+        "generalComplete": true,
+        "label": "after production.bundle source",
+        "nativeHashMatchesReceived": true,
+        "requestBodyBytes": 72285,
+        "requestBodySha256": "eeaeb605eff0a3c163a80d2aa2242f41aeb141d39fbc69da155719eeff0cae7e",
+        "scopedTemplates": [
+          {
+            "characters": 881,
+            "complete": true,
+            "kind": "character-image",
+            "sha256": "c4d155c119a633c14bb41ac482448a4a21520fa22a7f8996572f25e68a7d3905"
+          },
+          {
+            "characters": 368,
+            "complete": true,
+            "kind": "scene-image",
+            "sha256": "ca12a514fb8c81d3138da4efa5ac6aabc501cd5c993c326a8c8e622175ae2187"
+          },
+          {
+            "characters": 82,
+            "complete": true,
+            "kind": "prop-image",
+            "sha256": "7ffe1989fed36e5745384e784166fd2d068e51128db8891ed5000b9eda89f6b0"
+          },
+          {
+            "characters": 3487,
+            "complete": true,
+            "kind": "video-prompt",
+            "sha256": "1a55efe27f45be52c27e0d769026510aab3458b59270b388bd592a9aac61a051"
+          }
+        ],
+        "shotImageOmitted": true
+      }
+    ]
+  },
+  "rawEvidenceRoot": "C:\\Users\\MSI\\AppData\\Local\\Temp\\p22-prompt-live-20261116-1794831058193\\constraints-wire-offline-1794832863411",
+  "evidenceLimits": [
+    "Historical eight real-provider HTTP bodies were not saved. Their hashes and byte counts cannot reconstruct or individually prove their original constraint text.",
+    "Offline capture uses a new conversation/project and scripted model replies. Source text and constraints are retained; source IDs, provider identities, timings and task states differ from the real run.",
+    "Full textual transmission does not establish model compliance. Constraints are prompt text, not enforcement by the provider JSON schema."
+  ],
+  "verification": {
+    "nativeTest": "llm_stream::constraints_wire_capture_20261116::captured_worker_constraints_survive_actual_local_http",
+    "passed": 1,
+    "failed": 0,
+    "httpBodies": 4,
+    "exitCode": 0
+  }
+}

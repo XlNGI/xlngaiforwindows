@@ -54,6 +54,7 @@ export function projectTaskStateResult(
   result: StoredToolResult,
   currentPrompt: string,
   currentPending?: unknown[],
+  projectManagedTemplates = false,
 ): string {
   if (
     result.status === 'failed' ||
@@ -80,12 +81,40 @@ export function projectTaskStateResult(
     typeof text === 'string' && text.length > 0 && currentPrompt.includes(text)
       ? { alreadyIncluded: 'current_user_request', contentHash: contextContentHash(text) }
       : undefined;
-  const goalReference = reference(value.taskGoal);
+  const goalReference =
+    projectManagedTemplates && typeof value.taskGoal === 'string'
+      ? { archivedTaskGoal: true, contentHash: contextContentHash(value.taskGoal) }
+      : reference(value.taskGoal);
   const records = Array.isArray(value.records)
     ? value.records.map((item: unknown) => {
         if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
         const record = item as Record<string, unknown>;
+        if (
+          projectManagedTemplates &&
+          record.kind === 'decision' &&
+          String(record.source).startsWith('prompt-template:')
+        ) {
+          const { text, ...metadata } = record;
+          return {
+            ...metadata,
+            templateLocation: 'active_user_requirements',
+            contentHash: typeof text === 'string' ? contextContentHash(text) : undefined,
+          };
+        }
         if (record.kind !== 'userRequirement') return record;
+        if (
+          projectManagedTemplates &&
+          (String(record.id).startsWith('prompt-template:') ||
+            String(record.sourceKey).includes(':prompt-template:') ||
+            record.id === 'session-constraints')
+        ) {
+          const { text, ...metadata } = record;
+          return {
+            ...metadata,
+            templateLocation: 'active_user_requirements',
+            contentHash: typeof text === 'string' ? contextContentHash(text) : undefined,
+          };
+        }
         const included = reference(record.text);
         if (!included) return record;
         const metadata = { ...record };
@@ -318,6 +347,12 @@ export function modelResultReceipt(result: StoredToolResult, maxInlineCharacters
       projectId: map.projectId,
       projectName: map.projectName,
       revision: map.revision,
+      ...(map.filters ? { filters: map.filters } : {}),
+      ...Object.fromEntries(
+        ['offset', 'limit', 'totalResources', 'nextOffset', 'truncated']
+          .filter((key) => map[key] !== undefined)
+          .map((key) => [key, map[key]]),
+      ),
       resources,
     };
   }

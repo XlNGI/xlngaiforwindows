@@ -24,7 +24,7 @@ export function prepareAgentGeneration(
     prepared = services.generations.prepare(params, 'agent');
     const agent = services.loop.prepare(
       prepared.stream,
-      params.prompt,
+      services.generations.runtime(prepared.stream).prompt,
       params.title,
       novelTask?.documentIntent ?? params.documentIntent ?? { operation: 'document.list' },
       params.researchMode,
@@ -40,6 +40,7 @@ export function prepareAgentGeneration(
             requestedAt: params.productionRequestedAt,
           }
         : undefined,
+      params.productionSkillId === 'script-to-media',
     );
     services.generations.configureAgentTools(prepared.stream, agent.tools);
     return { ...prepared, agentTaskId: agent.taskId };

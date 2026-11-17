@@ -65,6 +65,7 @@ export interface DetachedConversationSnapshot {
   messages: ChatMessageInfo[];
   composer: string;
   promptTemplate?: string;
+  promptTemplateKind?: import('@ai-video/contracts').PromptTemplateKind;
   promptTemplateBusy?: boolean;
   promptTemplateLoading?: boolean;
   promptTemplateError?: string;
@@ -107,7 +108,17 @@ export type DetachedPanelAction =
   | { panelId: 'conversation'; type: 'conversation-research-mode'; mode: AgentResearchMode }
   | { panelId: 'conversation'; type: 'conversation-open-settings' }
   | { panelId: 'conversation'; type: 'conversation-composer'; value: string }
-  | { panelId: 'conversation'; type: 'conversation-prompt-template'; value: string }
+  | {
+      panelId: 'conversation';
+      type: 'conversation-prompt-template';
+      value: string;
+      kind?: import('@ai-video/contracts').PromptTemplateKind;
+    }
+  | {
+      panelId: 'conversation';
+      type: 'conversation-prompt-template-kind';
+      kind: import('@ai-video/contracts').PromptTemplateKind;
+    }
   | { panelId: 'conversation'; type: 'conversation-prompt-template-save' }
   | { panelId: 'conversation'; type: 'conversation-prompt-template-reload' }
   | { panelId: 'conversation'; type: 'conversation-cancel' }

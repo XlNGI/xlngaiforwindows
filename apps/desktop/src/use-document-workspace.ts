@@ -198,36 +198,49 @@ export function useDocumentWorkspace({
       if (requestId === documentRequest.current) setContentBusy(false);
     }
   };
-  const newDocument = () => {
+  const newDocument = (kind: DocumentKind = 'outline') => {
+    if (!writable || contentBusy) return false;
     if (characterVoicePrompt.dirty) {
       setContentMessage('请先保存音色提示词，或关闭页面并放弃修改，再新建文档。');
       return false;
     }
+    if (mainDocumentDirty) {
+      setContentMessage('请先保存当前文档，或关闭页面并放弃修改，再新建文档。');
+      return false;
+    }
     documentRequest.current += 1;
     setDocument(undefined);
-    setDocumentTitle('');
-    setDocumentKind('note');
+    setDocumentTitle('未命名文档');
+    setDocumentKind(kind);
     setDocumentContent('');
     setDocumentBindings(undefined);
     setDocumentSampleText('');
     setVersions([]);
+    setContentMessage('');
     syncDetachedPanel();
-    openDocumentWorkspace();
+    openDocumentWorkspace(kind);
     return true;
   };
-  const importMarkdownDocument = async () => {
-    const selected = await openDialog({
-      directory: false,
-      multiple: false,
-      title: '导入 Markdown 文档',
-      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-    });
-    if (typeof selected !== 'string') return;
+  const importMarkdownDocument = async (kind: DocumentKind = 'outline') => {
+    if (!writable || contentBusy) return;
+    if (documentDirty) {
+      setContentMessage('请先保存当前文档，或关闭页面并放弃修改，再导入剧本。');
+      return;
+    }
     setContentBusy(true);
     setContentMessage('');
     try {
+      const selected = await openDialog({
+        directory: false,
+        multiple: false,
+        title: '导入剧本',
+        filters: [{ name: '剧本文档（TXT / Markdown）', extensions: ['txt', 'md', 'markdown'] }],
+      });
+      if (typeof selected !== 'string' || !isCurrentWorkerScope(scope)) return;
       const imported = await readMarkdownDocument(selected);
+      if (!isCurrentWorkerScope(scope)) return;
       const saved = await callWorker('document.draft.save', {
+        kind,
         title: imported.title,
         contentMarkdown: imported.contentMarkdown,
         authorType: 'import',
@@ -235,7 +248,7 @@ export function useDocumentWorkspace({
       await applyDocument(saved, true);
       setContentMessage(`已导入为草稿 ${imported.title} · 版本 v${saved.currentVersion?.version}`);
     } catch (reason) {
-      setContentMessage(reason instanceof Error ? reason.message : 'Markdown 导入失败');
+      setContentMessage(reason instanceof Error ? reason.message : '剧本导入失败');
     } finally {
       setContentBusy(false);
     }

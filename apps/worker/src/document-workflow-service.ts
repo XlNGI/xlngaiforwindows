@@ -39,13 +39,14 @@ import type {
   TaskLogPage,
   TaskLogListParams,
 } from '@ai-video/contracts';
-import { validatePromptBindings, type PromptBindingIR } from '@ai-video/contracts';
+import { isPromptPurpose, validatePromptBindings, type PromptBindingIR } from '@ai-video/contracts';
 import type {
   DocumentWorkflowAuditAction,
   DocumentWorkflowAuditActorType,
   OpenProject,
 } from '@ai-video/domain';
 import {
+  AgentContextStore,
   createRepositories,
   DubbingRepository,
   rebuildLibraryChunksForDocument,
@@ -58,7 +59,7 @@ import { scriptToMediaCompletionPending } from './production-skill-validation.js
 import type { TaskReviewState } from './agent-task-review.js';
 import { deliveryFeedback } from './agent-delivery-feedback.js';
 import { bundleSavedObjects } from './production-bundle-service.js';
-import { isBundleTask } from './production-bundle-state.js';
+import { isBundleTask, loadBundle } from './production-bundle-state.js';
 import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 const LOCAL_USER = 'local-user';
 const MAX_DOCUMENT_LENGTH = 1000000;
@@ -1993,23 +1994,63 @@ export class DocumentWorkflowService {
           // Malformed tool summaries are ignored; the task log retains the raw audit record.
         }
       }
-      const generation = database
+      const generations = database
         .prepare(
-          'SELECT generation_id FROM agent_task_generations WHERE task_id=? ORDER BY ordinal DESC LIMIT 1',
+          `SELECT links.generation_id,generations.assistant_message_id
+           FROM agent_task_generations links
+           JOIN llm_generations generations ON generations.id=links.generation_id
+           WHERE links.task_id=? AND generations.project_id=? ORDER BY links.ordinal DESC`,
         )
-        .get(task.id) as
-        | {
-            generation_id: string;
-          }
-        | undefined;
+        .all(task.id, project.id) as Array<{
+        generation_id: string;
+        assistant_message_id: string;
+      }>;
+      const generation = generations[0];
       const checks = generation
         ? scriptToMediaCompletionPending(database, project.id, generation.generation_id, task.id)
         : undefined;
       const review = checks?.[0]?.semanticReview as TaskReviewState | undefined;
+      const contextStore = new AgentContextStore(database);
+      const savedContext = contextStore.loadTask(project.id, task.id);
+      const savedRuntime = contextStore.loadRuntime<{
+        runtime: import('@ai-video/contracts').LlmGenerationRuntimeRequest;
+      }>(project.id, task.id)?.runtime;
+      const template = savedRuntime?.promptTemplateSnapshot;
+      const bundleStage = isBundleTask(database, task.id)
+        ? (() => {
+            try {
+              return loadBundle(database, project.id, task.id)?.stage;
+            } catch {
+              return undefined;
+            }
+          })()
+        : undefined;
+      const workflow =
+        bundleStage?.purpose ??
+        savedContext?.recoveryState?.workflow ??
+        savedRuntime?.promptWorkflow;
+      const purpose = isPromptPurpose(workflow) ? workflow : undefined;
+      const promptAuthoring = template
+        ? {
+            purpose,
+            stageVersion: bundleStage?.version,
+            templateVersion: template.rowVersion,
+            generalApplied: template.policyVersion !== 2 && template.content.length > 0,
+            scopedApplied: !!(
+              purpose &&
+              purpose !== 'general' &&
+              template.templates?.[purpose]?.length
+            ),
+          }
+        : undefined;
       const deliveryReview = deliveryFeedback(database, project.id, task.id, documents, review);
       return {
         task: toTask(task),
+        ...(generations.length
+          ? { assistantMessageIds: generations.map((item) => item.assistant_message_id) }
+          : {}),
         deliveryReview,
+        ...(promptAuthoring ? { promptAuthoring } : {}),
         resourceChanges: database
           .prepare(
             `SELECT COALESCE(MAX(sequence),0) AS sequence,
@@ -2022,7 +2063,7 @@ export class DocumentWorkflowService {
         ...(database
           .prepare(
             `SELECT 1 FROM agent_tool_calls WHERE task_id=? AND project_id=?
-             AND tool_name IN ('novel.episode.submit_structure','scene.submit_structure','scene.structure.stage','scene.update_shot_prompts','scene.update_shot_timings','shot.continuity.save')
+             AND tool_name IN ('novel.episode.submit_structure','scene.submit_structure','scene.structure.stage','scene.update_shot_prompts','scene.update_shot_timings','shot.continuity.save','shot.image.save')
              AND status='succeeded' LIMIT 1`,
           )
           .get(task.id, project.id)

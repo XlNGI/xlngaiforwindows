@@ -43,9 +43,18 @@ export interface ProductionBundleScene {
   bindings?: PromptBindingIR<ProductionBundleRef>;
   existing?: ProductionBundleTarget;
 }
+export interface ProductionBundleShotImage {
+  prompt: string;
+  purpose: 'composition' | 'first-frame' | 'last-frame';
+  intent: string;
+  bindings: PromptBindingIR<ProductionBundleRef>;
+  expectedRowVersion?: number;
+  sourceToken?: string;
+}
 export interface ProductionBundleShot {
   localKey: string;
   sceneKey: string;
+  image?: ProductionBundleShotImage;
   title: string;
   prompt: string;
   timing?: ProductionTiming;
@@ -76,8 +85,11 @@ export function validateProductionRequestedAt(value: unknown): string | undefine
 export function productionWorkflowVersion(snapshot: {
   productionSkillId?: unknown;
   productionWorkflowVersion?: unknown;
+  promptGenerationVersion?: unknown;
 }): 1 | 2 {
-  return snapshot.productionSkillId === 'script-to-media' ? 2 : 1;
+  return snapshot.productionSkillId === 'script-to-media' || snapshot.promptGenerationVersion === 1
+    ? 2
+    : 1;
 }
 const object = (value: unknown, keys: string[], label: string): Record<string, unknown> => {
   if (
@@ -136,7 +148,7 @@ export function validateProductionBundlePart(value: unknown): ProductionBundlePa
                 'timing',
                 'bindings',
                 'existing',
-                ...(collection === 'shots' ? ['sceneKey'] : []),
+                ...(collection === 'shots' ? ['sceneKey', 'image'] : []),
               ],
           location,
         );
@@ -175,6 +187,37 @@ export function validateProductionBundlePart(value: unknown): ProductionBundlePa
         }
         if (item.bindings !== undefined)
           validatePromptBindings(item.bindings, validateProductionBundleRef);
+        if (collection === 'shots' && item.image !== undefined) {
+          const image = object(
+            item.image,
+            ['prompt', 'purpose', 'intent', 'bindings', 'expectedRowVersion', 'sourceToken'],
+            'image',
+          );
+          text(image.prompt, 'image.prompt', 20000);
+          if (
+            !['composition', 'first-frame', 'last-frame'].includes(String(image.purpose)) ||
+            typeof image.intent !== 'string' ||
+            image.intent.length > 4000
+          )
+            throw new Error('BUNDLE_INVALID: image purpose/intent.');
+          validatePromptBindings(image.bindings, validateProductionBundleRef);
+          if (
+            item.existing &&
+            (!Number.isSafeInteger(image.expectedRowVersion) ||
+              Number(image.expectedRowVersion) < 0 ||
+              typeof image.sourceToken !== 'string')
+          )
+            throw new Error(
+              'BUNDLE_INVALID: existing shot image requires its read CAS and sourceToken.',
+            );
+          for (const field of [
+            'characterDocumentIds',
+            'sceneDocumentIds',
+            'propDocumentIds',
+          ] as const)
+            if (!Array.isArray((image.bindings as PromptBindingIR)[field]))
+              throw new Error(`BUNDLE_INVALID: image.bindings.${field} required.`);
+        }
         if (collection === 'shots') {
           const bindings = item.bindings as PromptBindingIR<ProductionBundleRef> | undefined;
           for (const field of [
@@ -200,7 +243,10 @@ export function validateProductionBundlePart(value: unknown): ProductionBundlePa
     throw new Error('BUNDLE_PART_TOO_LARGE: split by complete objects.');
   return structuredClone(value) as ProductionBundlePart;
 }
-export function validateProductionBundleManifest(value: unknown): ProductionBundleManifest {
+export function validateProductionBundleManifest(
+  value: unknown,
+  allowReferenceOnly = false,
+): ProductionBundleManifest {
   const manifest = object(value, ['documentKeys', 'sceneKeys', 'shotKeys'], 'manifest');
   const all: string[] = [];
   for (const key of ['documentKeys', 'sceneKeys', 'shotKeys']) {
@@ -210,8 +256,9 @@ export function validateProductionBundleManifest(value: unknown): ProductionBund
     all.push(...(manifest[key] as string[]));
   }
   if (
-    !(manifest.sceneKeys as string[]).length ||
-    !(manifest.shotKeys as string[]).length ||
+    (!allowReferenceOnly &&
+      (!(manifest.sceneKeys as string[]).length || !(manifest.shotKeys as string[]).length)) ||
+    !all.length ||
     all.length > PRODUCTION_BUNDLE_LIMITS.objects ||
     new Set(all).size !== all.length
   )

@@ -107,6 +107,53 @@ it('advances byte-bounded pages by the actual count without losing documents', a
   expect([...new Set(seen)].sort()).toEqual(docs.map((d) => d.id).sort());
   expect(read({}).resources.length).toBeLessThanOrEqual(20);
 });
+it('resolves only visible, unambiguous parents and reports the effective filters even for empty pages', async () => {
+  const f = await setup();
+  const scene = f.content.saveScene({ title: '有镜头' });
+  const empty = f.content.saveScene({ title: '空场次' });
+  const shot = f.content.saveShot({ sceneId: scene.id, title: '镜头' });
+  const doc = f.content.saveDocument({ kind: 'note', title: '笔记', contentMarkdown: '私有正文' });
+  const read = (options: Record<string, unknown>, archived = false) =>
+    f.projects.access(false, (db, project) =>
+      compileProjectResourceMap(db, project, archived, options),
+    );
+  const prefixed = read({ kind: 'shot', parentId: `scene:${scene.id}` });
+  expect(read({ kind: 'shot', parentId: scene.id })).toEqual(prefixed);
+  expect(prefixed.resources.map((r) => r.id)).toEqual([`shot:${shot.id}`]);
+  expect(prefixed).toMatchObject({
+    filters: { kind: 'shot', parentId: `scene:${scene.id}`, includeArchived: false },
+  });
+  expect(read({ kind: 'shot', parentId: empty.id, query: 'EMPTY' })).toMatchObject({
+    resources: [],
+    totalResources: 0,
+    filters: {
+      kind: 'shot',
+      parentId: `scene:${empty.id}`,
+      query: 'empty',
+      includeArchived: false,
+    },
+  });
+  for (const parentId of ['other-project-scene', 'scene:missing', `document:${doc.id}`, shot.id])
+    expect(() => read({ kind: 'shot', parentId })).toThrow('parentId');
+  // A valid document remains navigable even if the title query has no matches.
+  expect(read({ kind: 'structure-node', parentId: doc.id, query: '无匹配标题' }).resources).toEqual(
+    [],
+  );
+  expect(read({ kind: 'document', parentId: 'workspace:documents' }).resources).toHaveLength(1);
+  f.projects.access(true, (db) =>
+    db
+      .prepare('UPDATE scenes SET archived_at=? WHERE id=?')
+      .run(new Date().toISOString(), empty.id),
+  );
+  expect(() => read({ kind: 'shot', parentId: empty.id })).toThrow('parentId');
+  expect(read({ kind: 'shot', parentId: empty.id }, true)).toMatchObject({
+    resources: [],
+    filters: { parentId: `scene:${empty.id}`, includeArchived: true },
+  });
+  const other = await setup();
+  const foreignScene = other.content.saveScene({ title: '另一个项目' });
+  expect(() => read({ kind: 'shot', parentId: foreignScene.id })).toThrow('parentId');
+});
 it('exposes and validates paginated lookup through the authorized system tool', async () => {
   const f = await setup();
   const scene = f.content.saveScene({

@@ -1,5 +1,6 @@
 import {
   productionTimingSchema,
+  PROMPT_PURPOSES,
   promptBindingSchemaFor,
   type ProductionBundlePart,
 } from '@ai-video/contracts';
@@ -111,9 +112,28 @@ export const PRODUCTION_BUNDLE_SUBMIT_SCHEMA = object(
           ...object(
             {
               localKey: text(),
-              kind: { enum: ['character', 'location', 'prop', 'voice', 'plan', 'scene', 'shot'] },
+              kind: {
+                enum: [
+                  'character',
+                  'location',
+                  'prop',
+                  'voice',
+                  'plan',
+                  'scene',
+                  'shot',
+                  'shot-image',
+                ],
+              },
               title: text(),
               prompt: text(1000000),
+              imagePurpose: {
+                enum: ['composition', 'first-frame', 'last-frame'],
+                description:
+                  'Only kind=shot-image. Uses the existing video shot localKey; adds independent static text after the video stage.',
+              },
+              intent: { type: 'string', maxLength: 4000 },
+              imageRowVersion: { type: 'integer', minimum: 0 },
+              sourceToken: text(64),
               sampleText: text(10000),
               sceneKey: {
                 ...text(),
@@ -132,6 +152,21 @@ export const PRODUCTION_BUNDLE_SUBMIT_SCHEMA = object(
           ),
           allOf: [
             {
+              if: { properties: { kind: { const: 'shot-image' } } },
+              then: {
+                required: ['imagePurpose', 'intent', 'bindings'],
+                properties: { timing: false, existing: false },
+              },
+              else: {
+                properties: {
+                  imagePurpose: false,
+                  intent: false,
+                  imageRowVersion: false,
+                  sourceToken: false,
+                },
+              },
+            },
+            {
               if: { properties: { kind: { const: 'shot' } } },
               then: {
                 required: ['sceneKey', 'bindings'],
@@ -149,7 +184,7 @@ export const PRODUCTION_BUNDLE_SUBMIT_SCHEMA = object(
               else: { properties: { sceneKey: false } },
             },
             {
-              if: { properties: { kind: { enum: ['scene', 'shot'] } } },
+              if: { properties: { kind: { enum: ['scene', 'shot', 'shot-image'] } } },
               then: { properties: { prompt: text(20000) } },
               else: { properties: { timing: false } },
             },
@@ -162,12 +197,13 @@ export const PRODUCTION_BUNDLE_SUBMIT_SCHEMA = object(
         MAX_BUNDLE_PROMPTS_PER_SUBMISSION,
       ),
       description:
-        'At most 12 prompt objects per model call. Submit larger packages in ordered chunks with distinct partKey values and the current expectedRevision; set complete=true only on the final chunk.',
+        'At most 12 prompt objects per model call. Submit larger packages in ordered chunks with distinct partKey values and the current expectedRevision; omit complete on non-final chunks; set complete=true only after all requested purposes, including optional shot-image, have been submitted.',
     },
     complete: {
       type: 'boolean',
       const: true,
-      description: 'Seal the complete candidate set after every prompt object has been submitted.',
+      description:
+        'Seal and atomically save the entire candidate set after every requested prompt object, including independent shot-image text when requested, has been submitted. If shot-image is required, omit complete during the video stage and set it only on the final image submission. Omit instead of passing false.',
     },
   },
   ['partKey', 'expectedRevision'],
@@ -178,6 +214,7 @@ const properties = {
       'check reads bounded status lists with offset only; expectedRevision is a write CAS and is not accepted by check. Follow nextOffset until all lists are read.',
     enum: [
       'begin',
+      'purpose',
       'rebase',
       'put',
       'seal',
@@ -191,6 +228,13 @@ const properties = {
       'saved',
     ],
   },
+  purpose: {
+    enum: PROMPT_PURPOSES,
+    description:
+      'Declare the authoring purpose before writing; only its frozen template is supplied next turn.',
+  },
+  expectedStageVersion: { type: 'integer', minimum: 0 },
+  stageKey: text(),
   estimatedOutputTokens: { type: 'integer', minimum: 1 },
   reused: array(object({ documentId: text(), versionId: text() }), 50),
   expectedRevision: { type: 'integer', minimum: 0 },
@@ -221,6 +265,7 @@ export const BUNDLE_OPERATION_FIELDS: Record<
     optional: string[];
   }
 > = {
+  purpose: { required: ['purpose', 'expectedStageVersion', 'stageKey'], optional: [] },
   begin: { required: ['estimatedOutputTokens'], optional: ['reused'] },
   rebase: { required: ['expectedRevision'], optional: ['reused'] },
   put: { required: ['expectedRevision', 'partKey', 'part'], optional: [] },

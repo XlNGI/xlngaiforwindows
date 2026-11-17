@@ -49,7 +49,7 @@ it('reads source prose with exact quotes and newlines in contiguous ordinary tex
     text,
   );
 });
-it('keeps explicit source and skill result references after history clears without reinjecting bodies', async () => {
+it('keeps the activated skill declaration after history clears without reinjecting project bodies', async () => {
   const f = await setup();
   f.content.saveDocument({ title: '未读取', contentMarkdown: 'UNREAD_BODY_MUST_STAY_OUT' });
   const runtime = { ...f.generations.runtime(f.prepared.stream), tools: f.task.tools };
@@ -117,9 +117,9 @@ it('keeps explicit source and skill result references after history clears witho
   expect(JSON.stringify(after)).toContain(sourceResult!.id);
   expect(JSON.stringify(after)).not.toContain('EXPLICITLY_READ_SUPPLEMENT');
   expect(JSON.stringify(after)).not.toContain('UNREAD_BODY_MUST_STAY_OUT');
-  expect(JSON.stringify(after)).not.toContain(
-    readProductionSkill({ skillId: 'script-to-media' }).instructions,
-  );
+  const declaration = readProductionSkill({ skillId: 'script-to-media' });
+  expect(after.prompt).toContain(JSON.stringify(declaration.instructions).slice(1, -1));
+  expect(JSON.stringify(after).split(declaration.instructions.split('。')[0]!)).toHaveLength(2);
   expect(after.tools?.map((tool) => tool.name)).not.toContain('production.skill.read');
   expect(after.prompt).toContain('activeSkills');
 });

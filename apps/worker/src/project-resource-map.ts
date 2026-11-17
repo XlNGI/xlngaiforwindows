@@ -17,6 +17,13 @@ export interface ResourceMapPageOptions {
   expectedRevision?: string;
 }
 interface ResourceMapResult extends ProjectStructureResult {
+  filters?: {
+    includeArchived: boolean;
+    workspace?: string;
+    kind?: string;
+    parentId?: string;
+    query?: string;
+  };
   offset?: number;
   limit?: number;
   totalResources?: number;
@@ -277,11 +284,34 @@ export function compileProjectResourceMap(
     if (page.expectedRevision && page.expectedRevision !== revision)
       throw new Error('Project resource revision changed; restart the query from offset=0.');
     const query = page.query?.toLocaleLowerCase('zh-CN');
+    let parentId = page.parentId;
+    if (parentId) {
+      const requestedParent = parentId;
+      const parentKinds =
+        page.kind === 'shot'
+          ? ['scene']
+          : page.kind === 'structure-node'
+            ? ['document']
+            : page.kind
+              ? ['workspace']
+              : ['workspace', 'document', 'scene'];
+      const parents = resources.filter(
+        (resource) =>
+          parentKinds.includes(resource.kind) &&
+          (resource.id === requestedParent ||
+            (!requestedParent.includes(':') && resource.id.endsWith(`:${requestedParent}`))),
+      );
+      if (parents.length !== 1)
+        throw new Error(
+          'Invalid parentId: use a visible parent resource ID from project.structure.get in the current project (shots require scene:<id>; structure nodes require document:<id>).',
+        );
+      parentId = parents[0]!.id;
+    }
     const matches = resources.filter(
       (resource) =>
         (!page.workspace || resource.locator.workspace === page.workspace) &&
         (!page.kind || resource.kind === page.kind) &&
-        (!page.parentId || resource.parentId === page.parentId) &&
+        (!parentId || resource.parentId === parentId) &&
         (!query || resource.title.toLocaleLowerCase('zh-CN').includes(query)),
     );
     const selected: ProjectStructureResource[] = [];
@@ -300,6 +330,13 @@ export function compileProjectResourceMap(
       projectId: project.id,
       projectName: project.name,
       revision,
+      filters: {
+        includeArchived,
+        ...(page.workspace ? { workspace: page.workspace } : {}),
+        ...(page.kind ? { kind: page.kind } : {}),
+        ...(parentId ? { parentId } : {}),
+        ...(query ? { query } : {}),
+      },
       resources: selected,
       offset,
       limit,

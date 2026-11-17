@@ -33,6 +33,11 @@ export function projectBundleSubmission(args: Record<string, unknown>) {
     throw new Error(
       `BUNDLE_SUBMIT_INVALID: prompts must contain at most ${MAX_BUNDLE_PROMPTS_PER_SUBMISSION} objects per submission; split larger packages into ordered parts.`,
     );
+  const shotImages: Array<{
+    localKey: string;
+    title: string;
+    image: import('@ai-video/contracts').ProductionBundleShotImage;
+  }> = [];
   const collections: Record<'documents' | 'scenes' | 'shots', unknown[]> = {
     documents: [],
     scenes: [],
@@ -51,6 +56,50 @@ export function projectBundleSubmission(args: Record<string, unknown>) {
     };
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail();
     const { kind, prompt, ...fields } = raw as Record<string, unknown>;
+    if (kind === 'shot-image') {
+      if (
+        typeof prompt !== 'string' ||
+        !prompt.trim() ||
+        prompt.length > 20000 ||
+        typeof fields.localKey !== 'string' ||
+        typeof fields.title !== 'string' ||
+        !['composition', 'first-frame', 'last-frame'].includes(String(fields.imagePurpose)) ||
+        typeof fields.intent !== 'string' ||
+        Object.keys(raw as Record<string, unknown>).some(
+          (key) =>
+            ![
+              'localKey',
+              'kind',
+              'title',
+              'prompt',
+              'imagePurpose',
+              'intent',
+              'bindings',
+              'imageRowVersion',
+              'sourceToken',
+            ].includes(key),
+        )
+      )
+        fail();
+      shotImages.push({
+        localKey: fields.localKey as string,
+        title: fields.title as string,
+        image: {
+          prompt: prompt as string,
+          purpose: fields.imagePurpose as 'composition' | 'first-frame' | 'last-frame',
+          intent: fields.intent as string,
+          bindings:
+            fields.bindings as import('@ai-video/contracts').ProductionBundleShotImage['bindings'],
+          ...(fields.imageRowVersion !== undefined
+            ? { expectedRowVersion: fields.imageRowVersion as number }
+            : {}),
+          ...(fields.sourceToken !== undefined
+            ? { sourceToken: fields.sourceToken as string }
+            : {}),
+        },
+      });
+      continue;
+    }
     const document = ['character', 'location', 'prop', 'voice', 'plan'].includes(String(kind));
     const allowed = [
       'localKey',
@@ -93,6 +142,7 @@ export function projectBundleSubmission(args: Record<string, unknown>) {
     }
   })();
   if (
+    !shotImages.length &&
     !part.documents.length &&
     !part.scenes.length &&
     !part.shots.length &&
@@ -102,7 +152,11 @@ export function projectBundleSubmission(args: Record<string, unknown>) {
   if (args.complete !== undefined && args.complete !== true)
     throw new Error('BUNDLE_SUBMIT_INVALID: complete must be true.');
   const complete = args.complete === true;
-  return { part, complete };
+  if (shotImages.length && (part.documents.length || part.scenes.length || part.shots.length))
+    throw new Error('BUNDLE_PURPOSE_MISMATCH: submit shot-image separately.');
+  if (new Set(shotImages.map((i) => i.localKey)).size !== shotImages.length)
+    throw new Error('BUNDLE_DUPLICATE_KEY');
+  return { part, complete, shotImages };
 }
 /** Called inside the existing bundle transaction; a failed seal rolls back the entire part. */
 export function submitBundle(
@@ -112,7 +166,7 @@ export function submitBundle(
   args: Record<string, unknown>,
   providerStepId?: string,
 ) {
-  const { part, complete } = projectBundleSubmission(args);
+  const { part, complete, shotImages } = projectBundleSubmission(args);
   const store = new AgentContextStore(db),
     callId = `bundle-submit:${String(args.partKey)}`;
   const requestHash = contextContentHash(
@@ -139,12 +193,36 @@ export function submitBundle(
     };
   }
   const previous = loadBundle(db, projectId, taskId);
+  if (shotImages.length) {
+    if (!previous) throw new Error('BUNDLE_NOT_STARTED');
+    const objects = bundleObjects(db, projectId, taskId, previous);
+    for (const image of shotImages) {
+      const entry = previous.entries.find((e) => e.key === image.localKey);
+      const shot = objects.get(image.localKey) as
+        import('@ai-video/contracts').ProductionBundleShot | undefined;
+      if (entry?.kind !== 'shot' || !shot || shot.title !== image.title)
+        throw new Error(
+          'BUNDLE_SHOT_IMAGE_TARGET: use the existing candidate shot localKey and title.',
+        );
+      part.shots.push({ ...shot, image: image.image });
+    }
+    validateProductionBundlePart(part);
+  }
+  if (!shotImages.length && previous) {
+    const objects = bundleObjects(db, projectId, taskId, previous);
+    for (const shot of part.shots) {
+      const prior = objects.get(shot.localKey) as
+        import('@ai-video/contracts').ProductionBundleShot | undefined;
+      if (prior?.image) shot.image = prior.image;
+    }
+  }
   let result = stageBundle(
     db,
     projectId,
     taskId,
     { operation: 'put', partKey: args.partKey, expectedRevision: args.expectedRevision, part },
     providerStepId,
+    shotImages.length ? 'shot-image' : undefined,
   );
   if (complete || (previous !== undefined && previous.sealedRevision === previous.revision)) {
     const state = loadBundle(db, projectId, taskId)!;

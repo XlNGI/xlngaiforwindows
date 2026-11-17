@@ -19,6 +19,7 @@ import { ProjectService } from './project-service.js';
 import { VideoGenerationService } from './video-generation-service.js';
 import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
+import { ShotContinuityService } from './shot-continuity-service.js';
 import { TaskScheduleService } from './task-schedule-service.js';
 import { DocumentWorkflowService } from './document-workflow-service.js';
 import { ProjectTaskRuntime } from './project-task-runtime.js';
@@ -274,6 +275,77 @@ describe('MediaOrchestrationService', () => {
     expect(f.request).toHaveBeenCalledOnce();
   });
 
+  it('confirms custom reference-image editing with ordered inputs and rechecks editing capability', async () => {
+    const f = await setup();
+    Object.assign(f.profile, {
+      category: 'llm',
+      providerType: 'custom',
+      accessType: 'custom',
+      protocol: 'openai-chat-completions',
+      baseUrl: 'https://images.example/prefix/v1',
+    });
+    f.models[0]!.remoteModelId = 'gpt-image-2';
+    f.models[0]!.capabilities.imageEditing = true;
+    const selection: MediaModelSelectionSnapshot = {
+      ...imageSelection,
+      providerType: 'custom',
+      providerBaseUrl: f.profile.baseUrl,
+      providerBaseUrlCategory: 'custom-openai-compatible',
+      providerRegion: 'global',
+      remoteModelId: 'gpt-image-2',
+      adapterKey: 'REFERENCE_TO_IMAGE:custom:openai-images:v1',
+    };
+    const parameters = {
+      prompt: '保留蓝衣服，融合场景',
+      images: ['https://example.com/actor.png', 'https://example.com/scene.png'],
+    };
+    const prepare = () =>
+      f.images.prepare({
+        adapterKey: selection.adapterKey,
+        providerProfileId,
+        modelId: selection.modelId,
+        mediaModelSelection: selection,
+        parameters,
+      });
+    const job = prepare();
+    const pending = f.service.requestSubmission({ jobId: job.id });
+    expect(pending.confirmation).toBeDefined();
+    expect(f.request).not.toHaveBeenCalled();
+    f.request.mockResolvedValue({
+      status: 200,
+      body: { data: [{ url: 'data:image/png;base64,iVBORw0KGgo=' }] },
+    });
+    const result = await f.service.confirmSubmission({
+      jobId: job.id,
+      confirmationToken: pending.confirmation!.confirmationToken,
+      approved: true,
+    });
+    expect(result.job.status).toBe('succeeded');
+    expect(f.request).toHaveBeenCalledWith(
+      'provider.media.submit',
+      expect.objectContaining({
+        adapterKey: selection.adapterKey,
+        remoteModelId: 'gpt-image-2',
+        baseUrl: f.profile.baseUrl,
+        providerProfileId,
+        parameters,
+        kind: 'image',
+      }),
+      expect.any(Number),
+    );
+    const stale = prepare();
+    const stalePending = f.service.requestSubmission({ jobId: stale.id });
+    f.models[0]!.capabilities.imageEditing = false;
+    await expect(
+      f.service.confirmSubmission({
+        jobId: stale.id,
+        confirmationToken: stalePending.confirmation!.confirmationToken,
+        approved: true,
+      }),
+    ).rejects.toThrow('no longer compatible');
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+
   it('passes the frozen custom OpenAI-compatible video Base URL to Native after confirmation', async () => {
     const f = await setup();
     Object.assign(f.profile, {
@@ -338,6 +410,15 @@ describe('MediaOrchestrationService', () => {
     });
     const target = { kind: 'shot' as const, id: shot.id };
     const production = new ProductionService(f.projectsService);
+    const stills = new ShotContinuityService(f.projectsService, f.images);
+    stills.saveImage({
+      shotId: shot.id,
+      expectedRowVersion: 0,
+      sourceToken: stills.imageContext(shot.id).currentSourceToken,
+      prompt: '填充时的独立图片提示词',
+      purpose: 'composition',
+      intent: '',
+    });
     const fillAssetId = 'filled-image';
     const fillAssetPath = join(f.project.rootPath, 'assets', 'images', `${fillAssetId}.png`);
     const fillAssetBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

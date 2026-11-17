@@ -26,6 +26,27 @@ export function taskEvidenceKey(toolName: string, result: Record<string, unknown
     toolName === 'tools.load'
       ? { loaded: Array.isArray(result.loaded) ? [...(result.loaded as unknown[])].sort() : [] }
       : { ...result };
+  // The executed query is part of the receipt, so checkpoints and durable loop
+  // supervision agree even after call arguments leave the active history.
+  // Presentation and paging controls alone cannot turn an empty page into progress.
+  const map = result.resourceMap;
+  if (toolName === 'project.structure.get' && map && typeof map === 'object') {
+    const page = map as Record<string, unknown>;
+    if (page.filters && Array.isArray(page.resources)) {
+      return `${toolName}:${createHash('sha256')
+        .update(
+          JSON.stringify(
+            canonical({
+              projectId: page.projectId,
+              revision: page.revision,
+              filters: page.filters,
+              resources: page.resources,
+            }),
+          ),
+        )
+        .digest('hex')}`;
+    }
+  }
   if (typeof result.status === 'string' && result.status.endsWith('_saved')) {
     delete value.executionId;
     delete value.executionKey;

@@ -13,6 +13,108 @@ import {
 } from './agent-prepared-arguments.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
 import { AgentProviderToolGateway } from './agent-provider-tool-gateway.js';
+it('normalizes only an unambiguous new document null version and gives executable recovery for real CAS fields', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'prepared-document-null-'));
+  const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });
+  try {
+    projects.create(join(directory, 'project'), 'Document recovery');
+    projects.access(true, (db, p) => {
+      const store = new AgentContextStore(db);
+      const tool = 'document.submit_draft';
+      const definition = preparedArgumentsDefinition(
+        SYSTEM_AGENT_TOOLS.find((t) => t.name === tool)!,
+      );
+      const resolve = (input: unknown) =>
+        resolvePreparedArguments(store, p.id, 'task', tool, input);
+      const gateway = new AgentProviderToolGateway(
+        {
+          executeTools: vi.fn(),
+          confirmTool: vi.fn(),
+          selectMedia: vi.fn(),
+          startProviderStep: vi.fn(),
+          completeProviderStep: vi.fn(),
+          terminateGeneration: vi.fn(),
+          resolveToolArguments: (_identity, _tool, input) => resolve(input),
+          preserveToolArguments: (_identity, name, input) =>
+            preservePreparedArguments(store, p.id, 'task', name, input),
+        },
+        {
+          generationId: 'g',
+          attemptId: 'a',
+          projectId: p.id,
+          projectSessionId: 's',
+          conversationId: 'c',
+        },
+        [definition],
+        vi.fn(),
+        vi.fn(),
+      );
+      const prepare = gateway.tools()[0]!.prepareArguments!;
+      const draft = {
+        resourceId: 'workspace:documents',
+        documentKind: 'plan',
+        title: '完整剧本',
+        contentMarkdown: '完整正文与对白。'.repeat(1000),
+        expectedRevision: 'unchanged-project-revision',
+        outputKey: 'script',
+        outputIndex: 0,
+      };
+      for (const resourceId of ['workspace:documents', 'workspace:characters', 'workspace:novel']) {
+        const original = { ...draft, resourceId, baseVersionId: null };
+        const expected = { ...draft, resourceId };
+        const ref = preservePreparedArguments(store, p.id, 'task', tool, original);
+        expect(resolve(original)).toEqual(expected);
+        expect(prepare(original)).toEqual(expected);
+        expect(prepare({ preparedArguments: ref })).toEqual(expected);
+        expect(prepare({ preparedArguments: ref, title: '修订标题' })).toEqual({
+          ...expected,
+          title: '修订标题',
+        });
+        expect(original.baseVersionId).toBeNull();
+        expect(store.result(p.id, 'task', ref.resultId)?.arguments).toEqual(original);
+      }
+      for (const extra of [
+        { resourceId: 'document:target', documentId: 'target', expectedDocumentRowVersion: 0 },
+        { resourceId: 'workspace:unknown' },
+        { documentId: null },
+        { expectedDocumentRowVersion: 0 },
+        { baseVersionId: 'actual-version' },
+      ]) {
+        const args = { ...draft, baseVersionId: null, ...extra };
+        expect(resolve(args)).toEqual(args);
+      }
+      const invalid = { ...draft, baseVersionId: 'source-version', expectedDocumentRowVersion: 3 };
+      let message = '';
+      try {
+        prepare(invalid);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      const retry = JSON.parse(
+        /preparedArguments=(\{[^\n]+?\})/.exec(message)![1]!,
+      ) as PreparedArgumentsRef;
+      expect(retry.deleteFields).toEqual(['expectedDocumentRowVersion', 'baseVersionId']);
+      expect(message).not.toContain(draft.contentMarkdown);
+      expect(prepare({ preparedArguments: retry })).toEqual(draft);
+      expect(store.result(p.id, 'task', retry.resultId)?.arguments).toEqual(invalid);
+      for (const args of [
+        { ...invalid, resourceId: 'document:target', documentId: 'target', title: null },
+        { ...invalid, documentId: null },
+        { ...invalid, resourceId: 'workspace:unknown' },
+      ]) {
+        expect(() => prepare(args)).toThrow();
+        try {
+          prepare(args);
+        } catch (error) {
+          expect((error as Error).message).not.toContain('"deleteFields"');
+        }
+      }
+    });
+  } finally {
+    projects.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 it('repairs the observed staging envelope errors without retransmitting or changing authored IR', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'prepared-stage-'));
   const projects = new ProjectService({ recentProjectsPath: join(directory, 'recent.json') });

@@ -206,7 +206,39 @@ describe('ProjectTaskRuntime', () => {
     runtime.stop();
   });
 
-  it('fails closed when Native returns an unnormalized Provider body', async () => {
+  it.each([
+    { providerStatus: 200, providerState: 'failure', code: undefined },
+    { providerStatus: 200, providerState: 'expired', code: null },
+    { providerStatus: 400, providerState: 'failed', code: 'invalid_reference' },
+  ])('preserves a terminal Provider diagnostic: %j', async (fixture) => {
+    const { root, projectsService, videos, request, runtime } = await setup();
+    const job = attachUnicomp(videos);
+    request.mockResolvedValue({
+      providerStatus: fixture.providerStatus,
+      state: 'failed',
+      providerState: fixture.providerState,
+      error: { code: fixture.code, message: 'Reference image could not be read', retryable: false },
+    });
+
+    runtime.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const failed = videos.get(job.id);
+    expect(failed).toMatchObject({
+      status: 'failed',
+      providerTaskId: job.providerTaskId,
+      metadata: { failureKind: 'provider', pollAttempts: 1 },
+    });
+    expect(failed.error).toContain('Reference image could not be read');
+    if (fixture.code) expect(failed.error).toContain(fixture.code);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledOnce();
+    projectsService.close();
+    projectsService.open(join(root, 'project'));
+    expect(videos.get(job.id).error).toBe(failed.error);
+    runtime.stop();
+  });
+
+  it('pauses safely when Native returns an unnormalized Provider body', async () => {
     const { videos, request, runtime } = await setup();
     const job = attach(videos);
     request.mockResolvedValue({
@@ -221,12 +253,84 @@ describe('ProjectTaskRuntime', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(videos.get(job.id)).toMatchObject({
-      status: 'failed',
-      metadata: { failureKind: 'transport' },
+      status: 'paused',
+      mediaState: 'polling',
+      providerTaskId: job.providerTaskId,
+      metadata: { lastPollError: 'Native Provider result contains an unknown field: body.' },
     });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(request).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    null,
+    42,
+    { code: 42, message: 'failure', retryable: false },
+    { message: '', retryable: false },
+    { message: 'failure', retryable: false, apiKey: 'must-not-persist' },
+  ])(
+    'keeps rejecting malformed Native error payloads without failing the remote task: %j',
+    async (error) => {
+      const { videos, request, runtime } = await setup();
+      const job = attachUnicomp(videos);
+      request.mockResolvedValue({ providerStatus: 200, state: 'failed', error });
+      runtime.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(videos.get(job.id)).toMatchObject({
+        status: 'paused',
+        providerTaskId: job.providerTaskId,
+      });
+      expect(JSON.stringify(videos.get(job.id))).not.toContain('must-not-persist');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(request).toHaveBeenCalledOnce();
+      runtime.stop();
+    },
+  );
+
+  it.each([false, true])(
+    'recovers a legacy local parser failure without a submit (scheduled=%s)',
+    async (scheduled) => {
+      const { root, projectsService, videos, request, runtime, scheduler } = await setup(scheduled);
+      const job = attachUnicomp(videos);
+      if (scheduled) scheduler.register(job.id);
+      videos.fail({
+        jobId: job.id,
+        failureKind: 'transport',
+        message: 'Native Provider error is invalid.',
+      });
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      const resumed = videos.resume(job.id);
+      expect(resumed).toMatchObject({
+        status: 'polling',
+        mediaState: 'polling',
+        providerTaskId: job.providerTaskId,
+      });
+      expect(resumed.error).toBeUndefined();
+      expect(resumed.metadata.failureKind).toBeUndefined();
+      expect(resumed.id).not.toBe(job.id);
+      expect(resumed.metadata.pollRecoveryOfJobId).toBe(job.id);
+      expect(videos.get(job.id).status).toBe('failed');
+      expect(videos.get(job.id).metadata.pollRecoveryJobId).toBe(resumed.id);
+      expect(videos.resume(job.id).id).toBe(resumed.id);
+      expect(videos.list()).toHaveLength(2);
+      expect(Date.parse(resumed.metadata.pollDeadlineAt!)).toBeGreaterThan(Date.now());
+      request.mockResolvedValue(runningPoll());
+      runtime.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledOnce();
+      expect(request).toHaveBeenCalledWith(
+        'provider.media.poll',
+        expect.objectContaining({ providerTaskId: job.providerTaskId }),
+        600_000,
+      );
+      expect(videos.get(resumed.id).metadata.pollAttempts).toBe(1);
+      runtime.stop();
+      projectsService.close();
+      projectsService.open(join(root, 'project'));
+      expect(videos.resume(job.id).id).toBe(resumed.id);
+      expect(videos.list()).toHaveLength(2);
+    },
+  );
 
   it('ignores a late Native result after the project session changes', async () => {
     const { root, projectsService, videos, request, runtime } = await setup();
@@ -344,11 +448,22 @@ describe('ProjectTaskRuntime', () => {
     );
   });
 
-  it.each([false, true])(
-    'commits one asset from a Native UniCompAPI file and remains idempotent (scheduled=%s)',
-    async (scheduled) => {
+  it.each([
+    { scheduled: false, legacy: false },
+    { scheduled: true, legacy: false },
+    { scheduled: true, legacy: true },
+  ])(
+    'commits one asset from the original Native task and remains idempotent: %j',
+    async ({ scheduled, legacy }) => {
       const { projectsService, videos, request, runtime, scheduler } = await setup(scheduled);
-      const job = attachUnicomp(videos);
+      const original = attachUnicomp(videos);
+      if (legacy)
+        videos.fail({
+          jobId: original.id,
+          failureKind: 'transport',
+          message: 'Native Provider error is invalid.',
+        });
+      const job = legacy ? videos.resume(original.id) : original;
       const nativeDirectory = join(tmpdir(), 'ai-video-workspace-unicompapi');
       mkdirSync(nativeDirectory, { recursive: true });
       const nativePath = join(nativeDirectory, `runtime-${process.pid}-${Date.now()}.mp4`);
@@ -382,6 +497,15 @@ describe('ProjectTaskRuntime', () => {
         expect(repositories.assets.listByProject(job.projectId)).toHaveLength(1);
       });
       expect(request).toHaveBeenCalledOnce();
+      expect(request.mock.calls[0]?.[0]).toBe('provider.media.poll');
+      expect(request.mock.calls[0]?.[1]).toMatchObject({ providerTaskId: original.providerTaskId });
+      if (legacy) {
+        expect(videos.resume(original.id).id).toBe(completed.id);
+        runtime.kick();
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(request).toHaveBeenCalledOnce();
+        expect(videos.list()).toHaveLength(2);
+      }
       if (scheduled) {
         expect(scheduler.get(job.id)).toMatchObject({
           scheduleState: 'settled',

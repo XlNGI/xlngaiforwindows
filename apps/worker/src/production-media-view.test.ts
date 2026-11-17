@@ -7,6 +7,10 @@ import { ContentService } from './content-service.js';
 import { ProductionService } from './production-service.js';
 import { describeProductionAsset, readAssetProvenance } from './production-media-view.js';
 import { ProjectService } from './project-service.js';
+import { LocalMediaImportService } from './local-media-import-service.js';
+import { ImageGenerationService } from './image-generation-service.js';
+import { resolveSceneMedia } from './scene-media-service.js';
+import { productionReferenceImage } from './scene-cast-binding.js';
 const fixtures: Array<{
   projects: ProjectService;
   directory: string;
@@ -74,6 +78,75 @@ function generatedImage(
     ).run(`result-${assetId}`, `job-${assetId}`, assetId);
   });
 }
+it('removes generated images from candidates and defaults while retaining pinned references and source history', async () => {
+  const f = await setup();
+  generatedImage(f.projects, 'character-image', f.character.id);
+  const scene = f.content.saveScene({
+    sceneId: f.scene.id,
+    title: f.scene.title,
+    expectedRowVersion: f.scene.rowVersion,
+    characterBindings: [{ characterDocumentId: f.character.id, imageAssetId: 'character-image' }],
+  });
+  const images = new ImageGenerationService(f.projects);
+  const sources = f.projects.access(false, (db) =>
+    readAssetProvenance(db, f.project.id, 'character-image'),
+  );
+  new LocalMediaImportService(f.projects, images).unbindImage(f.character.id, 'character-image');
+  const view = new ProductionService(f.projects).readMediaForAgent({ kind: 'scene', id: scene.id });
+  const binding = view.bindings.find((b) => b.documentId === f.character.id);
+  expect(binding?.candidateAssets).toEqual([]);
+  expect(binding?.defaultAssetId).toBeUndefined();
+  expect(binding?.selectionSource).toBe('manual');
+  expect(binding?.selectedAsset).toMatchObject({ assetId: 'character-image' });
+  expect(f.content.listScenes().find((s) => s.id === scene.id)?.characterBindings).toEqual(
+    scene.characterBindings,
+  );
+  expect(
+    f.projects.access(false, (db) => readAssetProvenance(db, f.project.id, 'character-image')),
+  ).toEqual(sources);
+});
+it('keeps image previews and production reads available for a locked v77 project without writing a migration', async () => {
+  const f = await setup();
+  generatedImage(f.projects, 'legacy-image', f.character.id);
+  f.projects.access(true, (db) =>
+    db.exec(
+      'DROP TABLE document_image_exclusions; DELETE FROM schema_migrations WHERE version>=78',
+    ),
+  );
+  const reader = new ProjectService({ recentProjectsPath: join(f.directory, 'reader.json') });
+  try {
+    expect(reader.open(f.project.rootPath)).toMatchObject({ mode: 'read-only', schemaVersion: 77 });
+    expect(
+      new ImageGenerationService(reader).listAssets({ sourceDocumentId: f.character.id }),
+    ).toMatchObject([{ id: 'legacy-image' }]);
+    expect(
+      resolveSceneMedia(reader, { characterDocumentIds: [f.character.id] }).characters[0]
+        ?.defaultImage?.id,
+    ).toBe('legacy-image');
+    reader.access(false, (db) =>
+      expect(productionReferenceImage(db, f.project.id, f.character.id)).toEqual({
+        id: 'legacy-image',
+      }),
+    );
+    const view = new ProductionService(reader).readMediaForAgent({ kind: 'scene', id: f.scene.id });
+    expect(
+      view.bindings.find((b) => b.documentId === f.character.id)?.candidateAssets,
+    ).toMatchObject([{ assetId: 'legacy-image' }]);
+    expect(() =>
+      new LocalMediaImportService(reader, new ImageGenerationService(reader)).unbindImage(
+        f.character.id,
+        'legacy-image',
+      ),
+    ).toThrow(/read.only/i);
+  } finally {
+    reader.close();
+  }
+  f.projects.access(false, (db) =>
+    expect(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE name='document_image_exclusions'").get(),
+    ).toBeUndefined(),
+  );
+});
 it('exposes default character and IR-resolved scene media without adding asset IDs to IR', async () => {
   const fixture = await setup();
   generatedImage(fixture.projects, 'character-image-1', fixture.character.id);
@@ -97,6 +170,11 @@ it('exposes default character and IR-resolved scene media without adding asset I
   );
   expect(characterBinding?.selectionSource).toBe('auto');
   expect(sceneBinding?.selectionSource).toBe('auto');
+  expect(view.inputs.imageGeneration.map((input) => input.assetId)).toEqual([
+    'character-image-1',
+    'scene-image-1',
+  ]);
+  expect(view.inputs.videoGeneration).toEqual(view.inputs.referenceImages);
   expect(
     characterBinding?.selectedAsset &&
       typeof characterBinding.selectedAsset === 'object' &&
@@ -256,7 +334,11 @@ it('applies durable shot-level character and scene selections by source document
     selectionSource: 'manual',
     selectedAsset: { assetId: 'shot-scene-image' },
   });
-  expect(view.inputs.videoGeneration.map((input) => input.assetId)).toEqual([
+  expect(view.inputs.referenceImages.map((input) => input.assetId)).toEqual([
+    'shot-character-image',
+    'shot-scene-image',
+  ]);
+  expect(view.inputs.videoGeneration?.map((input) => input.assetId).sort()).toEqual([
     'shot-character-image',
     'shot-scene-image',
   ]);

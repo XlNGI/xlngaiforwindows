@@ -1,0 +1,1629 @@
+{
+  "generatedAt": "2026-11-16T13:03:52.566Z",
+  "conclusion": {
+    "ordinaryChat": "Confirmed local corruption of standard Chat Completions incremental content: independent newline chunks and repeated-prefix text chunks can be discarded by coalesce_visible_delta.",
+    "productionPrompts": "All 49 final prompt bodies across the real re-test and original task snapshot match the persisted decoded assistant tool arguments, executed arguments, immutable candidates, committed manifest, SQLite and no-media UI input formatter. All 50 submitted prompt versions exist unchanged in candidates.",
+    "attributionLimit": "Historical raw provider SSE was not captured. This proves equality from persisted parsed tool arguments onward and confirms a separate ordinary-text parsing bug; it does not reconstruct historical inbound bytes or prove the sole cause of semantic errors.",
+    "productionCodeChanged": false,
+    "fixed": false
+  },
+  "methodology": {
+    "originalProjectWritten": false,
+    "historicalRawSseCaptured": false,
+    "liveProviderCallsThisAudit": 0,
+    "localHttpRequests": 8,
+    "native": "temporary checkout used for prior real-provider run; diagnostic tests appended only",
+    "parserSourceMatchesCurrentWorkspace": true,
+    "parserSourceSha256": "b8dbac6b0392aab1b397d05b0e9feeb17258193ee17cfb94140afc8c7d281e6c",
+    "frozenInstalledWorkerSha256": "c6e8366ceb26409528fdfbee980015828ea607b526096cef6907f86937e7da7f",
+    "ui": "pure formatter comparison and source trace; no screenshot or visual rendering assertion",
+    "replay": "new local standard-SSE responses constructed from recorded decoded arguments, not historical network packets"
+  },
+  "plainText": {
+    "cases": [
+      {
+        "actualNativeHttp": true,
+        "expectedConcatenation": "甲\n\n乙",
+        "label": "independent paragraph separator",
+        "nativeReturned": "甲乙",
+        "parserNetworkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "preserved": false,
+        "sseDeltas": [
+          "甲",
+          "\n\n",
+          "乙"
+        ]
+      },
+      {
+        "actualNativeHttp": true,
+        "expectedConcatenation": "哈哈",
+        "label": "repeated character",
+        "nativeReturned": "哈",
+        "parserNetworkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "preserved": false,
+        "sseDeltas": [
+          "哈",
+          "哈"
+        ]
+      },
+      {
+        "actualNativeHttp": true,
+        "expectedConcatenation": "110",
+        "label": "repeated numeric token",
+        "nativeReturned": "10",
+        "parserNetworkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "preserved": false,
+        "sseDeltas": [
+          "1",
+          "1",
+          "0"
+        ]
+      },
+      {
+        "actualNativeHttp": true,
+        "expectedConcatenation": "哈哈",
+        "label": "same content in one chunk",
+        "nativeReturned": "哈哈",
+        "parserNetworkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "preserved": true,
+        "sseDeltas": [
+          "哈哈"
+        ]
+      },
+      {
+        "actualNativeHttp": true,
+        "expectedConcatenation": "\n\n正文",
+        "label": "leading newline",
+        "nativeReturned": "正文",
+        "parserNetworkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "preserved": false,
+        "sseDeltas": [
+          "\n\n",
+          "正文"
+        ]
+      }
+    ],
+    "method": "actual Native WinHTTP against local scripted SSE, plus parser network-byte fragmentation",
+    "protocol": "openai-chat-completions",
+    "providerCalls": 0
+  },
+  "toolArguments": {
+    "calls": [
+      {
+        "actualNativeHttpByteExact": true,
+        "allByteExact": true,
+        "argumentBytes": 10804,
+        "argumentChunkSizes": [
+          1,
+          7,
+          31,
+          127
+        ],
+        "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+        "networkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "parserCombinations": 16,
+        "partKey": "references-01",
+        "prompts": 12,
+        "sha256": "6021691fba1ffdf893bd38eb73281b0721cc7d15bad42198956287b4865ee8c6"
+      },
+      {
+        "actualNativeHttpByteExact": true,
+        "allByteExact": true,
+        "argumentBytes": 25506,
+        "argumentChunkSizes": [
+          1,
+          7,
+          31,
+          127
+        ],
+        "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+        "networkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "parserCombinations": 16,
+        "partKey": "scenes-shots-01",
+        "prompts": 12,
+        "sha256": "d37007d7fcbd0a3915502e4f5dece9e2d265fad45600947935f79d80a23a4e67"
+      },
+      {
+        "actualNativeHttpByteExact": true,
+        "allByteExact": true,
+        "argumentBytes": 75,
+        "argumentChunkSizes": [
+          1,
+          7,
+          31,
+          127
+        ],
+        "callId": "call_b993bb0fa14a41ef8b26d2d33bd14e51",
+        "networkChunkSizes": [
+          1,
+          7,
+          113,
+          8192
+        ],
+        "parserCombinations": 16,
+        "partKey": "finalize-script-to-media",
+        "prompts": 0,
+        "sha256": "af5433aca5ba0fed4c9365c7121a6fe5b8615cf68c66f91f87f632c166d39dff"
+      }
+    ],
+    "method": "recorded real submit arguments replayed as standard SSE via actual Native WinHTTP and parser fragmentation matrix; historical raw SSE was not captured",
+    "providerCalls": 0
+  },
+  "persistedRecords": {
+    "generatedAt": "2026-11-16T13:01:51.800Z",
+    "method": "read-only comparison from persisted Native-decoded assistant tool calls through actual executed arguments, immutable candidate, committed manifest and final SQLite text",
+    "rawProviderSseCaptured": false,
+    "originalProjectWritten": false,
+    "runs": [
+      {
+        "label": "isolated real run",
+        "taskId": "327215d4-820e-49f8-b5ce-f38ded2595af",
+        "assistantMessages": 10,
+        "submissionChecks": [
+          {
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "partKey": "references-01",
+            "prompts": 12,
+            "complete": false,
+            "executedArgumentsEqual": true,
+            "candidateMatches": [
+              {
+                "key": "char-linyan",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "char-shen-yanzhou",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "char-guchengchuan",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "loc-press-conference",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "loc-post-event",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "loc-three-years-office",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "prop-authorization",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "prop-pen",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "prop-phone",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "voice-linyan",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "voice-shen",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              },
+              {
+                "key": "voice-guchengchuan",
+                "resultId": "242afb6b-7e52-4852-9f6c-d38ad5d7184d",
+                "textEqual": true
+              }
+            ]
+          },
+          {
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "partKey": "scenes-shots-01",
+            "prompts": 12,
+            "complete": false,
+            "executedArgumentsEqual": true,
+            "candidateMatches": [
+              {
+                "key": "scene-01-release-breakdown",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "scene-02-aftermath",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "scene-03-restart",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "scene-04-refuse-sign",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-01-press-data",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-02-press-betrayal",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-03-post-loss",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-04-post-retracted",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-05-restart-awake",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-06-pen-offer",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-07-pressure-stop",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              },
+              {
+                "key": "shot-08-demand-complete",
+                "resultId": "f3d6d148-413d-4442-a68a-3ccb8903ffb9",
+                "textEqual": true
+              }
+            ]
+          },
+          {
+            "callId": "call_b993bb0fa14a41ef8b26d2d33bd14e51",
+            "partKey": "finalize-script-to-media",
+            "prompts": 0,
+            "complete": true,
+            "executedArgumentsEqual": true,
+            "candidateMatches": []
+          }
+        ],
+        "archiveChecks": [
+          {
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "resultId": "d839d1a4-9596-4103-a457-b5de857640b7",
+            "argumentsEqual": true,
+            "hashEqual": true
+          },
+          {
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "resultId": "e7c6a519-a969-447d-8a21-d75990803721",
+            "argumentsEqual": true,
+            "hashEqual": true
+          }
+        ],
+        "objectChecks": [
+          {
+            "key": "voice-linyan",
+            "id": "36381cbe-95e6-4f42-938b-bb55c1e605b2",
+            "kind": "voice",
+            "title": "林砚｜克制而逐渐决绝的女声",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 183,
+            "bytes": 549,
+            "sha256": "f07d7454cbe1b78cf41d3d2ff62723bb6b1d480d79b953b9947604304fb0fc23",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 21,
+              "sha256": "76ca1178bc7ab3856de1b15235148f723d2ac306837cd04dde2e7a201e149198",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "voice-shen",
+            "id": "bb6e5c5a-4086-4529-a0dd-ae95906f5a76",
+            "kind": "voice",
+            "title": "沈砚舟｜表面克制的男声",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 145,
+            "bytes": 435,
+            "sha256": "985e495e8cd7b2d8e0a58ca6fe6b4868a4aed69a1a5509fe921ab4800ed9fa55",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 12,
+              "sha256": "a823d4975cd4687c0d5902009c3af3b9faedf267db6bb916a309f2f64f3f8fd9",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "voice-guchengchuan",
+            "id": "6d8e1db7-21a6-4226-aca5-1550ed675bf3",
+            "kind": "voice",
+            "title": "顾承川｜掌控局面的男声",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 152,
+            "bytes": 456,
+            "sha256": "5afb3a0587b803ba0d6b1c8f378b439e1d7a07107cf8c0479cacf15e1081acd3",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 18,
+              "sha256": "c647ce624b0d0f6d057e72e84a82aa256fbc7daef82ad1c0361f88a8d36176fd",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char-linyan",
+            "id": "ebd3730e-a422-41f1-88cb-acbaa41b4427",
+            "kind": "character",
+            "title": "林砚｜研发负责人",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 439,
+            "bytes": 1299,
+            "sha256": "70c5cafaa8082094260336376e128a744d1a39b1076bf3b8d4df29541559d382",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char-shen-yanzhou",
+            "id": "353852ea-b580-4f5c-9e15-6995a155a854",
+            "kind": "character",
+            "title": "沈砚舟｜林砚未婚夫与合作方",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 365,
+            "bytes": 1077,
+            "sha256": "41c65815db841b663ff60ed5f18849cd133130a4b39ec40184228958955dd7de",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char-guchengchuan",
+            "id": "b7ae933e-e05e-4e5e-bbf9-4a4bf7471a4a",
+            "kind": "character",
+            "title": "顾承川｜公司话语权掌握者",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 350,
+            "bytes": 1032,
+            "sha256": "5dcc77d52a08d2c4455e61b99be0c80add614e7625e64091e8eb27128c40c058",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "loc-press-conference",
+            "id": "4de73adf-9fb6-4594-8792-6f1a6aa06f9b",
+            "kind": "location",
+            "title": "产品发布会现场",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 315,
+            "bytes": 939,
+            "sha256": "7297bd4de8959c82487d84acef480ae3b40a40bfc1054bc3538101dee6b8f82c",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "loc-post-event",
+            "id": "bfffcdd1-ffce-4ebd-8aec-73dbfb0dc137",
+            "kind": "location",
+            "title": "发布会后林砚所处的工作空间",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 293,
+            "bytes": 873,
+            "sha256": "b8f89c81513e253b099887344a29a031384dcf46c77f5a4b8e8adf0a23b2dbe0",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "loc-three-years-office",
+            "id": "3f8557af-57c8-42f0-8064-d321215f4afa",
+            "kind": "location",
+            "title": "三年前第一次签署核心项目授权的办公空间",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 281,
+            "bytes": 837,
+            "sha256": "f4ce2f451188458f2d06567dfd87150ab97ec4b24f1c6f0ce479ee9c2e96e148",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop-authorization",
+            "id": "41043415-513b-4ff2-a5e5-360c33a5bc3f",
+            "kind": "prop",
+            "title": "核心项目授权书",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 239,
+            "bytes": 717,
+            "sha256": "827e311e31360cecc3846ea83a243ce43099fd01a8f1bda32cca34e43d599405",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop-pen",
+            "id": "13c55273-ad51-4306-9eca-6ca9c147a97d",
+            "kind": "prop",
+            "title": "授权签署用笔",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 165,
+            "bytes": 487,
+            "sha256": "fe949abbfad460d74d3d2ef2e58bdad51558409fadfe18e176725975c5204230",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop-phone",
+            "id": "0d709555-ffac-4f5a-a501-5bf3f833c356",
+            "kind": "prop",
+            "title": "林砚的手机",
+            "callId": "call_d6bb69ab69b24449b569f871625e9d9f",
+            "characters": 208,
+            "bytes": 624,
+            "sha256": "0cbde2ceb81020740a6ff13d3ba7f06d230b388d56a6928523dd84cf977d2186",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "scene-01-release-breakdown",
+            "id": "1134757a-5c58-4ef4-846e-3e5124f2062d",
+            "kind": "scene",
+            "title": "场次一｜发布会失控",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 940,
+            "bytes": 2724,
+            "sha256": "eba3facac7bee8f602e8e16398bb59a4e8294918be0c43dfd5d037b3a12371dc",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "scene-02-aftermath",
+            "id": "25331113-c69c-4b70-a776-a6758e5ff068",
+            "kind": "scene",
+            "title": "场次二｜名誉崩塌",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 766,
+            "bytes": 2204,
+            "sha256": "df80d8a5a141065c53efc9edadf71101fc7166c0d1724b7b2a1e9730b710a6e9",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "scene-03-restart",
+            "id": "50107d81-784f-411f-ae1d-e262150eb068",
+            "kind": "scene",
+            "title": "场次三｜回到三年前",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 785,
+            "bytes": 2263,
+            "sha256": "b66f732960c0926f82557fa2aebb31d70700cb844bc2055bddd3518b69908556",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "scene-04-refuse-sign",
+            "id": "d62450b0-1bae-4355-9c17-817738086528",
+            "kind": "scene",
+            "title": "场次四｜拒签授权",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 870,
+            "bytes": 2506,
+            "sha256": "800cca43cf22d8c544213e6d90ec8c1a5e2e77ac79b11d301e8da4ca8ba4b5e9",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-01-press-data",
+            "id": "93c73229-15dd-4c39-a97c-22079f3ca854",
+            "kind": "shot",
+            "title": "镜头01｜发布会数据争议",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 388,
+            "bytes": 1164,
+            "sha256": "03ef8df4218efe0b641336ecd41264ed7e9af05b667cdb96871f2bf456f679d1",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-02-press-betrayal",
+            "id": "5cf8011e-f1c6-48af-ad6b-007ea06cd435",
+            "kind": "shot",
+            "title": "镜头02｜站到顾承川身后",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 336,
+            "bytes": 1008,
+            "sha256": "5b3bc924cb95336545a1afc0b72f99eba7a82e0c3e4b41c0d1b4c05f6de173f8",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-03-post-loss",
+            "id": "124a7f4b-f851-4703-a4d9-f2581eb71b0a",
+            "kind": "shot",
+            "title": "镜头03｜职位与名誉迅速失去",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 310,
+            "bytes": 930,
+            "sha256": "f5eeacee75b647d661ca5aa368dced79a413a34a7bb32ec2cb5018abd8c7bd29",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-04-post-retracted",
+            "id": "f0171b6d-20e9-44b3-8592-4c055ea2b9c8",
+            "kind": "shot",
+            "title": "镜头04｜被撤回的求助信息",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 299,
+            "bytes": 897,
+            "sha256": "7621ca4dc35ab586fe891e0052174d270026425a3128564dabcb89fd9b21c9eb",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-05-restart-awake",
+            "id": "a0e3e1c8-a4c2-4049-9d77-293ef99fafdb",
+            "kind": "shot",
+            "title": "镜头05｜授权书前醒来",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 283,
+            "bytes": 849,
+            "sha256": "71fe7d69b3e5e3c3d0e637ab6b6b65d25972f32b21ff0ffc65bba1215a140f8b",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-06-pen-offer",
+            "id": "fe727a5c-053d-4320-8ffb-eaf207b456d1",
+            "kind": "shot",
+            "title": "镜头06｜递笔催签",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 293,
+            "bytes": 879,
+            "sha256": "f64e2cdcb09f86ddf8ff5ffddaa6f01a85a0c62e389051fa0cdf2e845bbab23b",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-07-pressure-stop",
+            "id": "16e624b0-eb71-4b68-845d-2388e3ff64e9",
+            "kind": "shot",
+            "title": "镜头07｜握笔而不落笔",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 296,
+            "bytes": 888,
+            "sha256": "c7ebbbe40efad4b5f49ade12b62a5583253aa9fee66c051117d1ce67efa92674",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "shot-08-demand-complete",
+            "id": "f51dbdac-c20f-4061-9e43-d02af62737af",
+            "kind": "shot",
+            "title": "镜头08｜要求完整版本",
+            "callId": "call_70f02760b68a438ea22f648721d1c0f7",
+            "characters": 352,
+            "bytes": 1056,
+            "sha256": "f1b2e5c24471e69d47bddd6e439e3ae64bb39e665e5e9ed3167136325d3cf53c",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": false
+          }
+        ],
+        "ordinaryMessageSummary": [
+          {
+            "resultId": "10adf810-1342-4b14-9441-425362454188",
+            "characters": 68,
+            "toolNames": [
+              "production.skill.read"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "5fbc4573-d537-411a-a15f-884119458932",
+            "characters": 0,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "9de4464e-ccda-401d-bcf7-55941aefe81f",
+            "characters": 98,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "35c2ea4c-6bd1-4e3f-b3d6-be60451c31a3",
+            "characters": 113,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "8349e2f2-0977-465f-b038-d2e34a5393f7",
+            "characters": 113,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "64b4c187-83a7-4768-8040-d693754bd865",
+            "characters": 0,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "b2750207-6167-4f0a-826a-986e1987f364",
+            "characters": 0,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "b6d85a42-4f0e-4ae0-a844-f28c36890413",
+            "characters": 75,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "394e2381-c5a4-4b29-be68-aa262c9718d9",
+            "characters": 95,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "e98764d0-e3c3-454f-bb77-fa2aad2692c6",
+            "characters": 428,
+            "toolNames": [],
+            "hasTimeline": false
+          }
+        ],
+        "allObjectsEqual": true
+      },
+      {
+        "label": "original user task snapshot",
+        "taskId": "973acb94-e79a-4637-806c-01a91febbca3",
+        "assistantMessages": 14,
+        "submissionChecks": [
+          {
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "partKey": "reference-materials-1",
+            "prompts": 12,
+            "complete": false,
+            "executedArgumentsEqual": true,
+            "candidateMatches": [
+              {
+                "key": "char_lin_yan",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "char_shen_yanzhou",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "char_gu_chengchuan",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "char_xu_tang",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "loc_press_venue",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "loc_office",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "prop_authorization",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "prop_pen",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "prop_phone",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "voice_lin_yan",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "voice_shen_yanzhou",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              },
+              {
+                "key": "voice_gu_chengchuan",
+                "resultId": "33d0b60a-ef0c-4f37-a1fc-5eefbf937d39",
+                "textEqual": true
+              }
+            ]
+          },
+          {
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "partKey": "shots-01",
+            "prompts": 9,
+            "complete": false,
+            "executedArgumentsEqual": true,
+            "candidateMatches": [
+              {
+                "key": "shot_s1_01",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s1_02",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s1_03",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s2_01",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s2_02",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s3_01",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s3_02",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s4_01",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s4_02",
+                "resultId": "99a71818-ddc8-4bdf-aa05-4a2a3d0456fc",
+                "textEqual": true
+              }
+            ]
+          },
+          {
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "partKey": "scenes-final",
+            "prompts": 5,
+            "complete": true,
+            "executedArgumentsEqual": true,
+            "candidateMatches": [
+              {
+                "key": "scene_01_press_failure",
+                "resultId": "950614c0-86f0-457a-81fa-c37d8cbcf405",
+                "textEqual": true
+              },
+              {
+                "key": "scene_02_reputation_collapse",
+                "resultId": "950614c0-86f0-457a-81fa-c37d8cbcf405",
+                "textEqual": true
+              },
+              {
+                "key": "scene_03_return_to_past",
+                "resultId": "950614c0-86f0-457a-81fa-c37d8cbcf405",
+                "textEqual": true
+              },
+              {
+                "key": "scene_04_refuse_authorization",
+                "resultId": "950614c0-86f0-457a-81fa-c37d8cbcf405",
+                "textEqual": true
+              },
+              {
+                "key": "shot_s4_02",
+                "resultId": "950614c0-86f0-457a-81fa-c37d8cbcf405",
+                "textEqual": true
+              }
+            ]
+          }
+        ],
+        "archiveChecks": [
+          {
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "resultId": "57331019-ba2b-4931-a7ff-d9fc806af3bd",
+            "argumentsEqual": true,
+            "hashEqual": true
+          },
+          {
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "resultId": "b21d167f-d0a0-4cc1-bd95-458742ea787a",
+            "argumentsEqual": true,
+            "hashEqual": true
+          },
+          {
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "resultId": "4c69e469-566a-4e3b-b60a-d70c0ea87956",
+            "argumentsEqual": true,
+            "hashEqual": true
+          }
+        ],
+        "objectChecks": [
+          {
+            "key": "voice_lin_yan",
+            "id": "2ab7b8d0-9aeb-4b44-9d2f-3f458770917d",
+            "kind": "voice",
+            "title": "林砚｜克制而决绝的女声",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 124,
+            "bytes": 372,
+            "sha256": "696d5443a501e581ebfca3a0e46cce1c78ad4a3df12e37c2cfd6ee12be106e42",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 13,
+              "sha256": "a09a305b41d79225c41b0a98f9b2e82c68d5c0805b415f0d018ac9ee03a23373",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "voice_shen_yanzhou",
+            "id": "05a673af-db5f-4c5c-be00-7b34f3127394",
+            "kind": "voice",
+            "title": "沈砚舟｜表面克制的男声",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 94,
+            "bytes": 282,
+            "sha256": "1b2be5c5faf8e9755c0728e2d6ccb943cef2a054b960102a6819667ff5de9d4b",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 12,
+              "sha256": "a823d4975cd4687c0d5902009c3af3b9faedf267db6bb916a309f2f64f3f8fd9",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "voice_gu_chengchuan",
+            "id": "bedaef0a-c08b-4876-98fe-09a78b81514e",
+            "kind": "voice",
+            "title": "顾承川｜掌控压力的男声",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 97,
+            "bytes": 291,
+            "sha256": "e804505be08063782ae4c171633849e607c587ed7fdb45f8bac955c8fb0532a7",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "voiceSample": {
+              "characters": 15,
+              "sha256": "00961bf216db218cbb02638c6cdb742788371e5100f88fc96e138cc7c4dd5cfd",
+              "candidateEqual": true,
+              "savedManifestEqual": true,
+              "databaseEqual": true
+            },
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char_lin_yan",
+            "id": "7279b549-c906-49ee-b022-df3f5894e6c3",
+            "kind": "character",
+            "title": "林砚｜研发负责人",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 329,
+            "bytes": 975,
+            "sha256": "debcc9724336720b9b7ac65ec34ce8dbc114e6e07c2a1d92b9778708322a22d8",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char_shen_yanzhou",
+            "id": "dd653040-b1f1-4e09-b258-9c7d444d461a",
+            "kind": "character",
+            "title": "沈砚舟｜林砚未婚夫与合作方",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 237,
+            "bytes": 711,
+            "sha256": "de3ace0e824691fe0c0226fd20c27dc4743f3aff34bb3f34d5842eacbcc83d82",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char_gu_chengchuan",
+            "id": "e75799ff-2e1a-4122-bec0-b5c0bd0f3c2d",
+            "kind": "character",
+            "title": "顾承川｜公司权力方",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 216,
+            "bytes": 648,
+            "sha256": "4f33d6911726c6a4eaac77df9287589c7002e6fbd92041b6943204268afd5f78",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "char_xu_tang",
+            "id": "a76fa3fd-c226-40cd-9413-4db26afb8292",
+            "kind": "character",
+            "title": "许棠｜研发团队关联人物",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 173,
+            "bytes": 519,
+            "sha256": "047ea0ca120a75c97471bc6683d1819010feec0a776191df016dfbf346f21441",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "loc_press_venue",
+            "id": "0fe8b6be-fa59-4573-9949-544c851cf2fa",
+            "kind": "location",
+            "title": "产品发布会场馆",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 238,
+            "bytes": 704,
+            "sha256": "e50a42348f31dc1651d391f266cb49c89174817666f184a1e8e8c7408b894e3a",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "loc_office",
+            "id": "c9d03b2a-aa42-4744-bcc9-ef5f5644e1de",
+            "kind": "location",
+            "title": "核心项目授权办公空间",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 198,
+            "bytes": 588,
+            "sha256": "b6600e82342c55e4511acbdd97c84ea9c08c8766ae8aa7fd6585e092ff728206",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop_authorization",
+            "id": "06371324-d49d-43c9-a55e-b5b06004ef30",
+            "kind": "prop",
+            "title": "核心项目授权书",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 185,
+            "bytes": 553,
+            "sha256": "cb9dd798bac24da91d7009357516ff936acc5db46072fbde8415e3e42e543f08",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop_pen",
+            "id": "6c8d5d84-f1f4-4132-bfa8-4b3e42282539",
+            "kind": "prop",
+            "title": "签署用笔",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 116,
+            "bytes": 348,
+            "sha256": "4abfd4da2c54ff51391cdd3bdc6895d81a16fda12be14a1531469e0459436eb9",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "prop_phone",
+            "id": "7d633688-d2b2-426f-8e9b-9779c393cca4",
+            "kind": "prop",
+            "title": "林砚的手机",
+            "callId": "call_9378b15fef19433084b435832f774556",
+            "characters": 116,
+            "bytes": 348,
+            "sha256": "53dd137bb1bcf3c961d1b6b10f6ec26523ed563dc384421056c059063f82ebf5",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": false
+          },
+          {
+            "key": "scene_01_press_failure",
+            "id": "af91be65-e9aa-4fd9-a567-85a17676b438",
+            "kind": "scene",
+            "title": "场次一｜发布会失控",
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "characters": 796,
+            "bytes": 2318,
+            "sha256": "c43dc2b989e423696ec69bf3ea84d5790655a61d3763bc36407be4b8f0293775",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "scene_02_reputation_collapse",
+            "id": "b1aa895a-70ca-4736-9d61-f04d55f4a882",
+            "kind": "scene",
+            "title": "场次二｜名誉崩塌",
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "characters": 537,
+            "bytes": 1563,
+            "sha256": "7aaeb8613dc5af122f956e201afc29e89a6360ed677011744f0bf0b5eb3b37f3",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "scene_03_return_to_past",
+            "id": "762da2bb-371b-4aa2-96b3-9a2b8cd1f504",
+            "kind": "scene",
+            "title": "场次三｜回到三年前",
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "characters": 607,
+            "bytes": 1765,
+            "sha256": "b183dade1c07ced5b062afc7bed3ceb057c2f48062f3e17d040d528b52b9a940",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "scene_04_refuse_authorization",
+            "id": "88ff9b59-524a-4957-85ef-487ef8d3396e",
+            "kind": "scene",
+            "title": "场次四｜停笔拒签",
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "characters": 619,
+            "bytes": 1811,
+            "sha256": "8d8b24d8b98e83b51f3c7bc97469dcfd5202aba283912f746bb54b42bb6c8cd5",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s1_01",
+            "id": "18922510-7d35-4f9f-91f3-1b37a2d4c912",
+            "kind": "shot",
+            "title": "发布会数据争议建立",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 609,
+            "bytes": 1807,
+            "sha256": "16c25be46da8490caf328a2a33469eb1f6909cd2867951145b6d5930576ae81f",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s1_02",
+            "id": "d22c7fc9-2af4-43ad-9484-30cf08cc7a3a",
+            "kind": "shot",
+            "title": "沈砚舟递出不利文件",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 481,
+            "bytes": 1419,
+            "sha256": "de3a93f894d3df8f6f3b417fd5d075c1636e9936cda1f798aab9210cb17de15d",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s1_03",
+            "id": "daa15e71-412b-4067-9cf1-522fda7d260f",
+            "kind": "shot",
+            "title": "站到顾承川身后",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 403,
+            "bytes": 1181,
+            "sha256": "c46aa09f8a1b855c14f9bf3bdaca1460a870fea4940c577ab0cebf97160b1e1d",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s2_01",
+            "id": "30fabf43-da66-4427-9cd1-a5bcf2209923",
+            "kind": "shot",
+            "title": "发布会后失去解释空间",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 424,
+            "bytes": 1252,
+            "sha256": "e67e505f216935f6ca301b57a6f5fb4ad53ca5b747e4a11b3fbc8470f36890bb",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s2_02",
+            "id": "53fc069c-bf07-41d8-afa2-b18a4ba1ce89",
+            "kind": "shot",
+            "title": "被撤回的求助信息",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 416,
+            "bytes": 1220,
+            "sha256": "a373de3db9c7b7e21df061d71027527de0761cef0d16fcb687984fd7ee823dd2",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s3_01",
+            "id": "58713106-a961-4ca7-ad04-212a1d794991",
+            "kind": "shot",
+            "title": "三年前授权日醒来",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 463,
+            "bytes": 1361,
+            "sha256": "f8ab46c3adf3366039415f3706823d0d44569866d0a67fad31f9abbc282ea9c8",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s3_02",
+            "id": "5907a3c3-ad4e-43a4-9f49-a9b88e4102db",
+            "kind": "shot",
+            "title": "笔递到面前的关键节点",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 434,
+            "bytes": 1274,
+            "sha256": "225adc9be3b5165144f58bd467a912e39e3ec844666287773af76d517bb71957",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s4_01",
+            "id": "153e65b3-f2dd-4487-a7df-236ab474996f",
+            "kind": "shot",
+            "title": "停笔要求完整版本",
+            "callId": "call_01ec953771a4400eb56e7f9cd6f6104e",
+            "characters": 461,
+            "bytes": 1355,
+            "sha256": "b35cd060afcfc6770c47c272be8641c56fcb524d245dbe3c90dfb893383a2fa8",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          },
+          {
+            "key": "shot_s4_02",
+            "id": "8d419f2d-8c32-4830-ab9e-b9f2c4bba946",
+            "kind": "shot",
+            "title": "集尾未签署的授权书",
+            "callId": "call_5ecb581a08564ea792a643869237fee1",
+            "characters": 641,
+            "bytes": 1901,
+            "sha256": "ff6a5f572608ce8ee29ed153b1c77148363c64441e8e13b6c8139317bcc63a37",
+            "parsedAssistantToExecutedArguments": true,
+            "parsedAssistantToCandidate": true,
+            "parsedAssistantToSavedManifest": true,
+            "parsedAssistantToDatabase": true,
+            "displayWithoutMediaEqual": true,
+            "stripManagedHeaderEqual": true,
+            "hasRelativeSeconds": true
+          }
+        ],
+        "ordinaryMessageSummary": [
+          {
+            "resultId": "d70c0fe7-4ab9-4376-8718-e55733a71761",
+            "characters": 77,
+            "toolNames": [
+              "production.skill.read"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "4829d37b-4043-439b-a3fd-5c850b6afd04",
+            "characters": 81,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "4a5dd480-a920-4e6f-9b36-d650edb66074",
+            "characters": 0,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "1d462496-d903-4f43-9b08-205c7ad64fac",
+            "characters": 0,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "38da5a10-5a9d-4b8f-968f-feb9cdbc87eb",
+            "characters": 126,
+            "toolNames": [
+              "project.structure.get"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "aceae6ab-0d8e-4762-8bb3-2594876fa330",
+            "characters": 99,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "93536a5e-678d-4a26-bdf1-5d9c9986ef99",
+            "characters": 99,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "e6a3fd39-4a97-4f52-9ad3-3c4bd8d62982",
+            "characters": 91,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "d458ff15-c23f-4b67-b6f8-73f6f325c6b9",
+            "characters": 91,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "c74ed6b0-c5f1-4cfa-a1c8-f9de7259888a",
+            "characters": 91,
+            "toolNames": [
+              "production.bundle"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "0bf3828e-2db0-4e2f-9370-d937fdea0e3d",
+            "characters": 0,
+            "toolNames": [
+              "conversation.task.checkpoint"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "e72ccee8-cf0f-414e-b3b4-78c1121c6353",
+            "characters": 102,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "3013bbda-3187-4158-b0a5-5bbc88da3d4b",
+            "characters": 102,
+            "toolNames": [
+              "production.bundle.submit"
+            ],
+            "hasTimeline": false
+          },
+          {
+            "resultId": "ff39ecfa-4e78-4179-bf28-d71da1ebd5d2",
+            "characters": 518,
+            "toolNames": [],
+            "hasTimeline": false
+          }
+        ],
+        "allObjectsEqual": true
+      }
+    ]
+  },
+  "totals": {
+    "finalObjects": 49,
+    "submittedPromptVersions": 50,
+    "voiceSampleTexts": 6,
+    "archiveReferencesChecked": 5,
+    "parserToolFragmentCombinations": 48,
+    "localPlainTextLossCases": 4
+  },
+  "verification": {
+    "nativeDiagnostics": {
+      "filter": "return_content_audit_20261116",
+      "passed": 2,
+      "failed": 0,
+      "note": "diagnostic assertions intentionally confirm the currently broken ordinary-text output; passing does not mean fixed"
+    },
+    "existingWorkerBridge": {
+      "file": "apps/worker/src/native-provider-bridge.test.ts",
+      "passed": 75,
+      "failed": 0
+    },
+    "existingUiFormatter": {
+      "file": "packages/contracts/src/production-inputs.test.ts",
+      "passed": 9,
+      "failed": 0
+    },
+    "historicalReadOnlyComparisonsPassed": true
+  },
+  "codeLocations": {
+    "nativeChatContent": "apps/desktop/src-tauri/src/llm_stream.rs:2444",
+    "unsafeHeuristic": "apps/desktop/src-tauri/src/llm_stream.rs:2510",
+    "prefixDiscard": "apps/desktop/src-tauri/src/llm_stream.rs:2540",
+    "nativeToolArguments": "apps/desktop/src-tauri/src/llm_stream.rs:2487",
+    "responsesText": "apps/desktop/src-tauri/src/llm_stream.rs:2314",
+    "workerFinalToolArguments": "apps/worker/src/native-provider-bridge.ts:697",
+    "bundleProjection": "apps/worker/src/production-bundle-submission.ts:14",
+    "persistence": "apps/worker/src/production-bundle-service.ts:240",
+    "persistenceReadback": "apps/worker/src/production-bundle-service.ts:483",
+    "shotUi": "apps/desktop/src/ShotWorkspace.tsx:763",
+    "uiFormatter": "packages/contracts/src/production-inputs.ts:137"
+  },
+  "rawEvidenceRoot": "C:\\Users\\MSI\\AppData\\Local\\Temp\\p22-prompt-live-20261116-1794831058193",
+  "nextFixBoundary": "Preserve standard incremental deltas at the Native Chat Completions boundary. If a provider sends cumulative snapshots, declare and normalize that distinct transport behavior explicitly. Do not add semantic gating or rewrite generated prompt bodies."
+}

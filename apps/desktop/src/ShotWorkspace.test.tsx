@@ -71,6 +71,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 function renderWorkspace(
   overrides: Partial<import('react').ComponentProps<typeof ShotWorkspace>> = {},
@@ -127,76 +128,6 @@ describe('shot reference storage', () => {
   });
 });
 describe('ShotWorkspace', () => {
-  it('fills every confirmed source image for still generation and every final reference for video', async () => {
-    vi.mocked(callWorker).mockImplementation(async (method) => {
-      await Promise.resolve();
-      if (method === 'shot.continuity.get')
-        return {
-          shotId: 'shot',
-          rowVersion: 3,
-          stale: false,
-          videos: [],
-          images: [characterAsset, sceneAsset, firstFrameAsset],
-          binding: {
-            selectionVersion: 2,
-            sourceImages: [characterAsset, sceneAsset].map((asset) => ({
-              assetId: asset.id,
-              contentHash: asset.contentHash,
-            })),
-            sourceVideos: [],
-            targetRowVersion: 0,
-            mode: 'reference',
-            notes: '',
-            frames: [],
-            anchorAssetId: characterAsset.id,
-            referenceAssetIds: [sceneAsset.id, characterAsset.id],
-            firstFrameAssetId: firstFrameAsset.id,
-            imagePrompt: '独立静态提示词',
-          },
-        };
-      if (method === 'shot.continuity.prompt.save')
-        return {
-          shotId: 'shot',
-          rowVersion: 4,
-          stale: false,
-          videos: [],
-          images: [characterAsset, sceneAsset, firstFrameAsset],
-          binding: {
-            selectionVersion: 2,
-            sourceImages: [characterAsset, sceneAsset].map((asset) => ({
-              assetId: asset.id,
-              contentHash: asset.contentHash,
-            })),
-            sourceVideos: [],
-            targetRowVersion: 0,
-            mode: 'reference',
-            notes: '',
-            frames: [],
-            anchorAssetId: characterAsset.id,
-            referenceAssetIds: [sceneAsset.id, characterAsset.id],
-            firstFrameAssetId: firstFrameAsset.id,
-            imagePrompt: '独立静态提示词',
-          },
-        };
-      if (method === 'scene.media.resolve') return { characters: [], voices: [], assets: [] };
-      return [];
-    });
-    const f = renderWorkspace({ referenceBindings: {} });
-    await screen.findByText('已确认的衔接');
-    fireEvent.click(screen.getByRole('button', { name: '填充本镜视频表单' }));
-    await waitFor(() => expect(f.onGenerateVideo).toHaveBeenCalledOnce());
-    expect(shotReferenceImageSelections(f.onGenerateVideo.mock.calls[0]![0])).toEqual([
-      { assetId: firstFrameAsset.id, role: 'first-frame' },
-      { assetId: sceneAsset.id, role: 'reference' },
-      { assetId: characterAsset.id, role: 'reference' },
-    ]);
-    fireEvent.click(screen.getByRole('button', { name: '填充参考图生图表单', hidden: true }));
-    await waitFor(() => expect(f.onGenerateImage).toHaveBeenCalledOnce());
-    expect(shotReferenceImageSelections(f.onGenerateImage.mock.calls[0]![0])).toEqual([
-      { assetId: characterAsset.id, role: 'reference' },
-      { assetId: sceneAsset.id, role: 'reference' },
-    ]);
-  });
   it('projects bound images into the prompt as labeled thumbnails without saving the projection', async () => {
     saveShotReferences('project', 'shot', {
       characterBindings: [{ characterDocumentId: characterDoc.id, assetId: characterAsset.id }],
@@ -291,7 +222,7 @@ describe('ShotWorkspace', () => {
         });
       return Promise.resolve([]);
     });
-    const { onGenerateImage } = renderWorkspace({
+    const { onGenerateVideo } = renderWorkspace({
       bindings: undefined,
       documents: [characterDoc],
     });
@@ -310,9 +241,9 @@ describe('ShotWorkspace', () => {
     });
     await screen.findByLabelText('林澈角色参考图');
     await waitFor(() => expect(pendingReads).toHaveLength(1));
-    const fillButton = screen.getByRole('button', { name: '填充本镜图片表单' });
+    const fillButton = screen.getByRole('button', { name: '填充本镜视频表单' });
     fireEvent.click(fillButton);
-    expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定并填充画面表单');
+    expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定并填充视频表单');
     await waitFor(() => expect(fillButton).toBeDisabled());
     fireEvent.click(fillButton);
     finishMedia?.({
@@ -320,44 +251,43 @@ describe('ShotWorkspace', () => {
       voices: [],
       assets: [characterAsset],
     });
-    await waitFor(() => expect(onGenerateImage).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onGenerateVideo).toHaveBeenCalledOnce());
     expect(screen.queryByText(/正在解析本镜绑定/)).not.toBeInTheDocument();
   });
-  it.each([
-    ['image', '填充本镜图片表单'],
-    ['video', '填充本镜视频表单'],
-  ] as const)('%s opens its form before reference saving completes', async (mode, buttonName) => {
-    if (mode === 'video')
-      saveShotReferences('project', 'shot', { firstFrameAssetId: firstFrameAsset.id });
-    let finishBindingSave: (() => void) | undefined;
-    const onPrepareGenerate = vi.fn();
-    const onSaveReferenceBindings = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          finishBindingSave = resolve;
-        }),
-    );
-    const { onGenerateImage, onGenerateVideo } = renderWorkspace({
-      onPrepareGenerate,
-      onSaveReferenceBindings,
-    });
-    fireEvent.click(screen.getByRole('button', { name: buttonName }));
-    expect(onPrepareGenerate).toHaveBeenCalledWith(mode, '雨夜里林澈回头', expect.any(Object));
-    expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定');
-    await waitFor(() => expect(onSaveReferenceBindings).toHaveBeenCalledOnce());
-    expect(onGenerateImage).not.toHaveBeenCalled();
-    expect(onGenerateVideo).not.toHaveBeenCalled();
-    finishBindingSave?.();
-    await waitFor(() => {
-      if (mode === 'image') expect(onGenerateImage).toHaveBeenCalledOnce();
-      else expect(onGenerateVideo).toHaveBeenCalledOnce();
-    });
-  });
+  it.each([['video', '填充本镜视频表单']] as const)(
+    '%s opens its form before reference saving completes',
+    async (mode, buttonName) => {
+      if (mode === 'video')
+        saveShotReferences('project', 'shot', { firstFrameAssetId: firstFrameAsset.id });
+      let finishBindingSave: (() => void) | undefined;
+      const onPrepareGenerate = vi.fn();
+      const onSaveReferenceBindings = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishBindingSave = resolve;
+          }),
+      );
+      const { onGenerateImage, onGenerateVideo } = renderWorkspace({
+        onPrepareGenerate,
+        onSaveReferenceBindings,
+      });
+      fireEvent.click(screen.getByRole('button', { name: buttonName }));
+      expect(onPrepareGenerate).toHaveBeenCalledWith(mode, '雨夜里林澈回头', expect.any(Object));
+      expect(await screen.findByRole('status')).toHaveTextContent('正在解析本镜绑定');
+      await waitFor(() => expect(onSaveReferenceBindings).toHaveBeenCalledOnce());
+      expect(onGenerateImage).not.toHaveBeenCalled();
+      expect(onGenerateVideo).not.toHaveBeenCalled();
+      finishBindingSave?.();
+      await waitFor(() => {
+        expect(onGenerateVideo).toHaveBeenCalledOnce();
+      });
+    },
+  );
   it.each(
     (['scoped', 'all-visible', 'legacy', 'empty'] as const).flatMap((state) =>
-      (['image', 'video'] as const).map((mode) => ({ state, mode })),
+      (['video'] as const).map((mode) => ({ state, mode })),
     ),
-  )('scopes automatic references for $mode production ($state)', async ({ state, mode }) => {
+  )('scopes automatic references for $mode production ($state)', async ({ state }) => {
     const otherDoc = { ...characterDoc, id: 'absent', title: '顾清影' };
     const otherImage = {
       ...characterAsset,
@@ -407,7 +337,7 @@ describe('ShotWorkspace', () => {
         });
       return Promise.resolve([]);
     }) as typeof callWorker);
-    const { onGenerateImage, onGenerateVideo } = renderWorkspace({
+    const { onGenerateVideo } = renderWorkspace({
       bindings: undefined,
       ...(state === 'legacy'
         ? {
@@ -424,14 +354,9 @@ describe('ShotWorkspace', () => {
     if (state !== 'empty')
       await screen.findByLabelText(`${state === 'scoped' ? '林澈' : '顾清影'}角色参考图`);
     const generate = screen.getByRole('button', {
-      name: mode === 'image' ? '填充本镜图片表单' : '填充本镜视频表单',
+      name: '填充本镜视频表单',
     });
-    if (mode === 'video' && state === 'empty') {
-      expect(generate).toBeDisabled();
-      expect(onGenerateVideo).not.toHaveBeenCalled();
-      expect(loadShotReferences('project', 'shot')).toEqual({});
-      return;
-    }
+
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
     const expected =
@@ -440,7 +365,7 @@ describe('ShotWorkspace', () => {
         : state === 'empty'
           ? []
           : [characterAsset.id];
-    const callback = mode === 'image' ? onGenerateImage : onGenerateVideo;
+    const callback = onGenerateVideo;
     await waitFor(() => expect(callback).toHaveBeenCalledOnce());
     if (state === 'empty') {
       expect(callback.mock.calls.at(-1)?.[0]).toEqual({});
@@ -454,50 +379,6 @@ describe('ShotWorkspace', () => {
       expect(
         screen.getByLabelText(`${state === 'scoped' ? '林澈' : '顾清影'}角色参考图`),
       ).toBeInTheDocument();
-  });
-  it('keeps confirmed continuity frames when opening image production from the ordinary shot action', async () => {
-    vi.mocked(callWorker).mockImplementation((method) =>
-      Promise.resolve(
-        method === 'shot.continuity.get'
-          ? {
-              shotId: 'shot',
-              rowVersion: 3,
-              stale: false,
-              videos: [],
-              images: [firstFrameAsset],
-              binding: {
-                sourceShotId: 'previous',
-                sourceVideoAssetId: 'video',
-                sourceVideoHash: 'hash',
-                targetRowVersion: 0,
-                mode: 'reframe',
-                notes: '',
-                frames: [{ assetId: firstFrameAsset.id, timeMs: 1000 }],
-                anchorAssetId: firstFrameAsset.id,
-                imagePrompt: '保留桥柱旁站位，调整为近景。',
-              },
-            }
-          : method === 'scene.media.resolve'
-            ? { characters: [], voices: [], assets: [] }
-            : method === 'asset.mediaSource'
-              ? { assetId: firstFrameAsset.id, path: 'D:/frame.png', contentType: 'image/png' }
-              : [],
-      ),
-    );
-    const { onGenerateImage } = renderWorkspace();
-    await screen.findByText('已确认的衔接');
-    fireEvent.click(screen.getByRole('button', { name: '填充本镜图片表单' }));
-    await waitFor(() =>
-      expect(onGenerateImage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          firstFrameAssetId: undefined,
-          continuityRowVersion: 3,
-          continuityPrompt: '保留桥柱旁站位，调整为近景。',
-          continuityReferenceAssetIds: [firstFrameAsset.id],
-        }),
-        expect.any(String),
-      ),
-    );
   });
   it('explains why video fill stops after a prompt edit until the saved frame is reconfirmed', async () => {
     let context = {
@@ -551,7 +432,9 @@ describe('ShotWorkspace', () => {
       await screen.findByText('镜头提示词已变化，请在镜头衔接中确认沿用现有选帧后再填充。'),
     ).toBeVisible();
     expect(onGenerateVideo).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: '本镜参考图' }));
     fireEvent.click(screen.getByRole('button', { name: '确认沿用现有选帧' }));
+    fireEvent.click(screen.getByRole('tab', { name: '视频提示词' }));
     await screen.findByText('已确认沿用现有选帧，可以填充本镜视频表单。');
     fireEvent.click(screen.getByRole('button', { name: '填充本镜视频表单' }));
     await waitFor(() => expect(onGenerateVideo).toHaveBeenCalledOnce());
@@ -592,7 +475,9 @@ describe('ShotWorkspace', () => {
         ),
       );
       const view = renderWorkspace({ referenceBindings: {} });
-      await screen.findByText('已确认的衔接');
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeEnabled(),
+      );
       const fill = screen.getByRole('button', { name: '填充本镜视频表单' });
       await waitFor(() => expect(fill).toBeEnabled());
       view.rerender(<ShotWorkspace {...view.props} referenceBindings={{}} />);
@@ -733,7 +618,9 @@ describe('ShotWorkspace', () => {
         ),
       );
       const { onGenerateVideo } = renderWorkspace();
-      await screen.findByText('已确认的衔接');
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeEnabled(),
+      );
       fireEvent.click(screen.getByRole('button', { name: '填充本镜视频表单' }));
       await waitFor(() => expect(onGenerateVideo).toHaveBeenCalledOnce());
       const [refs, prompt] = onGenerateVideo.mock.calls[0]!;
@@ -800,8 +687,8 @@ describe('ShotWorkspace', () => {
       documents: [characterDoc, otherCharacter, sceneDoc],
       assets: [],
     });
-    expect(await screen.findByRole('img', { name: 'lin.png' })).toBeInTheDocument();
-    expect(await screen.findByRole('img', { name: 'other.png' })).toBeInTheDocument();
+    expect((await screen.findAllByRole('img', { name: 'lin.png' })).length).toBeGreaterThan(0);
+    expect((await screen.findAllByRole('img', { name: 'other.png' })).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('heading', { name: '本镜角色绑定' })).toHaveLength(1);
     expect(screen.queryByLabelText('角色参考')).not.toBeInTheDocument();
     expect(screen.getByLabelText('场景参考')).toHaveValue(savedImage.id);
@@ -829,6 +716,7 @@ describe('ShotWorkspace', () => {
       return Promise.reject(new Error(`Unexpected method ${method}`));
     });
     renderWorkspace();
+    fireEvent.click(screen.getByRole('tab', { name: '本镜参考图' }));
     expect(await screen.findByRole('img', { name: 'shot.png' })).toHaveAttribute(
       'src',
       '/worker-media/first-frame-asset?thumbnail=1',
@@ -999,52 +887,6 @@ describe('ShotWorkspace', () => {
     resolveOld([sceneAsset]);
     await waitFor(() => expect(screen.getByLabelText('场景参考')).toHaveValue(firstFrameAsset.id));
   });
-  it('does not create reference relationships from names or prompt placeholders', async () => {
-    vi.mocked(callWorker).mockImplementation((method: string, params?: unknown) => {
-      if (method === 'asset.list') {
-        const sourceDocumentId = (
-          params as
-            | {
-                sourceDocumentId?: string;
-              }
-            | undefined
-        )?.sourceDocumentId;
-        if (sourceDocumentId === characterDoc.id) return Promise.resolve([characterAsset]);
-        if (sourceDocumentId === sceneDoc.id) return Promise.resolve([sceneAsset]);
-        return Promise.resolve([]);
-      }
-      if (method === 'asset.mediaSource') {
-        return Promise.resolve({
-          assetId: (
-            params as {
-              assetId: string;
-            }
-          ).assetId,
-          path: 'D:\\\\Project\\\\assets\\\\images\\\\ref.png',
-          contentType: 'image/png',
-        });
-      }
-      throw new Error('Unexpected method ' + method);
-    });
-    const { onGenerateImage } = renderWorkspace({
-      prompt: '[\u89d2\u8272:\u6797\u6f88] [\u573a\u666f:\u65e7\u7801\u5934] \u96e8\u591c',
-    });
-    fireEvent.click(screen.getByRole('button', { name: '填充本镜图片表单' }));
-    await waitFor(() =>
-      expect(onGenerateImage).toHaveBeenCalledWith(expect.anything(), expect.any(String)),
-    );
-    expect(onGenerateImage.mock.calls.at(-1)?.[0]).toEqual({});
-    expect(onGenerateImage.mock.calls.at(-1)?.[1]).toContain('[角色:林澈]');
-    expect(loadShotReferences('project', 'shot')).toEqual({});
-    expect(callWorker).not.toHaveBeenCalledWith(
-      'asset.list',
-      expect.objectContaining({ sourceDocumentId: characterDoc.id }),
-    );
-    expect(callWorker).not.toHaveBeenCalledWith(
-      'asset.list',
-      expect.objectContaining({ sourceDocumentId: sceneDoc.id }),
-    );
-  });
   it('sends a binding-repair request for only the current shot prompt', async () => {
     const onRepairBindings = vi.fn().mockResolvedValue(undefined);
     renderWorkspace({
@@ -1055,20 +897,14 @@ describe('ShotWorkspace', () => {
     await waitFor(() => expect(onRepairBindings).toHaveBeenCalledWith('林澈在旧码头拿起收音机。'));
     expect(await screen.findByText('修复请求已发送到会话。')).toBeVisible();
   });
-  it('keeps generate-video disabled until a reference or mention exists', () => {
-    renderWorkspace();
-    expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeDisabled();
-  });
   it('sends selected first-frame references to video generation', async () => {
     vi.mocked(callWorker).mockResolvedValue({
       assetId: firstFrameAsset.id,
       path: 'D:\\\\Project\\\\assets\\\\images\\\\shot.png',
       contentType: 'image/png',
     });
+    saveShotReferences('project', 'shot', { firstFrameAssetId: firstFrameAsset.id });
     const { onGenerateVideo } = renderWorkspace();
-    fireEvent.change(screen.getByLabelText('\u9996\u5e27'), {
-      target: { value: firstFrameAsset.id },
-    });
     expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: '填充本镜视频表单' }));
     await waitFor(() =>

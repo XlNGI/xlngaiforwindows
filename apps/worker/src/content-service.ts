@@ -43,7 +43,11 @@ import type {
   ShotSaveParams,
   ShotStoryboardSaveParams,
 } from '@ai-video/contracts';
-import { validatePromptBindings, validateProductionTiming } from '@ai-video/contracts';
+import {
+  validatePromptBindings,
+  validateProductionTiming,
+  validatePromptTemplates,
+} from '@ai-video/contracts';
 import { validatePromptBindingReferences } from './prompt-binding-validation.js';
 import type {
   ConversationModelPreferenceRecord,
@@ -976,6 +980,25 @@ export class ContentService {
             updated_at: string;
           }
         | undefined;
+      // Locked older projects stay readable without running the writable migration.
+      const hasVariants = database
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_prompt_template_variants'",
+        )
+        .get();
+      const variants = hasVariants
+        ? (database
+            .prepare(
+              'SELECT templates_json FROM conversation_prompt_template_variants WHERE conversation_id=? AND project_id=?',
+            )
+            .get(conversationId, project.id) as { templates_json: string } | undefined)
+        : undefined;
+      const templates = variants
+        ? (JSON.parse(variants.templates_json) as NonNullable<
+            ConversationPromptTemplateInfo['templates']
+          >)
+        : {};
+      validatePromptTemplates(templates);
       return row
         ? {
             conversationId: row.conversation_id,
@@ -983,13 +1006,15 @@ export class ContentService {
             rowVersion: row.row_version,
             createdAt: row.created_at,
             updatedAt: row.updated_at,
+            templates,
           }
-        : { conversationId, content: '', rowVersion: 0 };
+        : { conversationId, content: '', rowVersion: 0, templates };
     });
   }
   saveConversationPromptTemplate(
     params: ConversationPromptTemplateSaveParams,
   ): ConversationPromptTemplateInfo {
+    if (params.templates !== undefined) validatePromptTemplates(params.templates);
     if (typeof params.content !== 'string') {
       throw new Error('Conversation prompt template must be a string.');
     }
@@ -1050,16 +1075,17 @@ export class ContentService {
             )
             .run(conversation.id, project.id, params.content, nextVersion, now, now);
         }
+        if (params.templates !== undefined)
+          database
+            .prepare(
+              `INSERT INTO conversation_prompt_template_variants(conversation_id,project_id,templates_json)
+           VALUES(?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET templates_json=excluded.templates_json`,
+            )
+            .run(conversation.id, project.id, JSON.stringify(params.templates));
         repositories.conversations.save({ ...conversation, updatedAt: now });
         repositories.projects.touch(now);
         project.updatedAt = now;
-        return {
-          conversationId: conversation.id,
-          content: params.content,
-          rowVersion: nextVersion,
-          createdAt: existing?.created_at ?? now,
-          updatedAt: now,
-        };
+        return this.getConversationPromptTemplate(conversation.id);
       })(),
     );
   }

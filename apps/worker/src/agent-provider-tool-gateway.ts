@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { promptTemplateKindForTools } from '@ai-video/contracts';
 import type {
   AgentGenerationConfirmToolParams,
   AgentGenerationConfirmToolResult,
@@ -21,8 +23,15 @@ import { loadedToolGuidance } from './agent-workflow-guidance.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
 import { taskCheckpointValidationDefinition } from './agent-task-checkpoint-schema.js';
 import { projectBundleSubmission } from './production-bundle-submission.js';
-import { PREPARED_ARGUMENT_TOOLS, type PreparedArgumentsRef } from './agent-prepared-arguments.js';
+import {
+  PREPARED_ARGUMENT_TOOLS,
+  ArchivedArgumentsError,
+  isNewDocumentDraftArguments,
+  normalizeDraftCreationArguments,
+  type PreparedArgumentsRef,
+} from './agent-prepared-arguments.js';
 export const CORE_TOOLS = [
+  'prompt.generation.request',
   'conversation.ask',
   'conversation.task.route',
   'conversation.task.checkpoint',
@@ -134,6 +143,7 @@ export class AgentProviderToolGateway {
   // prepareNextTurnWithContext after finalizing tool results, so remember the
   // termination and avoid trying to advance that already-closed step.
   private terminated = false;
+  private rejectedResponse?: { signature: string; reason: string };
   constructor(
     private readonly executor: AgentProviderToolExecutor,
     private readonly identity: LlmGenerationIdentity,
@@ -144,6 +154,7 @@ export class AgentProviderToolGateway {
       Promise.resolve(false),
     private readonly planHooks?: AgentProviderPlanHooks,
     private readonly lazyTools = false,
+    private readonly purposeOnlyTemplates = false,
   ) {
     this.definitions = cloneDefinitions(initialDefinitions);
     this.bundleTask =
@@ -170,6 +181,13 @@ export class AgentProviderToolGateway {
     );
   }
   currentDefinitions(allowedOperations?: readonly string[]): LlmToolDefinition[] {
+    if (
+      this.definitions.some((tool) => tool.name === 'prompt.generation.submit') &&
+      !this.definitions.some((tool) => tool.name === 'prompt.generation.request')
+    )
+      return cloneDefinitions(
+        this.definitions.filter((tool) => tool.name === 'prompt.generation.submit'),
+      );
     for (const definition of this.definitions)
       if (!this.catalogNames.includes(definition.name)) {
         this.catalogNames.push(definition.name);
@@ -228,9 +246,16 @@ export class AgentProviderToolGateway {
         properties: {
           workflow: {
             type: 'string',
-            enum: ['character-image', 'scene-image', 'video-prompt'],
+            enum: [
+              ...(this.purposeOnlyTemplates ? [] : ['general']),
+              'character-image',
+              'scene-image',
+              'prop-image',
+              'shot-image',
+              'video-prompt',
+            ],
             description:
-              'Load the specialized authoring policy for the current deliverable. Generic document tools do not load unrelated image/video policies.',
+              'Declare the current prompt authoring purpose so the Worker supplies the frozen user template. Generic document/image tools cannot determine its purpose. Templates do not authorize image/video generation.',
           },
           reset: {
             type: 'boolean',
@@ -287,7 +312,7 @@ export class AgentProviderToolGateway {
                 reused: names.filter((name) => !newlyLoaded.includes(name)),
                 cacheRebuild: reset === true,
                 instructions,
-                workflow,
+                workflow: promptTemplateKindForTools(names, workflow),
               }),
             },
           ],
@@ -338,29 +363,64 @@ export class AgentProviderToolGateway {
     calls: Array<{
       id: string;
       name: string;
+      arguments?: unknown;
     }>,
   ): string | undefined {
+    let reason: string | undefined;
     if (calls.length > 8 || new Set(calls.map((call) => call.id)).size !== calls.length)
-      return 'A response must contain at most eight distinct tool calls. No calls were executed.';
-    if (calls.length <= 1) return undefined;
-    if (
+      reason = 'A response must contain at most eight distinct tool calls. No calls were executed.';
+    else if (calls.length <= 1) return undefined;
+    else if (
       calls.some(
         (call) =>
           call.name === 'tools.load' ||
           !unifiedAgentToolRegistry.has(call.name) ||
-          unifiedAgentToolRegistry.executionMode(call.name) !== 'parallel',
+          unifiedAgentToolRegistry.executionMode(call.name, call.arguments) !== 'parallel',
       )
     )
-      return (
+      reason =
         'Only independent read-only calls may share a response. No calls were executed. ' +
-        'Submit tools.load or one write alone; read its result before the next write.'
-      );
-    return undefined;
+        'Immutable checkpoint operation=result pages may be batched. Submit tools.load, checkpoint state/read, or one write alone; read its result before the next write.';
+    if (!reason) return undefined;
+    const signature = createHash('sha256').update(JSON.stringify(calls)).digest('hex');
+    if (this.rejectedResponse?.signature === signature) return this.rejectedResponse.reason;
+    const candidates: string[] = [];
+    for (const call of calls.slice(0, 8)) {
+      if (
+        !PREPARED_ARGUMENT_TOOLS.has(call.name) ||
+        !this.hasDefinition(call.name) ||
+        !call.arguments ||
+        typeof call.arguments !== 'object' ||
+        Object.hasOwn(call.arguments, 'preparedArguments')
+      )
+        continue;
+      try {
+        const ref = this.executor.preserveToolArguments?.(
+          this.identity,
+          call.name,
+          call.arguments,
+          call.id,
+        );
+        if (ref)
+          candidates.push(
+            `callId=${call.id}, tool=${call.name}: ${preparedInstruction(ref, call.name, call.arguments)}`,
+          );
+      } catch {
+        // Preservation failure must never turn a rejected response into executable work.
+      }
+    }
+    if (candidates.length)
+      reason +=
+        '\nRetained candidates below are not saves. Select only ONE candidate for the next response:\n' +
+        candidates.join('\n');
+    this.rejectedResponse = { signature, reason };
+    return reason;
   }
   freezeProviderResponse(
     calls: Array<{
       id: string;
       name: string;
+      arguments?: unknown;
     }>,
   ): void {
     const rejection = this.providerResponseRejection(calls);
@@ -369,7 +429,9 @@ export class AgentProviderToolGateway {
     const key = calls.map((call) => call.id).join(':');
     if (
       this.batch?.key === key ||
-      !calls.every((call) => unifiedAgentToolRegistry.executionMode(call.name) === 'parallel')
+      !calls.every(
+        (call) => unifiedAgentToolRegistry.executionMode(call.name, call.arguments) === 'parallel',
+      )
     )
       return;
     this.batch = {
@@ -478,6 +540,7 @@ export class AgentProviderToolGateway {
     let resolved = false;
     try {
       args = this.executor.resolveToolArguments?.(this.identity, definition.name, args) ?? args;
+      args = normalizeDraftCreationArguments(definition.name, args);
       resolved = true;
       definition = taskCheckpointValidationDefinition(definition, args);
       const validated: unknown = validateToolArguments(definition, {
@@ -528,7 +591,7 @@ export class AgentProviderToolGateway {
     this.calls.delete(toolCallId);
     if (!context) throw new Error('Pi tool call is missing its Provider response context.');
     const definition = context.definition ?? this.liveDefinition(name);
-    const readonly = unifiedAgentToolRegistry.executionMode(name) === 'parallel';
+    const readonly = unifiedAgentToolRegistry.executionMode(name, args) === 'parallel';
     if (readonly) {
       if (this.activeReads >= 4)
         await new Promise<void>((resolve) => this.readWaiters.push(resolve));
@@ -660,6 +723,12 @@ function preparedInstruction(
   if (!ref) return undefined;
   const retry = { ...ref };
   delete retry.argumentsHash;
+  if (isNewDocumentDraftArguments(tool, args)) {
+    const misplaced = ['expectedDocumentRowVersion', 'baseVersionId'].filter((key) =>
+      Object.hasOwn(args, key),
+    );
+    if (misplaced.length) retry.deleteFields = misplaced;
+  }
   if (tool === 'production.bundle.submit')
     return `Arguments retained, not saved. Retry production.bundle.submit with preparedArguments=${JSON.stringify(retry)}. The task-scoped resultId is sufficient; do not copy a hash. Correct only reported fields with explicit patches, for example /prompts/0/bindings. A patch may remove an unsupported field, but must never change partKey or expectedRevision. If the original CAS is stale, submit a new explicit part using the current revision and a new partKey. Use one prompts list with explicit kind and ordinary prompt text. Do not retransmit unaffected prompts or override lists while patching. Original schema, authorization and CAS still apply.`;
   if (
@@ -688,6 +757,7 @@ export function boundedValidationError(
   definition?: LlmToolDefinition,
   args?: unknown,
 ): string {
+  if (error instanceof ArchivedArgumentsError) return error.message.slice(0, 1600);
   const message = error instanceof Error ? error.message : 'Invalid tool arguments.';
   const paths = definition ? unsupportedArgumentPaths(definition.parameters, args) : [];
   let bundleReason: string | undefined;

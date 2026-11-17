@@ -523,6 +523,39 @@ describe('adapter registry', () => {
     expect(custom.parameterSchema.properties.output_format).not.toHaveProperty('default');
   });
 
+  it.each(['openai', 'custom'])(
+    'exposes ordered reference-image inputs through the %s Images edit adapter',
+    (provider) => {
+      const adapter = getAdapter(`REFERENCE_TO_IMAGE:${provider}:openai-images:v1`)!;
+      expect(adapter).toBeDefined();
+      expect(adapter.endpoint).toBe('https://api.openai.com/v1/images/edits');
+      const parameters = {
+        prompt: '保留角色，融合场景',
+        images: ['https://example.com/a.png', 'https://example.com/b.png'],
+      };
+      expect(validateAdapterParameters(adapter.key, parameters).valid).toBe(true);
+      for (const images of [
+        [],
+        Array(17).fill('https://example.com/a.png'),
+        ['file:///private.png'],
+      ]) {
+        expect(validateAdapterParameters(adapter.key, { ...parameters, images }).valid).toBe(false);
+      }
+      expect(validateAdapterParameters(adapter.key, { prompt: 'missing images' }).valid).toBe(
+        false,
+      );
+      expect(validateAdapterParameters(adapter.key, { ...parameters, style: 'vivid' }).valid).toBe(
+        false,
+      );
+      expect(
+        validateAdapterParameters(`TEXT_TO_IMAGE:${provider}:openai-images:v1`, parameters).valid,
+      ).toBe(false);
+      expect(
+        validateAdapterParameters(adapter.key, { ...parameters, size: '1920x1080' }).valid,
+      ).toBe(provider === 'custom');
+    },
+  );
+
   it('lets the custom image service determine supported dimensions without official size enums', () => {
     const parameters = { prompt: 'A character sheet', size: '1920x1080' };
     expect(validateAdapterParameters('TEXT_TO_IMAGE:custom:openai-images:v1', parameters)).toEqual({

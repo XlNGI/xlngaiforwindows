@@ -15,6 +15,32 @@ function definition(name = 'test.read'): LlmToolDefinition {
 }
 
 describe('AgentToolRegistry', () => {
+  it('classifies only immutable checkpoint result operations as independent reads', () => {
+    const registry = new AgentToolRegistry();
+    const name = 'conversation.task.checkpoint';
+    registry.register([{ definition: definition(name), riskLevel: 'R1', executionLane: 'serial' }]);
+    expect(registry.executionMode(name, { operation: 'result', resultId: 'source' })).toBe(
+      'parallel',
+    );
+    expect(registry.executionMode(name, '{"operation":"result","resultId":"source"}')).toBe(
+      'parallel',
+    );
+    for (const args of [
+      undefined,
+      null,
+      [],
+      '{',
+      { operation: 'state' },
+      { operation: 'read' },
+      { operation: 'save' },
+      { operation: 'plan' },
+      { operation: 'decision' },
+      { operation: 'review' },
+      { operation: 'partial' },
+      { operation: 'unknown' },
+    ])
+      expect(registry.executionMode(name, args)).toBe('sequential');
+  });
   it('accepts an identical registration and rejects a conflicting one', () => {
     const registry = new AgentToolRegistry();
     registry.register([

@@ -1,5 +1,5 @@
 import { Save, Wrench } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   AssetInfo,
   DocumentSummary,
@@ -19,6 +19,8 @@ import { projectWorker } from './worker-scope';
 import { AssetImagePreview } from './AssetImagePreview';
 import { ReferenceCard, referenceAssetName } from './ReferenceCard';
 import { ShotContinuityPanel } from './ShotContinuityPanel';
+import { ShotImageWorkspace } from './ShotImageWorkspace';
+import type { ShotImageContext } from '@ai-video/contracts';
 import type { ShotContinuityContext } from '@ai-video/contracts';
 import { SceneSettingCard, useSceneSettingImages } from './SceneSettingCard';
 import { SceneCastEditor } from './SceneCastEditor';
@@ -31,6 +33,7 @@ import {
 export function shotReferenceImageSelections(
   refs: ShotReferenceAssets,
 ): ProductionImageSelection[] {
+  if (refs.inputImages !== undefined) return refs.inputImages;
   const selections: ProductionImageSelection[] = [];
   const selected = new Set<string>();
   const add = (assetId: string | undefined, role: ProductionImageSelection['role']) => {
@@ -61,6 +64,7 @@ export function shotReferenceImageSelections(
 const STORAGE_PREFIX = 'ai-video.shot-reference-assets:';
 export type ShotReferenceSlot = 'character' | 'scene' | 'firstFrame';
 export interface ShotReferenceAssets {
+  inputImages?: ProductionImageSelection[];
   characterBindings?: NonNullable<ShotReferenceBindingInfo['characterBindings']>;
   sceneBindings?: NonNullable<ShotReferenceBindingInfo['sceneBindings']>;
   characterAssetId?: string;
@@ -132,6 +136,10 @@ function ShotWorkspaceContent({
   onSavePrompt,
   onRepairBindings,
   onAskContinuityAgent,
+  onAskImageAgent,
+  onAskVideoAgent,
+  templateSource,
+  templateEditor,
   onPrepareGenerate,
   onGenerateImage,
   onGenerateVideo,
@@ -163,6 +171,10 @@ function ShotWorkspaceContent({
   onSavePrompt: () => void;
   onRepairBindings?: (prompt: string) => Promise<unknown> | void;
   onAskContinuityAgent?: (context: ShotContinuityContext) => Promise<void> | void;
+  onAskImageAgent?: (context: ShotImageContext) => Promise<void> | void;
+  onAskVideoAgent?: () => Promise<void> | void;
+  templateSource?: string;
+  templateEditor?: (kind: 'shot-image' | 'video-prompt') => ReactNode;
   onPrepareGenerate?: (mode: 'image' | 'video', prompt: string, refs: ShotReferenceAssets) => void;
   onGenerateImage: (refs: ShotReferenceAssets, prompt?: string) => void;
   onGenerateVideo: (refs: ShotReferenceAssets, prompt?: string) => void;
@@ -183,6 +195,16 @@ function ShotWorkspaceContent({
   };
 }) {
   const callWorker = projectWorker();
+  const tabKey = `ai-video.shot-tab:${projectId}:${shotId}`;
+  const [tab, setTab] = useState<'video' | 'image'>(() => {
+    try {
+      return sessionStorage.getItem(tabKey) === 'image' ? 'image' : 'video';
+    } catch {
+      return 'video';
+    }
+  });
+  const [imageContext, setImageContext] = useState<ShotImageContext>();
+  const [sourcesPending, setSourcesPending] = useState(false);
   const [refs, setRefs] = useState<ShotReferenceAssets>(() => {
     const local = projectId ? loadShotReferences(projectId, shotId) : {};
     return referenceBindings
@@ -623,6 +645,9 @@ function ShotWorkspaceContent({
         );
       const withContinuity = (references: ShotReferenceAssets): ShotReferenceAssets => ({
         ...references,
+        ...(mode === 'video' && imageContext?.videoImages.selections !== undefined
+          ? { inputImages: imageContext.videoImages.selections }
+          : {}),
         ...(continuity?.binding
           ? {
               continuityRowVersion: continuity.rowVersion,
@@ -641,18 +666,6 @@ function ShotWorkspaceContent({
           onPrepareGenerate?.(mode, prompt, withContinuity(references));
       });
       if (currentScope.current !== expectedScope) return;
-      if (
-        mode === 'video' &&
-        ![
-          ...(resolved.characterAssetIds ?? []),
-          resolved.characterAssetId,
-          ...(resolved.sceneAssetIds ?? []),
-          resolved.sceneAssetId,
-          resolved.firstFrameAssetId,
-          ...(resolved.continuityReferenceAssetIds ?? []),
-        ].some(Boolean)
-      )
-        throw new Error('请先生成或选择参考图。');
       const selected = withContinuity(resolved);
       const selectedReferences = createPromptImageReferences(
         shotReferenceImageSelections(selected).map(({ assetId, role }) => ({
@@ -663,8 +676,19 @@ function ShotWorkspaceContent({
       const remappedPrompt = remapPromptReferences(promptReferences, selectedReferences, {
         prompt,
       }).prompt;
-      const selectedPrompt = typeof remappedPrompt === 'string' ? remappedPrompt : prompt;
+      let selectedPrompt = typeof remappedPrompt === 'string' ? remappedPrompt : prompt;
       if (selectedPrompt !== prompt) onPromptChange(selectedPrompt);
+      if (projectId && imageContext) {
+        const preview = await callWorker('shot.prompt.preview', {
+          shotId,
+          kind: mode,
+          prompt: selectedPrompt,
+          inputImages: shotReferenceImageSelections(selected),
+        });
+        if (currentScope.current !== expectedScope) return;
+        // The editable video draft remains authoritative; the Worker supplies the ordered image projection.
+        selectedPrompt = preview.prompt;
+      }
       onPrepareGenerate?.(mode, selectedPrompt, selected);
       if (mode === 'image') onGenerateImage(selected, selectedPrompt);
       else onGenerateVideo(selected, selectedPrompt);
@@ -695,8 +719,10 @@ function ShotWorkspaceContent({
     characterAssetIds: promptCharacterAssetIds,
     sceneAssetId: effectiveRefs.sceneAssetId,
     sceneAssetIds: effectiveRefs.sceneAssetIds,
+    ...(imageContext?.videoImages.selections !== undefined
+      ? { inputImages: imageContext.videoImages.selections }
+      : {}),
   });
-  const hasSelectedRefs = promptImageSelections.length > 0;
   const promptImageLabels = new Map<string, string>();
   const setPromptImageLabel = (assetId: string, documentId?: string, fallback?: string) => {
     if (!assetId) return;
@@ -762,297 +788,348 @@ function ShotWorkspaceContent({
   }, [prompt, promptReferences, onPromptChange]);
   return (
     <div className="shot-workspace">
-      <section className="shot-prompt-panel" aria-labelledby="shot-prompt-heading">
-        <div className="shot-prompt-heading">
-          <div>
-            <h2 id="shot-prompt-heading">{'\u955c\u5934\u63d0\u793a\u8bcd'}</h2>
-          </div>
-          <span className="shot-status" title={shotTitle}>
-            {`镜头 ${shotPosition + 1} · ${shotStatus === 'draft' ? '草稿' : shotStatus === 'published' ? '已发布' : shotStatus === 'ready' ? '就绪' : shotStatus}`}
-          </span>
-        </div>
-        <MarkdownEditor
-          className="shot-prompt-editor"
-          label="镜头提示词"
-          value={displayedPrompt}
-          onChange={handlePromptEdit}
-          placeholder={'\u8f93\u5165\u672c\u955c\u753b\u9762\u63d0\u793a\u8bcd\u2026'}
-          autoPreviewOnBlur
-          readOnly={!writable}
-          references={promptReferences}
-          projectId={projectId}
-        />
-        <div className="shot-prompt-actions">
+      <div className="shot-workspace-tabs" role="tablist" aria-label="镜头创作">
+        {(['video', 'image'] as const).map((value) => (
           <button
-            className="button secondary"
             type="button"
-            disabled={!writable || saving}
+            key={value}
+            role="tab"
+            id={`shot-${value}-tab`}
+            aria-selected={tab === value}
+            aria-controls={`shot-${value}-panel`}
             onClick={() => {
-              void saveReferences().then((saved) => {
-                if (saved) onSavePrompt();
-              });
+              setTab(value);
+              try {
+                sessionStorage.setItem(tabKey, value);
+              } catch {
+                /* Optional window state. */
+              }
             }}
           >
-            <Save size={13} /> {'\u4fdd\u5b58\u63d0\u793a\u8bcd'}
+            {value === 'video' ? '视频提示词' : '本镜参考图'}
           </button>
-          {onRepairBindings && (
-            <button
-              className="button secondary"
-              type="button"
-              disabled={!writable || repairPending || !prompt.trim() || Boolean(fillingMode)}
-              onClick={() => void repairBindings()}
-            >
-              <Wrench size={13} /> {repairPending ? '正在修复…' : '修复绑定'}
-            </button>
-          )}
-          <button
-            className="button primary"
-            type="button"
-            disabled={
-              !writable || saving || bindingScopeLoading || Boolean(fillingMode) || !prompt.trim()
-            }
-            onClick={() => {
-              void generate('image');
-            }}
-          >
-            填充本镜图片表单
-          </button>
-          <button
-            className="button secondary"
-            type="button"
-            disabled={
-              !writable || saving || bindingScopeLoading || Boolean(fillingMode) || !hasSelectedRefs
-            }
-            onClick={() => {
-              void generate('video');
-            }}
-          >
-            填充本镜视频表单
-          </button>
-        </div>
-        {fillingMode && (
-          <p className="shot-reference-message" role="status" aria-live="polite">
-            {fillingMode === 'image'
-              ? '正在解析本镜绑定并填充画面表单…'
-              : '正在解析本镜绑定并填充视频表单…'}
-          </p>
-        )}
-      </section>
-      {referenceMessage && <p role="status">{referenceMessage}</p>}
-      <section className="shot-ir-reference-summary" aria-label="提示词资料引用">
-        <h3>提示词资料引用</h3>
-        {currentPromptCharacterScope ? (
-          <div className="shot-ir-reference-groups">
-            {promptDocumentGroups.map((group) => (
-              <div className="shot-ir-reference-group" key={group.key}>
-                <span className="shot-ir-reference-role">{group.label}</span>
-                <div className="shot-ir-reference-documents">
-                  {group.documentIds.length ? (
-                    group.documentIds.map((documentId) => {
-                      const document = documents.find((item) => item.id === documentId);
-                      return document ? (
-                        <span
-                          className="shot-ir-reference-document"
-                          key={documentId}
-                          title={`${document.title}\n${document.id}`}
-                        >
-                          {document.title}
-                        </span>
-                      ) : (
-                        <span
-                          className="shot-ir-reference-document is-unavailable"
-                          key={documentId}
-                          title={documentId}
-                          aria-label={`${group.label}资料不可用，文档 ID ${documentId}`}
-                        >
-                          资料不可用
-                        </span>
-                      );
-                    })
-                  ) : (
-                    <span className="shot-ir-reference-empty">未引用</span>
-                  )}
+        ))}
+        <span className="shot-template-source">
+          {templateSource ?? 'Agent 使用当前会话模板；新会话使用新会话默认模板'}
+        </span>
+        {templateEditor?.(tab === 'image' ? 'shot-image' : 'video-prompt')}
+      </div>
+      <details className="workspace-extra shot-shared-bindings">
+        <summary>共享资料绑定 · 人物、场景与道具</summary>
+        <section className="shot-ir-reference-summary" aria-label="提示词资料引用">
+          <h3>提示词资料引用</h3>
+          {currentPromptCharacterScope ? (
+            <div className="shot-ir-reference-groups">
+              {promptDocumentGroups.map((group) => (
+                <div className="shot-ir-reference-group" key={group.key}>
+                  <span className="shot-ir-reference-role">{group.label}</span>
+                  <div className="shot-ir-reference-documents">
+                    {group.documentIds.length ? (
+                      group.documentIds.map((documentId) => {
+                        const document = documents.find((item) => item.id === documentId);
+                        return document ? (
+                          <span
+                            className="shot-ir-reference-document"
+                            key={documentId}
+                            title={`${document.title}\n${document.id}`}
+                          >
+                            {document.title}
+                          </span>
+                        ) : (
+                          <span
+                            className="shot-ir-reference-document is-unavailable"
+                            key={documentId}
+                            title={documentId}
+                            aria-label={`${group.label}资料不可用，文档 ID ${documentId}`}
+                          >
+                            资料不可用
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="shot-ir-reference-empty">未引用</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="shot-ir-reference-loading" role="status">
-            正在读取提示词引用
+              ))}
+            </div>
+          ) : (
+            <p className="shot-ir-reference-loading" role="status">
+              正在读取提示词引用
+            </p>
+          )}
+        </section>
+        {characters.length > 0 && castMedia.error && (
+          <p role="status">
+            {castMedia.error}{' '}
+            <button type="button" onClick={castMedia.retry}>
+              重试读取参考资料
+            </button>
           </p>
         )}
-      </section>
-      {characters.length > 0 && castMedia.error && (
-        <p role="status">
-          {castMedia.error}{' '}
-          <button type="button" onClick={castMedia.retry}>
-            重试读取参考资料
-          </button>
-        </p>
-      )}
-      {projectId ? (
-        <SceneCastEditor
-          projectId={projectId}
-          characters={characters}
-          documents={documents}
-          assets={availableAssets}
-          voices={castMedia.value?.voices ?? []}
-          defaults={castMedia.value?.characters ?? []}
-          mediaLoading={castMedia.loading}
-          heading="本镜角色绑定"
-          allowRosterChanges={false}
-          showVoiceReferences={false}
-          showDialogueSettings={false}
-          sceneLabel={
-            sceneDocumentIds.length
-              ? sceneDocumentIds
-                  .map((id) => documents.find((item) => item.id === id)?.title ?? '资料不可用')
-                  .join('、')
-              : undefined
-          }
-          scopeNote="角色由本镜提示词确认；此处只选择本镜使用的参考图。"
-          audios={[]}
-          writable={writable && !saving && !fillingMode}
-          onChange={(next) => {
-            referenceEditRevision.current += 1;
-            setCharacters(next);
-          }}
-          onDialogueChange={() => undefined}
-          onAudioImported={() => undefined}
-          actions={
+        {projectId ? (
+          <SceneCastEditor
+            projectId={projectId}
+            characters={characters}
+            documents={documents}
+            assets={availableAssets}
+            voices={castMedia.value?.voices ?? []}
+            defaults={castMedia.value?.characters ?? []}
+            mediaLoading={castMedia.loading}
+            heading="本镜角色绑定"
+            allowRosterChanges={false}
+            showVoiceReferences={false}
+            showDialogueSettings={false}
+            sceneLabel={
+              sceneDocumentIds.length
+                ? sceneDocumentIds
+                    .map((id) => documents.find((item) => item.id === id)?.title ?? '资料不可用')
+                    .join('、')
+                : undefined
+            }
+            scopeNote="角色由本镜提示词确认；此处只选择本镜使用的参考图。"
+            audios={[]}
+            writable={writable && !saving && !fillingMode}
+            onChange={(next) => {
+              referenceEditRevision.current += 1;
+              setCharacters(next);
+            }}
+            onDialogueChange={() => undefined}
+            onAudioImported={() => undefined}
+            actions={
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!writable || saving}
+                onClick={() => void saveReferences()}
+              >
+                保存绑定
+              </button>
+            }
+          >
+            {characters.length === 0 || refs.characterAssetId ? (
+              <ReferenceSlot
+                label="角色参考"
+                asset={availableAssets.find((a) => a.id === refs.characterAssetId)}
+                candidates={availableAssets}
+                projectId={projectId}
+                writable={writable && !saving}
+                busy={Boolean(fillingMode)}
+                onSelect={(id) => assign('character', id)}
+              />
+            ) : null}
+            <SceneSettingCard
+              projectId={projectId}
+              documentId={primarySceneDocumentId}
+              documentIds={sceneDocumentIds}
+              documents={documents}
+              asset={availableAssets.find((a) => a.id === effectiveRefs.sceneAssetId)}
+              images={setting.assets}
+              candidates={availableAssets}
+              writable={writable && !saving}
+              busy={saving || Boolean(fillingMode)}
+              message={setting.error}
+              onOpen={onOpenDocument}
+              onSelectImage={(id) => assign('scene', id)}
+              onDropAsset={(asset) => assign('scene', asset.id)}
+              imageDisabled={refs.ignoreSceneBinding}
+              onRestore={
+                sceneDocumentIds.length &&
+                (refs.sceneAssetId ||
+                  refs.sceneAssetIds?.length ||
+                  refs.ignoreSceneBinding ||
+                  refs.sceneBindings?.length)
+                  ? () => {
+                      const next = { ...refs };
+                      next.sceneBindings = (next.sceneBindings ?? []).filter(
+                        (binding) => binding.sourceDocumentId !== primarySceneDocumentId,
+                      );
+                      delete next.sceneAssetId;
+                      delete next.sceneAssetIds;
+                      delete next.ignoreSceneBinding;
+                      persistFromControl(next);
+                    }
+                  : undefined
+              }
+            />
+          </SceneCastEditor>
+        ) : null}
+      </details>
+      <div
+        id="shot-video-panel"
+        role="tabpanel"
+        aria-labelledby="shot-video-tab"
+        hidden={tab !== 'video'}
+      >
+        <section className="shot-prompt-panel" aria-labelledby="shot-prompt-heading">
+          <div className="shot-prompt-heading">
+            <div>
+              <h2 id="shot-prompt-heading">视频提示词</h2>
+            </div>
+            <span className="shot-status" title={shotTitle}>
+              {`镜头 ${shotPosition + 1} · ${shotStatus === 'draft' ? '草稿' : shotStatus === 'published' ? '已发布' : shotStatus === 'ready' ? '就绪' : shotStatus}`}
+            </span>
+          </div>
+          <MarkdownEditor
+            className="shot-prompt-editor"
+            label="镜头提示词"
+            value={displayedPrompt}
+            onChange={handlePromptEdit}
+            placeholder={'\u8f93\u5165\u672c\u955c\u753b\u9762\u63d0\u793a\u8bcd\u2026'}
+            autoPreviewOnBlur
+            readOnly={!writable}
+            references={promptReferences}
+            projectId={projectId}
+          />
+          <div className="shot-prompt-actions">
             <button
               className="button secondary"
               type="button"
               disabled={!writable || saving}
-              onClick={() => void saveReferences()}
+              onClick={() => {
+                void saveReferences().then((saved) => {
+                  if (saved) onSavePrompt();
+                });
+              }}
             >
-              保存绑定
+              <Save size={13} /> {'\u4fdd\u5b58\u63d0\u793a\u8bcd'}
             </button>
-          }
-        >
-          {characters.length === 0 || refs.characterAssetId ? (
-            <ReferenceSlot
-              label="角色参考"
-              asset={availableAssets.find((a) => a.id === refs.characterAssetId)}
-              candidates={availableAssets}
-              projectId={projectId}
-              writable={writable && !saving}
-              busy={Boolean(fillingMode)}
-              onSelect={(id) => assign('character', id)}
-            />
-          ) : null}
-          <SceneSettingCard
-            projectId={projectId}
-            documentId={primarySceneDocumentId}
-            documentIds={sceneDocumentIds}
-            documents={documents}
-            asset={availableAssets.find((a) => a.id === effectiveRefs.sceneAssetId)}
-            images={setting.assets}
-            candidates={availableAssets}
-            writable={writable && !saving}
-            busy={saving || Boolean(fillingMode)}
-            message={setting.error}
-            onOpen={onOpenDocument}
-            onSelectImage={(id) => assign('scene', id)}
-            onDropAsset={(asset) => assign('scene', asset.id)}
-            imageDisabled={refs.ignoreSceneBinding}
-            onRestore={
-              sceneDocumentIds.length &&
-              (refs.sceneAssetId ||
-                refs.sceneAssetIds?.length ||
-                refs.ignoreSceneBinding ||
-                refs.sceneBindings?.length)
-                ? () => {
-                    const next = { ...refs };
-                    next.sceneBindings = (next.sceneBindings ?? []).filter(
-                      (binding) => binding.sourceDocumentId !== primarySceneDocumentId,
+            {onRepairBindings && (
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!writable || repairPending || !prompt.trim() || Boolean(fillingMode)}
+                onClick={() => void repairBindings()}
+              >
+                <Wrench size={13} /> {repairPending ? '正在修复…' : '修复绑定'}
+              </button>
+            )}
+            {onAskVideoAgent && (
+              <button
+                type="button"
+                className="button secondary"
+                disabled={!writable || saving || Boolean(fillingMode)}
+                onClick={() => {
+                  void Promise.resolve()
+                    .then(() => onAskVideoAgent())
+                    .catch((error: unknown) =>
+                      setReferenceMessage(
+                        error instanceof Error ? error.message : 'Agent 编写失败',
+                      ),
                     );
-                    delete next.sceneAssetId;
-                    delete next.sceneAssetIds;
-                    delete next.ignoreSceneBinding;
-                    persistFromControl(next);
-                  }
-                : undefined
-            }
-          />
-          <ReferenceSlot
-            label="首帧"
-            asset={availableAssets.find((a) => a.id === effectiveRefs.firstFrameAssetId)}
-            candidates={availableAssets}
-            projectId={projectId}
-            writable={writable && !saving}
-            busy={Boolean(fillingMode)}
-            onSelect={(id) => assign('firstFrame', id)}
-          />
-        </SceneCastEditor>
-      ) : null}
-      {shotImageResults?.shotId === shotId &&
-      shotImageResults.projectId === projectId &&
-      shotImageResults.assets.length > 0 ? (
-        <section className="shot-generated-images" aria-label="本镜头已生成图片">
-          <h2>已生成图片</h2>
-          <div className="generated-image-results">
-            {shotImageResults.assets.map((item) => (
-              <AssetImagePreview key={item.id} asset={item} />
-            ))}
+                }}
+              >
+                Agent 编写视频
+              </button>
+            )}
+            <button
+              className="button secondary"
+              type="button"
+              disabled={
+                !writable || saving || bindingScopeLoading || Boolean(fillingMode) || !prompt.trim()
+              }
+              onClick={() => {
+                void generate('video');
+              }}
+            >
+              填充本镜视频表单
+            </button>
           </div>
+          {fillingMode && (
+            <p className="shot-reference-message" role="status" aria-live="polite">
+              {fillingMode === 'image'
+                ? '正在解析本镜绑定并填充画面表单…'
+                : '正在解析本镜绑定并填充视频表单…'}
+            </p>
+          )}
         </section>
-      ) : null}
+        <section className="shot-video-images" aria-label="本次视频选用图片">
+          <h3>本次视频选用图片</h3>
+          <div className="shot-video-image-list">
+            {promptImageSelections.map((image, index) => {
+              const asset = [...availableAssets, ...(imageContext?.assets ?? [])].find(
+                (asset) => asset.id === image.assetId,
+              );
+              return (
+                <article key={image.assetId}>
+                  {asset && <AssetImagePreview asset={asset} />}
+                  <span>
+                    图片 {index + 1} · {image.role === 'first-frame' ? '首帧' : '普通参考'}
+                  </span>
+                </article>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="button secondary"
+            onClick={() => {
+              setTab('image');
+              try {
+                sessionStorage.setItem(tabKey, 'image');
+              } catch {
+                /* Optional window state. */
+              }
+            }}
+          >
+            整理本镜参考图
+          </button>
+        </section>
+      </div>
       {projectId && (
-        <details
-          className="workspace-extra shot-continuity-extra"
-          open={Boolean(continuity?.stale)}
+        <div
+          id="shot-image-panel"
+          role="tabpanel"
+          aria-labelledby="shot-image-tab"
+          hidden={tab !== 'image'}
         >
-          <summary>镜头衔接{continuity?.binding ? ' · 已绑定' : ''}</summary>
-          <ShotContinuityPanel
+          <ShotImageWorkspace
             key={`${projectId}:${shotId}`}
             projectId={projectId}
             shotId={shotId}
             writable={writable && !saving}
-            sourceDirty={continuitySourceDirty}
-            revision={continuityRefresh}
             assets={availableAssets}
-            llm={llm}
-            onAskAgent={onAskContinuityAgent}
-            onChange={(next) => {
-              setContinuity(next);
-              setRefs((current) => {
-                if (!next.binding && !continuity?.binding) return current;
-                const updated = {
-                  ...current,
-                  firstFrameAssetId: next.binding
-                    ? next.binding.firstFrameAssetId
-                    : continuity?.binding
-                      ? undefined
-                      : current.firstFrameAssetId,
-                  continuityReferenceAssetIds: next.binding
-                    ? continuityReferenceImageIds(next.binding)
-                    : [],
-                  continuityPrompt: undefined,
-                };
-                saveShotReferences(projectId, shotId, updated);
-                return updated;
-              });
-            }}
-            onGenerate={(mode, next) => {
+            candidates={
+              shotImageResults?.projectId === projectId && shotImageResults.shotId === shotId
+                ? shotImageResults.assets
+                : []
+            }
+            documents={documents}
+            revision={continuityRefresh}
+            onContext={setImageContext}
+            sourcesPending={sourcesPending}
+            onAskAgent={onAskImageAgent}
+            continuity={continuity}
+            sources={
+              <ShotContinuityPanel
+                sourcesOnly
+                onPending={setSourcesPending}
+                projectId={projectId}
+                shotId={shotId}
+                writable={writable && !saving}
+                sourceDirty={continuitySourceDirty}
+                revision={continuityRefresh}
+                assets={availableAssets}
+                llm={llm}
+                onChange={setContinuity}
+                onGenerate={() => undefined}
+                onAskAgent={onAskContinuityAgent}
+              />
+            }
+            onFill={(context) => {
               const selected = {
                 ...effectiveRefs,
-                continuityRowVersion: next.rowVersion,
-                continuityPrompt: next.binding?.imagePrompt,
-                firstFrameAssetId: undefined,
-                ...(mode === 'image'
-                  ? {
-                      continuityReferenceAssetIds: next.binding
-                        ? continuitySourceImageIds(next.binding)
-                        : [],
-                    }
-                  : {}),
+                inputImages: context.inputImages,
+                continuityPrompt: context.prompt,
+                continuityRowVersion: context.rowVersion,
               };
-              onGenerateImage(selected, prompt);
+              onPrepareGenerate?.('image', context.prompt, selected);
+              onGenerateImage(selected, context.prompt);
             }}
           />
-        </details>
+        </div>
       )}
+      {referenceMessage && <p role="status">{referenceMessage}</p>}
       <details className="workspace-extra shot-notes-extra">
         <summary>分镜说明{hasStoryboard ? ' · 已保存' : ' · 可选'}</summary>
         <section className="shot-notes-panel" aria-labelledby="shot-notes-heading">

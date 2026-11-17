@@ -4,7 +4,7 @@ import {
   withAgentToolInstructions,
 } from './agent-policy-instructions.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { splitConversationRequest } from './conversation-request.js';
+import { splitConversationRequest, composeConversationRequest } from './conversation-request.js';
 import type {
   AgentGenerationPrepareParams,
   ChatMessageInfo,
@@ -126,7 +126,7 @@ export class GenerationService {
 
   constructor(
     private readonly projects: ProjectService,
-    _content: ContentService,
+    private readonly content: ContentService,
     private readonly contexts: ContextService,
     private readonly legacyProvider: LlmProvider,
     options: GenerationServiceOptions = {},
@@ -201,10 +201,20 @@ export class GenerationService {
       : undefined;
     const existing = this.findIdempotent(idempotencyKey, requestFingerprint);
     if (existing) return prepareResultOf(existing);
+    const templateSnapshot =
+      contextOwner === 'agent'
+        ? this.content.getConversationPromptTemplate(params.conversationId)
+        : undefined;
+    const submittedVersion =
+      'promptTemplateVersion' in params ? params.promptTemplateVersion : undefined;
+    if (submittedVersion !== undefined && templateSnapshot?.rowVersion !== submittedVersion)
+      throw new Error('CONVERSATION_PROMPT_TEMPLATE_ROW_VERSION_CONFLICT');
+    const compiledPrompt =
+      contextOwner === 'agent' ? composeConversationRequest(params.prompt, '') : params.prompt;
     const selection = this.resolveSelection(params.providerProfileId, params.modelId);
     const prepared = this.startNative(
       params.conversationId,
-      params.prompt,
+      compiledPrompt,
       selection,
       params.budgetTokens,
       undefined,
@@ -220,6 +230,15 @@ export class GenerationService {
       undefined,
       params.attachments,
     );
+    if (templateSnapshot)
+      this.requireNativeState(prepared.stream).runtimeRequest!.promptTemplateSnapshot = {
+        ...structuredClone(templateSnapshot),
+        content: '',
+        policyVersion: 2,
+      };
+    if ('promptWorkflow' in params && params.promptWorkflow)
+      this.requireNativeState(prepared.stream).runtimeRequest!.promptWorkflow =
+        params.promptWorkflow;
     // Optional UI locators are context, never an instruction classification
     // or permission to create a business target before the model runs.
     const hints = {

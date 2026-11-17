@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type Database from 'better-sqlite3';
+import { documentImageBindingPredicate } from './document-image-binding.js';
 import {
   existsSync,
   mkdirSync,
@@ -931,7 +932,17 @@ export class ImageGenerationService {
           json_tree(c.binding_json) j WHERE c.project_id=? AND j.type='text' AND j.value=?`,
             )
             .get(project.id, assetId) as { count: number }
-        ).count;
+        ).count +
+        Number(
+          (
+            database
+              .prepare(
+                `SELECT count(DISTINCT i.shot_id) AS count FROM shot_video_images i,json_each(i.selections_json) j
+          WHERE i.project_id=? AND json_extract(j.value,'$.assetId')=?`,
+              )
+              .get(project.id, assetId) as { count: number }
+          ).count,
+        );
       if (referenceCount > 0 && !confirm) {
         throw new Error(`Asset is referenced by ${referenceCount} production draft(s).`);
       }
@@ -1000,6 +1011,14 @@ export class ImageGenerationService {
           .get(project.id, assetId)
       )
         throw new Error('素材仍用于镜头衔接，请先解除衔接设置。');
+      if (
+        database
+          .prepare(
+            `SELECT 1 FROM shot_video_images i,json_each(i.selections_json) j WHERE i.project_id=? AND json_extract(j.value,'$.assetId')=? LIMIT 1`,
+          )
+          .get(project.id, assetId)
+      )
+        throw new Error('素材仍被本镜视频采用，请先移除对应引用。');
       if (
         database
           .prepare('SELECT 1 FROM scene_character_bindings WHERE image_asset_id=? LIMIT 1')
@@ -1842,6 +1861,7 @@ function listAssetsForSourceDocument(
        WHERE assets.project_id = ?
          AND assets.deleted_at IS NULL
          AND json_extract(generation_jobs.task_snapshot_json, '$.sourceDocumentId') = ?
+         AND ${documentImageBindingPredicate(database, "json_extract(generation_jobs.task_snapshot_json,'$.sourceDocumentId')", 'assets.id')}
        ORDER BY assets.created_at DESC, assets.id DESC
        LIMIT ?`,
     )

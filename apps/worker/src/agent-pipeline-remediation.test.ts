@@ -11,6 +11,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { AgentContextStore, AgentExecutionStore } from '@ai-video/persistence';
 import { AgentContextManager } from './agent-context-manager.js';
+import { AgentInputService } from './agent-input-service.js';
 import { modelResultReceipt } from './agent-context-results.js';
 import { taskPlanScope } from './agent-task-deliverables.js';
 import { nativeRequestUserText } from './test-fixtures/native-request-text.js';
@@ -27,6 +28,7 @@ import { PiConversationRuntime } from './pi-conversation-runtime.js';
 import { RepeatedReadResults } from './repeated-read-results.js';
 import { parseEpisodeStructureArguments } from './episode-structure.js';
 import { SYSTEM_AGENT_TOOLS } from './agent-tool-definitions.js';
+import { unifiedAgentToolRegistry } from './agent-tool-registry.js';
 import { splitConversationRequest } from './conversation-request.js';
 import { NativeProviderBridge } from './native-provider-bridge.js';
 import { ProductionService } from './production-service.js';
@@ -71,6 +73,242 @@ function scriptedBridge(
   });
   return { bridge, requests };
 }
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'requires saved revision readback before a next-step form but permits clarification (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const scene = f.content.saveScene({ title: '核验', sceneDocumentId: f.setting.id });
+    const shot = f.content.saveShot({ sceneId: scene.id, title: '镜头', ...authoring(true) });
+    const run = f.prepare('修订镜头后核对结果。');
+    const question = {
+      key: 'next',
+      title: '下一步',
+      questions: [{ id: 'direction', type: 'text', prompt: '接下来做什么？' }],
+    };
+    expect(
+      await run.invoke('conversation.task.checkpoint', {
+        operation: 'plan',
+        deliverables: [
+          {
+            key: 'revision',
+            toolName: 'scene.update_shot_prompts',
+            intent: 'revise',
+            minimumCount: 1,
+            targetIds: [shot.id],
+          },
+        ],
+      }),
+    ).toMatchObject({ status: 'task_plan_saved' });
+    await run.invoke('production.read', {
+      target: { kind: 'shot', id: shot.id },
+      view: 'authoring',
+    });
+    expect(
+      await run.invoke('scene.update_shot_prompts', {
+        shots: [
+          {
+            shotId: shot.id,
+            expectedRowVersion: shot.rowVersion,
+            ...promptPatch(shot),
+            prompt: `${shot.prompt}修订完成。`,
+          },
+        ],
+      }),
+    ).toMatchObject({ status: 'shot_prompts_saved' });
+    for (const purpose of [undefined, 'next_step']) {
+      const result = await run.invoke('conversation.ask', {
+        ...question,
+        ...(purpose ? { purpose } : {}),
+      });
+      expect(JSON.stringify(result)).toContain('TASK_REPAIR_REQUIRED');
+      expect(
+        f.project.access(false, (db) =>
+          db
+            .prepare(
+              "SELECT COUNT(*) n FROM agent_task_events WHERE task_id=? AND event_type='agent.user_input.requested'",
+            )
+            .get(run.agent.taskId),
+        ),
+      ).toEqual({ n: 0 });
+    }
+    expect(
+      new AgentInputService(f.project).prepare(
+        {
+          ...question,
+          key: 'clarify',
+          purpose: 'clarification',
+        },
+        { ...run.prepared.stream, taskId: run.agent.taskId },
+      ),
+    ).toMatchObject({ status: 'pending' });
+    await run.invoke('production.read', {
+      target: { kind: 'shot', id: shot.id },
+      view: 'authoring',
+    });
+    expect(
+      await run.invoke('conversation.ask', { ...question, purpose: 'next_step' }),
+    ).toMatchObject({ awaitingUserAnswer: true });
+  },
+);
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'requires explicit slots for planned independent outputs and preserves identical replay (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const run = f.prepare('保存两个人物设定。');
+    await run.invoke('conversation.task.checkpoint', {
+      operation: 'plan',
+      deliverables: [
+        {
+          key: 'characters',
+          toolName: 'document.submit_draft',
+          documentKind: 'character',
+          minimumCount: 2,
+        },
+      ],
+    });
+    const draft = {
+      resourceId: 'workspace:characters',
+      documentKind: 'character',
+      title: '人物甲',
+      contentMarkdown: '蓝衣。',
+    };
+    const missing = await run.invoke('document.submit_draft', draft);
+    expect(JSON.stringify(missing)).toContain('OUTPUT_IDENTITY_REQUIRED');
+    expect(JSON.stringify(missing)).toContain('characters');
+    const first = await run.invoke('document.submit_draft', {
+      ...draft,
+      outputKey: 'characters',
+      outputIndex: 0,
+      baseVersionId: null,
+    });
+    const second = await run.invoke('document.submit_draft', {
+      ...draft,
+      title: '人物乙',
+      outputKey: 'characters',
+      outputIndex: 1,
+    });
+    expect(first.status).toBe('draft_saved');
+    expect(second.status).toBe('draft_saved');
+    expect(first.documentId).not.toBe(second.documentId);
+    expect(
+      await run.invoke('document.submit_draft', {
+        ...draft,
+        outputKey: 'characters',
+        outputIndex: 0,
+      }),
+    ).toMatchObject({ documentId: first.documentId, execution: { replayed: true } });
+  },
+);
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'retains a rejected Native write batch and saves each candidate once through explicit slots (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const prompt = '保存两个人物设定。';
+    const run = f.prepare(prompt);
+    const draft = (i: number) => ({
+      resourceId: 'workspace:characters',
+      documentKind: 'character',
+      title: `人物${i}`,
+      contentMarkdown: `完整人物设定${i}。`,
+      outputKey: 'characters',
+      outputIndex: i,
+    });
+    const refs = () =>
+      f.project.access(false, (db) =>
+        new AgentContextStore(db)
+          .resultRefs(run.prepared.stream.projectId, run.agent.taskId)
+          .filter((r) => r.toolName === 'document.submit_draft' && r.status === 'pending'),
+      );
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const calls = (items: Array<{ name: string; args: unknown }>): NativeProviderHostEvent[] => [
+        ...items.map((item, i) => ({
+          ...common,
+          type: 'tool_call_end' as const,
+          call: {
+            id: `batch-${index}-${i}`,
+            name: item.name,
+            argumentsJson: JSON.stringify(item.args),
+          },
+        })),
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `batch-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      if (index === 0)
+        return calls([{ name: 'tools.load', args: { names: ['document.submit_draft'] } }]);
+      if (index === 1)
+        return calls([
+          {
+            name: 'conversation.task.checkpoint',
+            args: {
+              operation: 'plan',
+              deliverables: [
+                {
+                  key: 'characters',
+                  toolName: 'document.submit_draft',
+                  documentKind: 'character',
+                  minimumCount: 2,
+                },
+              ],
+            },
+          },
+        ]);
+      if (index === 2) {
+        expect(params.toolCallMode).toBe('single');
+        return calls([0, 1].map((i) => ({ name: 'document.submit_draft', args: draft(i) })));
+      }
+      if (index === 3 || index === 4) {
+        expect(refs()).toHaveLength(2);
+        expect(
+          f.project.access(false, (db) =>
+            db.prepare("SELECT count(*) n FROM documents WHERE kind='character'").get(),
+          ),
+        ).toEqual({ n: index - 3 });
+        return calls([
+          {
+            name: 'document.submit_draft',
+            args: { preparedArguments: { resultId: refs()[index - 3]!.resultId } },
+          },
+        ]);
+      }
+      return [
+        { ...common, type: 'text_delta', delta: '两份设定已保存。' },
+        { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+      ];
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      createContextManager: (identity, taskId, original) =>
+        new AgentContextManager(f.project, identity, taskId, original),
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const result = f.generations.get(run.prepared.stream.generationId);
+    expect(result.status, result.error).toBe('complete');
+    expect(requests).toHaveLength(6);
+    expect(
+      f.project.access(false, (db) =>
+        db.prepare("SELECT count(*) n FROM documents WHERE kind='character'").get(),
+      ),
+    ).toEqual({ n: 2 });
+  },
+);
 function lastOutput(params: NativeProviderStreamStartParams): Record<string, unknown> {
   if (params.contextTurns?.at(-1)?.outputs.length)
     return JSON.parse(params.contextTurns.at(-1)!.outputs[0]!.output) as Record<string, unknown>;
@@ -137,6 +375,168 @@ function authoring(shot = false): PromptRecord {
     ...(shot ? { timing: { estimatedDurationSeconds: 4 } } : {}),
   };
 }
+for (const variant of ['shots', 'empty', 'repeat'] as const)
+  it.each(['openai-responses', 'openai-chat-completions'] as const)(
+    `distinguishes executed navigation scopes through Native/Pi (${variant}, %s)`,
+    async (protocol) => {
+      const f = await setup(protocol);
+      const scenes = Array.from({ length: 4 }, (_, i) =>
+        f.content.saveScene({ title: `场次${i}` }),
+      );
+      if (variant === 'shots')
+        for (const scene of scenes)
+          f.content.saveShot({ sceneId: scene.id, title: '目标镜头', prompt: '正文不可注入导航' });
+      const run = f.prepare('仅查询四个场次的镜头目录。');
+      const { bridge, requests } = scriptedBridge((params, index) => {
+        const common = { projectSessionId: params.projectSessionId };
+        if (index === 0)
+          return [
+            ...scenes.map((scene, i): NativeProviderHostEvent => ({
+              ...common,
+              type: 'tool_call_end',
+              call: {
+                id: `scope-${i}`,
+                name: 'project.structure.get',
+                argumentsJson: JSON.stringify({
+                  kind: 'shot',
+                  parentId:
+                    variant === 'repeat'
+                      ? i % 2
+                        ? `scene:${scenes[0]!.id}`
+                        : scenes[0]!.id
+                      : scene.id,
+                  limit: i + 1,
+                  detail: i % 2 ? 'full' : 'compact',
+                }),
+              },
+            })),
+            {
+              ...common,
+              type: 'complete',
+              providerResponseId: 'scopes',
+              finishReason: 'tool_calls',
+            },
+          ];
+        expect(index).toBe(1);
+        return [
+          { ...common, type: 'text_delta', delta: '目录核对完成。' },
+          { ...common, type: 'complete', providerResponseId: 'done', finishReason: 'stop' },
+        ];
+      });
+      const runtime = new PiConversationRuntime({
+        generation: f.generations,
+        providerTools: f.loop,
+        bridge,
+        plans: {} as never,
+        createGateway: () => {
+          throw new Error('No planning');
+        },
+      });
+      await runtime.start({
+        ...run.prepared.stream,
+        identity: run.prepared.stream,
+        taskId: run.agent.taskId,
+        prompt: '仅查询目录',
+        mode: 'document',
+      });
+      await runtime.wait(run.prepared.stream.generationId);
+      const result = f.generations.get(run.prepared.stream.generationId);
+      expect(result.status, result.error).toBe(variant === 'repeat' ? 'failed' : 'complete');
+      if (variant === 'repeat') expect(result.error).toContain('AGENT_PREPARATION_STALLED');
+      expect(requests).toHaveLength(variant === 'repeat' ? 1 : 2);
+      const maps = f.project.access(false, (db) =>
+        db
+          .prepare(
+            "SELECT result_summary_json FROM agent_tool_calls WHERE task_id=? AND tool_name='project.structure.get' AND status='succeeded' ORDER BY tool_ordinal",
+          )
+          .all(run.agent.taskId),
+      ) as Array<{ result_summary_json: string }>;
+      expect(maps).toHaveLength(4);
+      for (const [i, row] of maps.entries()) {
+        const map = (
+          JSON.parse(row.result_summary_json) as {
+            resourceMap: { filters: { parentId: string }; resources: unknown[] };
+          }
+        ).resourceMap;
+        expect(map.filters.parentId).toBe(`scene:${scenes[variant === 'repeat' ? 0 : i]!.id}`);
+        expect(map.resources).toHaveLength(variant === 'shots' ? 1 : 0);
+        expect(JSON.stringify(map)).not.toContain('正文不可注入导航');
+      }
+    },
+  );
+
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'rebinds archived shot references through authorized saves while preserving authoring and CAS (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const old = f.content.saveDocument({
+      kind: 'character',
+      title: '旧角色',
+      contentMarkdown: '旧角色资料',
+    });
+    const replacement = f.content.saveDocument({
+      kind: 'character',
+      title: '新角色',
+      contentMarkdown: '新角色资料',
+    });
+    const scene = f.content.saveScene({ title: '原场次' });
+    const shot = f.content.saveShot({
+      sceneId: scene.id,
+      title: '原镜头',
+      prompt: '原正文\n空白与标点。',
+      timing: { estimatedDurationSeconds: 6 },
+      bindings: {
+        schemaVersion: 1,
+        characterDocumentIds: [old.id],
+        sceneDocumentIds: [f.setting.id],
+      },
+    });
+    f.project.access(true, (db) =>
+      db.prepare("UPDATE documents SET lifecycle_status='archived' WHERE id=?").run(old.id),
+    );
+    const run = f.prepare('只更换失效角色绑定，保留原镜头全部内容。');
+    await run.invoke('production.read', {
+      target: { kind: 'shot', id: shot.id },
+      view: 'authoring',
+    });
+    const save = await run.invoke('scene.update_shot_prompts', {
+      shots: [
+        {
+          shotId: shot.id,
+          expectedRowVersion: shot.rowVersion,
+          bindings: { ...shot.bindings, characterDocumentIds: [replacement.id] },
+        },
+      ],
+    });
+    expect(save).toMatchObject({ status: 'shot_prompts_saved', changedCount: 1 });
+    const current = f.content.listShots(scene.id)[0]!;
+    expect(current).toEqual({
+      ...shot,
+      bindings: { ...shot.bindings, characterDocumentIds: [replacement.id] },
+      rowVersion: shot.rowVersion + 1,
+      updatedAt: expect.any(String) as unknown,
+    });
+    expect(() =>
+      f.content.saveShot({
+        shotId: shot.id,
+        sceneId: scene.id,
+        title: shot.title,
+        expectedRowVersion: shot.rowVersion,
+        bindings: current.bindings,
+      }),
+    ).toThrow('SHOT_ROW_VERSION_CONFLICT');
+    expect(() =>
+      f.content.saveShot({
+        shotId: shot.id,
+        sceneId: scene.id,
+        title: shot.title,
+        expectedRowVersion: current.rowVersion,
+        bindings: shot.bindings,
+      }),
+    ).toThrow();
+    expect(f.content.listShots(scene.id)).toEqual([current]);
+  },
+);
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'atomically registers and saves one explicit draft without a registration round (%s)',
   async (protocol) => {
@@ -315,7 +715,7 @@ it.each(
     [false, true].map((planBeforeSave) => ({ protocol, planBeforeSave })),
   ),
 )(
-  'allocates an implicit analysis before another output is created ($protocol, planBeforeSave=$planBeforeSave)',
+  'allocates planned or earlier implicit analysis before another output is created ($protocol, planBeforeSave=$planBeforeSave)',
   async ({ protocol, planBeforeSave }) => {
     const f = await setup(protocol);
     const run = f.prepare('先保存分析，再保存分镜与提示词；恢复不得重复创建。');
@@ -347,7 +747,13 @@ it.each(
         },
       ],
     });
-    const savedAnalysis = analysis ?? (await run.invoke('document.submit_draft', analysisArgs));
+    const savedAnalysis =
+      analysis ??
+      (await run.invoke('document.submit_draft', {
+        ...analysisArgs,
+        outputKey: 'analysis',
+        outputIndex: 0,
+      }));
     expect(savedAnalysis.status).toBe('draft_saved');
     const bindings = plan.outputBindings as Array<{
       key: string;
@@ -1157,7 +1563,7 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
   },
 );
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
-  'compacts old versioned library text through Native/Pi and retains real SQLite sources (%s)',
+  'retains long explicitly read library text through Native/Pi without requiring an archive reread (%s)',
   async (protocol) => {
     const f = await setup(protocol, 40000);
     const body = '长资料正文'.repeat(4000);
@@ -1248,10 +1654,10 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       completeRequests: 7,
       coverage: 'complete',
     });
-    const shortened = requests.find((params) => JSON.stringify(params).includes('externalized'));
-    expect(shortened).toBeDefined();
-    expect(JSON.stringify(shortened)).toContain(large.id);
-    expect(JSON.stringify(shortened)).toContain('draft');
+    const current = JSON.stringify(requests.at(-1));
+    expect(current).toContain(large.id);
+    expect(current).toContain('draft');
+    expect(current.split(body)).toHaveLength(2);
     const stored = f.project.access(false, (db) =>
       new AgentContextStore(db).resultForCall(
         run.prepared.stream.projectId,
@@ -1260,7 +1666,6 @@ it.each(['openai-responses', 'openai-chat-completions'] as const)(
       ),
     );
     expect(stored?.content).toContain(body);
-    expect(JSON.stringify(shortened)).not.toContain(body);
     expect(f.content.getDocument(large.id).currentVersion?.contentMarkdown).toBe(body);
   },
 );
@@ -2079,7 +2484,13 @@ async function setup(
           },
         ],
       });
-      if (result.tools) tools = result.tools;
+      if (unifiedAgentToolRegistry.executionMode(name, args) === 'parallel')
+        tools = loop.advanceTextTurn({
+          ...prepared.stream,
+          providerResponseId: `response-${ordinal - 1}`,
+          finishReason: 'tool_calls',
+        });
+      else if (result.tools) tools = result.tools;
       return JSON.parse(result.continuation!.outputs[0]!.output) as Record<string, unknown>;
     };
     return { prepared, agent, invoke };
@@ -2096,6 +2507,124 @@ async function setup(
     prepare,
   };
 }
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'saves a Native new document with a null version without model repair and replays the canonical slot once (%s)',
+  async (protocol) => {
+    const f = await setup(protocol);
+    const prompt = '新建并保存完整剧本草稿，不发布。';
+    const run = f.prepare(prompt);
+    const draft = {
+      resourceId: 'workspace:documents',
+      title: '逆光成锋',
+      documentKind: 'plan',
+      contentMarkdown: '# 完整总纲\n人物、故事与每集梗概。\n'.repeat(200),
+      outputKey: 'outline',
+      outputIndex: 0,
+    };
+    let documentId = '';
+    const { bridge, requests } = scriptedBridge((params, index) => {
+      const common = { projectSessionId: params.projectSessionId };
+      const tool = (name: string, args: Record<string, unknown>): NativeProviderHostEvent[] => [
+        {
+          ...common,
+          type: 'tool_call_end',
+          call: { id: `null-save-${index}`, name, argumentsJson: JSON.stringify(args) },
+        },
+        {
+          ...common,
+          type: 'complete',
+          providerResponseId: `null-save-${index}`,
+          finishReason: 'tool_calls',
+        },
+      ];
+      switch (index) {
+        case 0:
+          return tool('tools.load', { names: ['document.submit_draft'] });
+        case 1:
+          return tool('project.structure.get', {});
+        case 2:
+          return tool('conversation.task.checkpoint', {
+            operation: 'plan',
+            deliverables: [
+              {
+                key: 'outline',
+                toolName: 'document.submit_draft',
+                documentKind: 'plan',
+                minimumCount: 1,
+              },
+            ],
+          });
+        case 3:
+          return tool('document.submit_draft', { ...draft, baseVersionId: null });
+        case 4: {
+          const saved = lastOutput(params);
+          expect(saved, JSON.stringify(saved)).toMatchObject({ status: 'draft_saved' });
+          documentId = String(saved.documentId);
+          // A deliberate transport replay, not a model repair after rejection.
+          return tool('document.submit_draft', draft);
+        }
+        default:
+          expect(index).toBe(5);
+          expect(lastOutput(params)).toMatchObject({ documentId, execution: { replayed: true } });
+          return [
+            { ...common, type: 'text_delta', delta: '草稿已保存，待审阅。' },
+            {
+              ...common,
+              type: 'complete',
+              providerResponseId: 'null-save-done',
+              finishReason: 'stop',
+            },
+          ];
+      }
+    });
+    const runtime = new PiConversationRuntime({
+      generation: f.generations,
+      providerTools: f.loop,
+      bridge,
+      createContextManager: (identity, taskId, original) =>
+        new AgentContextManager(f.project, identity, taskId, original),
+      plans: {} as never,
+      createGateway: () => {
+        throw new Error('No planning');
+      },
+    });
+    await runtime.start({
+      ...run.prepared.stream,
+      identity: run.prepared.stream,
+      taskId: run.agent.taskId,
+      prompt,
+      mode: 'document',
+    });
+    await runtime.wait(run.prepared.stream.generationId);
+    const generation = f.generations.get(run.prepared.stream.generationId);
+    expect(generation.status, generation.error).toBe('complete');
+    expect(requests).toHaveLength(6);
+    expect(f.workflow.getTask({ taskId: run.agent.taskId }).documents).toHaveLength(1);
+    expect(
+      f.project.access(false, (db) =>
+        db
+          .prepare(
+            "SELECT count(*) n FROM agent_task_events WHERE task_id=? AND event_type='tool_validation_failed'",
+          )
+          .get(run.agent.taskId),
+      ),
+    ).toEqual({ n: 0 });
+    expect(f.workflow.getDocument(documentId).currentVersion?.contentMarkdown).toBe(
+      draft.contentMarkdown,
+    );
+    expect(
+      f.project.access(false, (db) =>
+        db.prepare('SELECT count(*) n FROM document_versions WHERE document_id=?').get(documentId),
+      ),
+    ).toEqual({ n: 1 });
+    f.project.close();
+    f.project.open(join(f.directory, 'project'));
+    expect(f.workflow.getDocument(documentId).currentVersion).toMatchObject({
+      contentMarkdown: draft.contentMarkdown,
+      state: 'draft',
+    });
+  },
+);
 it.each(['openai-responses', 'openai-chat-completions'] as const)(
   'corrects a rejected new script from its complete pending body after handoff without audit scanning (%s)',
   async (protocol) => {

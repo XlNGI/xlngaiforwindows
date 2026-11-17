@@ -1,3 +1,6 @@
+import { readShotImage, writeShotImage } from '@ai-video/persistence';
+import { ProductionService } from './production-service.js';
+import { shotImageSourceToken } from './shot-image-source.js';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { AgentContextStore, AgentExecutionStore, contextContentHash } from '@ai-video/persistence';
@@ -197,6 +200,24 @@ export class ProductionBundleService {
         'BUNDLE_STRUCTURE_REQUIRED: Correct structural fields and frozen-source or target-version conflicts before saving. No content review or business writes occurred.',
       );
     const objects = bundleObjects(db, projectId, taskId, state);
+    for (const key of state.manifest!.shotKeys) {
+      const shot = objects.get(key) as ProductionBundleShot;
+      if (shot.image && shot.existing) {
+        const before = readShotImage(db, projectId, shot.existing.id);
+        if (
+          before.rowVersion !== shot.image.expectedRowVersion ||
+          shotImageSourceToken(
+            db,
+            projectId,
+            shot.existing.id,
+            new ProductionService(this.projects).imageInputs(shot.existing.id),
+          ) !== shot.image.sourceToken
+        )
+          throw new Error(
+            'BUNDLE_IMAGE_TARGET_CONFLICT: reread the saved shot image CAS and sourceToken before replacing it.',
+          );
+      }
+    }
     const ids = new Map(
       state.entries.map((e) => [e.key, objects.get(e.key)!.existing?.id ?? randomUUID()]),
     );
@@ -333,8 +354,31 @@ export class ProductionBundleService {
         },
         s.existing ? undefined : { newId: ids.get(key)! },
       );
+      let image: Record<string, unknown> | undefined;
+      if (s.image) {
+        writeShotImage(db, projectId, {
+          shotId: output.id,
+          expectedRowVersion: s.image.expectedRowVersion ?? 0,
+          sourceToken: '',
+          prompt: s.image.prompt,
+          purpose: s.image.purpose,
+          intent: s.image.intent,
+          bindings: resolveBindings(s.image.bindings),
+        });
+        const token = shotImageSourceToken(
+          db,
+          projectId,
+          output.id,
+          new ProductionService(this.projects).imageInputs(output.id),
+        );
+        db.prepare(
+          'UPDATE shot_image_prompts SET source_token=? WHERE shot_id=? AND project_id=?',
+        ).run(token, output.id, projectId);
+        image = { ...readShotImage(db, projectId, output.id) };
+      }
       const expected = {
         kind: 'shot',
+        ...(image ? { image } : {}),
         title: s.title,
         sceneId,
         position: output.position,
@@ -371,6 +415,7 @@ export class ProductionBundleService {
       mappingResultId: result.id,
       objectCount: saved.length,
       counts: counts(saved),
+      shotImageCount: saved.filter((item) => item.expected.image).length,
       businessSaved: true,
       readbackVerified: false,
       instruction:
@@ -442,7 +487,12 @@ export function bundleReadbackRecorded(
           current_version_id?: string;
         }
       | undefined;
-    return row?.row_version === o.rowVersion && row.current_version_id === o.versionId;
+    const imageVersion = (o.expected.image as { rowVersion?: number } | undefined)?.rowVersion;
+    return (
+      row?.row_version === o.rowVersion &&
+      row.current_version_id === o.versionId &&
+      (imageVersion === undefined || readShotImage(db, projectId, o.id).rowVersion === imageVersion)
+    );
   });
 }
 export function readSavedBundle(
@@ -462,18 +512,27 @@ export function readSavedBundle(
     throw new Error('BUNDLE_INVALID_RANGE');
   const objects = manifest.objects
     .slice(Number(offset), Number(offset) + 20)
-    .map(({ key, kind, id, rowVersion, versionId, hash }) => ({
+    .map(({ key, kind, id, rowVersion, versionId, hash, expected }) => ({
       key,
       kind,
       id,
       rowVersion,
       versionId,
       hash,
+      ...(expected.image
+        ? {
+            shotImage: {
+              rowVersion: (expected.image as { rowVersion: number }).rowVersion,
+              read: { tool: 'shot.image.read', shotId: id },
+            },
+          }
+        : {}),
     }));
   return {
     status: 'bundle_saved_objects',
     objects,
     counts: counts(manifest.objects),
+    shotImageCount: manifest.objects.filter((item) => item.expected.image).length,
     ...(Number(offset) + objects.length < manifest.objects.length
       ? { nextOffset: Number(offset) + objects.length }
       : {}),
@@ -552,6 +611,7 @@ export function readbackBundle(
           title: row.title,
           ...('position' in item.expected ? { position: row.position } : {}),
           ...(item.kind === 'shot' ? { sceneId: row.scene_id } : {}),
+          ...(item.expected.image ? { image: { ...readShotImage(db, projectId, item.id) } } : {}),
           prompt: row.prompt,
           bindings: row.bindings_json ? (JSON.parse(row.bindings_json) as unknown) : null,
           timing: row.timing_json ? (JSON.parse(row.timing_json) as unknown) : null,
@@ -573,6 +633,7 @@ export function readbackBundle(
     bundleId: taskId,
     fingerprint: manifest.fingerprint,
     counts: counts(manifest.objects),
+    shotImageCount: manifest.objects.filter((item) => item.expected.image).length,
     failures,
     checkedAt: new Date().toISOString(),
   };

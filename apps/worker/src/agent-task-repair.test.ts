@@ -26,6 +26,86 @@ function exchange(
   ];
 }
 const checkpoint = 'conversation.task.checkpoint';
+it('allows different empty navigation scopes, then stops identical preparation across durable recovery', () => {
+  let state: ReadLoopSupervision = {};
+  const navigate = (id: string, parent: string, offset = 0, detail = 'compact') =>
+    exchange(
+      id,
+      'project.structure.get',
+      { kind: 'shot', parentId: parent, offset, detail },
+      {
+        status: 'succeeded',
+        detail,
+        resourceMap: {
+          projectId: 'project',
+          revision: 'r',
+          resources: [],
+          offset,
+          limit: offset ? 1 : 20,
+          filters: { kind: 'shot', parentId: parent, includeArchived: false },
+        },
+      },
+    );
+  for (let i = 0; i < 4; i++) {
+    expect(() =>
+      assertNoReadLoop({ messages: navigate(`different-${i}`, `scene:${i}`) }, state),
+    ).not.toThrow();
+    state = JSON.parse(JSON.stringify(state)) as ReadLoopSupervision;
+  }
+  for (let i = 0; i < 2; i++) {
+    assertNoReadLoop(
+      { messages: navigate(`same-${i}`, 'scene:3', i + 1, i ? 'full' : 'compact') },
+      state,
+    );
+    state = JSON.parse(JSON.stringify(state)) as ReadLoopSupervision;
+  }
+  expect(() =>
+    assertNoReadLoop({ messages: navigate('fourth', 'scene:3', 100, 'full') }, state),
+  ).toThrow('AGENT_PREPARATION_STALLED');
+});
+it.each(['fresh', 'same', 'empty', 'failed'])(
+  'counts immutable result pages as preparation progress only when fresh and nonempty (%s)',
+  (variant) => {
+    let state: ReadLoopSupervision = {};
+    const run = () => {
+      for (let i = 0; i < 4; i++) {
+        const offset = variant === 'same' ? 0 : i * 100;
+        assertNoReadLoop(
+          {
+            messages: [
+              ...exchange(
+                `page-${i}`,
+                checkpoint,
+                { operation: 'result', resultId: 'source-result', resultOffset: offset },
+                {
+                  status: 'task_result_read',
+                  resultId: 'source-result',
+                  contentHash: 'immutable',
+                  offset,
+                  endOffset: offset + (variant === 'empty' ? 0 : 100),
+                  content:
+                    variant === 'empty' ? '' : String(variant === 'same' ? 0 : i).repeat(100),
+                },
+                variant === 'failed',
+              ),
+              ...exchange(
+                `load-${i}`,
+                'tools.load',
+                { names: ['document.submit_draft'] },
+                { status: 'tools_loaded', loaded: ['document.submit_draft'] },
+              ),
+            ],
+          },
+          state,
+        );
+        state = JSON.parse(JSON.stringify(state)) as ReadLoopSupervision;
+      }
+    };
+    if (variant === 'fresh') expect(run).not.toThrow();
+    else expect(run).toThrow('AGENT_PREPARATION_STALLED');
+  },
+);
+
 const planFailure = (i: number, legacy = false) =>
   exchange(
     `plan-${i}`,

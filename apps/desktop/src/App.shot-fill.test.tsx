@@ -2,7 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   officialVideoAudioContracts,
+  productionImageBindingPrompt,
+  stripProductionImageBindingPrompt,
   type AdapterDescriptor,
+  type ProductionImageSelection,
   type ShotInfo,
   type ShotReferenceBindingInfo,
 } from '@ai-video/contracts';
@@ -26,41 +29,50 @@ afterEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
 });
-it.each(['reference', 'first-frame'] as const)(
-  'fills Seedance video from the shot button after saving default cast and a continuity %s',
-  async (role) => {
+it.each([
+  { role: 'reference', selection: 'inherited' },
+  { role: 'first-frame', selection: 'inherited' },
+  { role: 'reference', selection: 'adopted' },
+  { role: 'reference', selection: 'cleared' },
+] as const)(
+  'fills Seedance video with $selection inputs and continuity $role',
+  async ({ role, selection }) => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
     const contract = officialVideoAudioContracts.find(
       (item) => item.contractId === 'cn.bytedance.seedance2-0.video' && item.contractRevision === 2,
     )!;
-    const adapters: AdapterDescriptor[] = (['REFERENCE_TO_VIDEO', 'IMAGE_TO_VIDEO'] as const).map(
-      (capability) => ({
-        key: `${capability}:unicompapi:${contract.contractId}:contract-2`,
-        capability,
-        capabilityLabel: capability === 'IMAGE_TO_VIDEO' ? '图生视频' : '参考生视频',
-        provider: 'unicompapi',
-        providerLabel: 'UniCompAPI',
-        model: contract.contractId,
-        modelLabel: contract.officialModelName,
-        contractId: contract.contractId,
-        contractRevision: 2,
-        apiVersion: 'contract-2',
-        schemaVersion: 1 as const,
-        endpoint: 'https://example.test/videos',
-        documentationUrl: 'https://example.test/docs',
-        credentialProvider: 'unicompapi',
-        parameterSchema:
-          contract.parameterSchema as unknown as AdapterDescriptor['parameterSchema'],
-        uiSchema: { fields: [{ key: 'content', control: 'structured', group: 'basic', order: 1 }] },
-      }),
-    );
+    const adapters: AdapterDescriptor[] = (
+      ['REFERENCE_TO_VIDEO', 'IMAGE_TO_VIDEO', 'TEXT_TO_VIDEO'] as const
+    ).map((capability) => ({
+      key: `${capability}:unicompapi:${contract.contractId}:contract-2`,
+      capability,
+      capabilityLabel:
+        capability === 'IMAGE_TO_VIDEO'
+          ? '图生视频'
+          : capability === 'TEXT_TO_VIDEO'
+            ? '文生视频'
+            : '参考生视频',
+      provider: 'unicompapi',
+      providerLabel: 'UniCompAPI',
+      model: contract.contractId,
+      modelLabel: contract.officialModelName,
+      contractId: contract.contractId,
+      contractRevision: 2,
+      apiVersion: 'contract-2',
+      schemaVersion: 1 as const,
+      endpoint: 'https://example.test/videos',
+      documentationUrl: 'https://example.test/docs',
+      credentialProvider: 'unicompapi',
+      parameterSchema: contract.parameterSchema as unknown as AdapterDescriptor['parameterSchema'],
+      uiSchema: { fields: [{ key: 'content', control: 'structured', group: 'basic', order: 1 }] },
+    }));
     const project = {
       id: 'project',
       name: 'Shot Fill',
       rootPath: 'D:/ShotFill',
       mode: 'read-write',
-      schemaVersion: 72,
+      schemaVersion: 80,
       createdAt: 'now',
       updatedAt: 'now',
     };
@@ -97,6 +109,15 @@ it.each(['reference', 'first-frame'] as const)(
       kind: 'first-frame',
       relativePath: 'assets/frame.png',
     };
+    const adopted: ProductionImageSelection[] | undefined =
+      selection === 'inherited'
+        ? undefined
+        : selection === 'cleared'
+          ? []
+          : [
+              { assetId: frame.id, role: 'reference' },
+              { assetId: image.id, role: 'character' },
+            ];
     let shot: ShotInfo = {
       id: 'shot',
       sceneId: 'scene',
@@ -164,6 +185,37 @@ it.each(['reference', 'first-frame'] as const)(
         return { shotId: shot.id, referenceBindings };
       }
       if (method === 'asset.list') return [image, sceneImage, frame];
+      if (method === 'shot.image.get')
+        return {
+          shotId: shot.id,
+          prompt: '',
+          purpose: 'composition',
+          intent: '',
+          rowVersion: 0,
+          currentSourceToken: 'a'.repeat(64),
+          stale: false,
+          sourceStale: false,
+          inputImages: [],
+          assets: [image, sceneImage, frame],
+          videoImages: {
+            shotId: shot.id,
+            rowVersion: selection === 'inherited' ? 0 : 1,
+            ...(adopted !== undefined ? { selections: adopted } : {}),
+            conflicts: [],
+          },
+        };
+      if (method === 'shot.prompt.preview') {
+        const inputs = params.inputImages as ProductionImageSelection[];
+        return {
+          prompt: productionImageBindingPrompt(
+            stripProductionImageBindingPrompt(params.prompt as string),
+            inputs.length,
+            inputs.map((image, index) => ({ ...image, imageIndex: index + 1 })),
+            (index) => `图片${index}`,
+          ),
+          inputImages: inputs,
+        };
+      }
       if (method === 'scene.media.resolve')
         return {
           characters: [{ characterDocumentId: cast.id, defaultImage: image }],
@@ -259,7 +311,9 @@ it.each(['reference', 'first-frame'] as const)(
     await waitFor(() => expect(nav().getByRole('button', { name: /场次与镜头/ })).toBeEnabled());
     fireEvent.click(nav().getByRole('button', { name: /场次与镜头/ }));
     fireEvent.click(await screen.findByRole('button', { name: /镜头一/ }));
-    await screen.findByText('已确认的衔接');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeEnabled(),
+    );
     const fill = screen.getByRole('button', { name: '填充本镜视频表单' });
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '填充本镜视频表单' })).toBeEnabled(),
@@ -275,35 +329,51 @@ it.each(['reference', 'first-frame'] as const)(
       'production',
     );
     expect(screen.getByLabelText('当前制作模式')).toHaveTextContent(
-      role === 'first-frame' ? '图生视频' : '参考生视频',
+      selection === 'cleared' ? '文生视频' : role === 'first-frame' ? '图生视频' : '参考生视频',
     );
     const form = within(container.querySelector<HTMLElement>('.production-panel')!);
     const prompt = await form.findByRole('textbox', { name: '内容' });
     expect(prompt).toHaveTextContent('雨夜里林澈回头');
     expect(prompt).not.toHaveTextContent('静态图提示词');
-    expect(await form.findAllByRole('button', { name: /放大查看/ })).not.toHaveLength(0);
     const imageRoles = form
       .getAllByRole('combobox')
       .map((select) => (select as HTMLSelectElement).value)
       .filter((value) => value === 'first_frame' || value === 'reference_image');
-    expect(imageRoles).toEqual([
-      'reference_image',
-      'reference_image',
-      role === 'first-frame' ? 'first_frame' : 'reference_image',
-    ]);
-    expect(prompt).toHaveTextContent('本段传入3张参考图');
+    expect(imageRoles).toEqual(
+      selection === 'cleared'
+        ? []
+        : selection === 'adopted'
+          ? ['reference_image', 'reference_image']
+          : [
+              'reference_image',
+              'reference_image',
+              role === 'first-frame' ? 'first_frame' : 'reference_image',
+            ],
+    );
+    if (selection === 'cleared') expect(prompt).not.toHaveTextContent('【输入图片说明】');
+    else expect(prompt).toHaveTextContent(`本段传入${selection === 'adopted' ? 2 : 3}张参考图`);
     await waitFor(() =>
-      expect(form.getAllByRole('button', { name: /放大查看/ }).length).toBeGreaterThanOrEqual(3),
+      expect(form.queryAllByRole('button', { name: /放大查看/ }).length).toBeGreaterThanOrEqual(
+        selection === 'cleared' ? 0 : selection === 'adopted' ? 2 : 3,
+      ),
     );
     const compilation = vi
       .mocked(callWorker)
       .mock.calls.find(([method]) => method === 'production.compile');
     expect(compilation?.[1]).toMatchObject({
-      inputImages: [
-        { assetId: image.id, role: 'character', label: cast.title },
-        { assetId: sceneImage.id, role: 'scene', label: location.title },
-        { assetId: frame.id, role, label: 'frame.png' },
-      ],
+      inputImages:
+        selection === 'cleared'
+          ? []
+          : selection === 'adopted'
+            ? [
+                { assetId: frame.id, role: 'reference', label: 'frame.png' },
+                { assetId: image.id, role: 'character' },
+              ]
+            : [
+                { assetId: image.id, role: 'character', label: cast.title },
+                { assetId: sceneImage.id, role: 'scene', label: location.title },
+                { assetId: frame.id, role, label: 'frame.png' },
+              ],
     });
     if (role === 'first-frame') {
       expect(form.getByRole('alert')).toHaveTextContent('不能混用');

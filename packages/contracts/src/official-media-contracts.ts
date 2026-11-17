@@ -2,7 +2,7 @@ import contracts from './official-video-contracts.json' with { type: 'json' };
 import imageContracts from './official-image-contracts.json' with { type: 'json' };
 import videoAudioContracts from './official-video-audio-contracts.json' with { type: 'json' };
 import bindings from './media-model-bindings.json' with { type: 'json' };
-import type { ModelBinding, ModelContract } from './index.js';
+import type { ModelBinding, ModelContract, ProviderModelCapabilities } from './index.js';
 
 /** Official semantics and channel bindings are separate, shared data records. */
 export const officialVideoContracts: readonly ModelContract[] = contracts as ModelContract[];
@@ -118,4 +118,27 @@ export function adapterBindsCatalogModel(
   return selection.providerType === 'unicompapi'
     ? Boolean(selection.parameterTemplateKey) && adapter.model === selection.parameterTemplateKey
     : adapter.model === selection.remoteModelId;
+}
+
+/** Task capability is a model fact; protocol compatibility alone does not grant it. */
+export function modelSupportsGenerationAdapter(
+  model: {
+    capabilities: Partial<
+      Pick<
+        ProviderModelCapabilities,
+        'imageGeneration' | 'imageEditing' | 'videoGeneration' | 'speechSynthesis'
+      >
+    >;
+  },
+  adapter: { model: string; capability: string },
+): boolean {
+  if (adapter.capability === 'REFERENCE_TO_IMAGE') {
+    return adapter.model === 'openai-images'
+      ? model.capabilities.imageEditing === true
+      : model.capabilities.imageGeneration === true || model.capabilities.imageEditing === true;
+  }
+  if (adapter.capability.endsWith('TO_IMAGE')) return model.capabilities.imageGeneration === true;
+  if (adapter.capability.endsWith('TO_VIDEO')) return model.capabilities.videoGeneration === true;
+  if (adapter.capability === 'TEXT_TO_AUDIO') return model.capabilities.speechSynthesis === true;
+  return false;
 }

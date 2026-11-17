@@ -48,6 +48,125 @@ import { createFauxCore, fauxAssistantMessage, fauxToolCall } from '@earendil-wo
 const directories: string[] = [];
 const projects: ProjectService[] = [];
 const settingsServices: AppSettingsService[] = [];
+it.each(['openai-responses', 'openai-chat-completions'] as const)(
+  'reads eight immutable result pages under one authorization then registers a user plan (%s)',
+  async (protocol) => {
+    const { conversation, generations, project, workflow } = await setup(protocol);
+    const prompt = '生成对应的场景与镜头的提示词';
+    const prepared = generations.prepare({
+      conversationId: conversation.id,
+      prompt,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const loop = createSystemLoop(project, workflow);
+    const agent = loop.prepare(prepared.stream, prompt);
+    generations.configureAgentTools(prepared.stream, agent.tools);
+    new AgentContextManager(project, prepared.stream, agent.taskId, prompt);
+    const source = project.access(true, (db, p) =>
+      new AgentContextStore(db).putResult(
+        p.id,
+        agent.taskId,
+        'full-source',
+        'runtime.fixture',
+        '剧本原文'.repeat(300),
+        {},
+      ),
+    );
+    const gateway = new AgentProviderToolGateway(
+      loop,
+      prepared.stream,
+      agent.tools,
+      vi.fn(),
+      vi.fn(),
+    );
+    const name = 'conversation.task.checkpoint';
+    const calls = Array.from({ length: 8 }, (_, i) => ({
+      id: `result-page-${i}`,
+      name,
+      arguments: {
+        operation: 'result',
+        resultId: source.id,
+        resultOffset: i * 100,
+        resultLimit: 100,
+      },
+    }));
+    gateway.startProviderStep();
+    expect(gateway.providerResponseRejection(calls)).toBeUndefined();
+    gateway.freezeProviderResponse(calls);
+    const reader = gateway.tools().find((tool) => tool.name === name)!;
+    const initialHandle = gateway
+      .currentDefinitions()
+      .find((tool) => tool.name === name)!.authorizationHandle;
+    for (const call of calls) {
+      gateway.captureProviderCall(call.id, 'page-response');
+      const result = await reader.execute(call.id, reader.prepareArguments!(call.arguments));
+      expect(JSON.stringify(result)).toContain('task_result_read');
+      expect(JSON.stringify(result)).not.toContain('AGENT_TOOL_AUTHORIZATION_REPLAYED');
+    }
+    gateway.finishProviderResponse();
+    expect(
+      gateway.currentDefinitions().find((tool) => tool.name === name)!.authorizationHandle,
+    ).not.toBe(initialHandle);
+    const count = () =>
+      project.access(
+        false,
+        (db) =>
+          (
+            db
+              .prepare('SELECT count(*) AS n FROM agent_tool_calls WHERE task_id=?')
+              .get(agent.taskId) as { n: number }
+          ).n,
+      );
+    expect(count()).toBe(8);
+    const plan = {
+      id: 'register-plan',
+      name,
+      arguments: {
+        operation: 'plan',
+        deliverables: [
+          {
+            key: 'scenes',
+            toolName: 'scene.submit_structure',
+            minimumCount: 1,
+            intent: 'create',
+            origin: 'user_requirement',
+            sourceRequirementIds: ['original'],
+          },
+        ],
+      },
+    };
+    expect(gateway.providerResponseRejection([calls[0]!, plan])).toContain(
+      'No calls were executed',
+    );
+    expect(count()).toBe(8);
+    gateway.startProviderStep();
+    // Worker independently rejects a mixed batch even if a caller bypasses Pi preflight.
+    const currentHandle = gateway
+      .currentDefinitions()
+      .find((tool) => tool.name === name)!.authorizationHandle;
+    await expect(
+      loop.executeTools({
+        ...prepared.stream,
+        providerResponseId: 'invalid-mixed-response',
+        calls: [calls[0]!, plan].map((call) => ({
+          id: call.id,
+          name: call.name,
+          argumentsJson: JSON.stringify(call.arguments),
+          authorizationHandle: currentHandle,
+        })),
+      }),
+    ).rejects.toThrow('State-changing system tools must execute alone');
+    expect(count()).toBe(8);
+    gateway.freezeProviderResponse([plan]);
+    gateway.captureProviderCall(plan.id, 'plan-response');
+    const writer = gateway.tools().find((tool) => tool.name === name)!;
+    const result = await writer.execute(plan.id, writer.prepareArguments!(plan.arguments));
+    expect(JSON.stringify(result)).toContain('task_plan_saved');
+    expect(count()).toBe(9);
+    expect(workflow.listDocuments()).toHaveLength(0);
+  },
+);
 function promptPatch(record: Partial<PromptRecord>) {
   return { prompt: record.prompt, ...(record.bindings ? { bindings: record.bindings } : {}) };
 }
@@ -289,6 +408,38 @@ function taskSnapshot(project: ProjectService, taskId: string): Record<string, u
   });
 }
 describe('AgentProviderLoopService', () => {
+  it('restores distinct assistant ownership for a retry sharing the original user message', async () => {
+    const { conversation, generations, loop, workflow, project } = await setup();
+    const first = generations.prepare({
+      conversationId: conversation.id,
+      prompt: '检查项目资料',
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const originalTask = loop.prepare(first.stream, '检查项目资料');
+    generations.failNative({
+      ...first.stream,
+      content: '',
+      error: 'Provider HTTP 500: failed before producing text',
+      retryable: true,
+    });
+    const retry = generations.retryPrepare({
+      assistantMessageId: first.generation.assistantMessage.id,
+      providerProfileId: 'profile',
+      modelId: 'model',
+    });
+    const retryTask = loop.prepare(retry.stream, '检查项目资料');
+    expect(retry.generation.userMessage.id).toBe(first.generation.userMessage.id);
+    expect(retryTask.taskId).not.toBe(originalTask.taskId);
+    expect(
+      new DocumentWorkflowService(project).getTask({ taskId: originalTask.taskId })
+        .assistantMessageIds,
+    ).toEqual([first.generation.assistantMessage.id]);
+    expect(workflow.getTask({ taskId: retryTask.taskId }).assistantMessageIds).toEqual([
+      retry.generation.assistantMessage.id,
+    ]);
+  });
+
   it.each(['openai-responses', 'openai-chat-completions'] as const)(
     'reuses durable failed content, preserves CAS conflicts and reads known artifacts directly (%s)',
     async (protocol) => {
@@ -1425,6 +1576,8 @@ describe('AgentProviderLoopService', () => {
           await invoke('document.submit_draft', {
             resourceId: 'workspace:characters',
             documentKind: kind,
+            outputKey: kind,
+            outputIndex: 0,
             title: kind,
             contentMarkdown: `# ${kind}\n镜头中的对应资料`,
           }),

@@ -4,6 +4,7 @@ import type {
   VideoGenerationFailureKind,
   VideoGenerationJobInfo,
 } from '@ai-video/contracts';
+import { canResumeVideoPolling, isNativeVideoPollContractError } from '@ai-video/contracts';
 
 const statusLabels: Record<string, string> = {
   draft: '待提交',
@@ -43,6 +44,11 @@ const exactEventSummaries: Record<string, string> = {
   'Provider video output is downloading.': '生成完成，正在把视频保存到本地素材库。',
   'Image result downloaded and committed locally.': '图片已保存到本地素材库。',
   'Video output downloaded and committed locally.': '视频已保存到本地素材库。',
+  'Provider video polling paused; remote task outcome is unknown.':
+    '查询进度已暂停，服务端任务结果尚未确认。',
+  'Provider video polling resumed for the existing task.': '已恢复查询原视频任务，无需重新生成。',
+  'Video polling recovery linked to the existing remote task.':
+    '已关联原视频任务进行恢复查询，没有重新提交生成。',
   'Video submission was interrupted before a provider task was recorded.':
     '应用中断时任务尚未完成提交，为避免重复扣费，本次任务已停止。',
   'Generation was interrupted before completion.': '应用中断导致任务未完成，请重新生成。',
@@ -80,8 +86,15 @@ export function generationPhaseLabel(phase: GenerationJobEventInfo['phase']): st
 }
 
 export function videoProgressGuidance(
-  job: Pick<VideoGenerationJobInfo, 'status' | 'mediaState' | 'elapsedMs' | 'request'>,
+  job: Pick<VideoGenerationJobInfo, 'status' | 'mediaState' | 'elapsedMs' | 'request'> &
+    Partial<Pick<VideoGenerationJobInfo, 'providerTaskId' | 'metadata' | 'error' | 'results'>>,
 ): string {
+  if (job.metadata?.pollRecoveryJobId) return '已创建恢复查询，结果将显示在对应的恢复任务中。';
+  if (
+    job.metadata &&
+    canResumeVideoPolling({ ...job, metadata: job.metadata, results: job.results ?? [] })
+  )
+    return '查询已停止，服务端可能仍在处理或已完成。请点击“恢复查询”获取原任务结果，避免重复提交。';
   if (job.mediaState === 'submission_unknown')
     return '生成服务未返回任务编号，暂时无法确认是否接单。已停止自动提交，请先核对 Provider 后台。';
   if (job.mediaState === 'awaiting_confirmation')
@@ -132,6 +145,13 @@ export function generationErrorFeedback(
 ): GenerationErrorFeedback {
   const normalized = message.trim();
   const technicalDetail = /[\u3400-\u9fff]/u.test(normalized) ? undefined : normalized;
+  if (isNativeVideoPollContractError(normalized)) {
+    return {
+      userMessage:
+        '本地查询结果解析失败，服务端任务状态尚未确认。请更新应用后点击“恢复查询”获取原任务结果，避免重复提交。',
+      technicalDetail: normalized,
+    };
+  }
   if (/^Provider image response received; local output processing failed:/i.test(normalized)) {
     return {
       userMessage: '已收到生成结果，但图片下载或保存失败。请先查看服务商已有结果，避免重复生成。',

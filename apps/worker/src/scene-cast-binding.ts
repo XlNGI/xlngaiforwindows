@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { SceneCharacterBindingInfo } from '@ai-video/contracts';
 import { SceneCharacterRepository } from '@ai-video/persistence';
+import { documentImageBindingPredicate } from './document-image-binding.js';
 
 /** Validate model-selected identities; prompt text is never used to infer a relationship. */
 export function requireProductionCharacters(
@@ -63,6 +64,7 @@ export function productionReferenceImage(
       JOIN generation_jobs j ON j.id=r.job_id AND j.project_id=a.project_id
       WHERE a.project_id=? AND a.deleted_at IS NULL AND lower(a.kind) NOT LIKE '%video%'
         AND json_extract(j.task_snapshot_json,'$.sourceDocumentId')=?
+        AND ${documentImageBindingPredicate(database, "json_extract(j.task_snapshot_json,'$.sourceDocumentId')", 'a.id')}
       ORDER BY a.created_at DESC,a.id DESC LIMIT 1`,
     )
     .get(projectId, documentId) as { id: string } | undefined;

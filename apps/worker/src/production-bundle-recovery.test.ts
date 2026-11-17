@@ -253,3 +253,151 @@ it('records preflight and invalid recovery failures and stops before another pro
     ).toEqual({ n: 1 });
   });
 });
+
+it('rejects copied archive pointers without retaining them as retryable prompt arguments', async () => {
+  const f = await productionBundleFixture();
+  fixtures.push(f);
+  f.stage({ operation: 'begin', estimatedOutputTokens: 4000 });
+  const tool = 'production.bundle.submit';
+  const archive = f.project.access(true, (db, p) => {
+    const store = new AgentContextStore(db);
+    const receipt = store.putResult(
+      p.id,
+      f.task.taskId,
+      'bundle-submit:already-staged',
+      'production.bundle.submission',
+      JSON.stringify({ result: { status: 'bundle_candidate_incomplete', revision: 1 } }),
+    );
+    const pointer = {
+      archivedArguments: true,
+      resultId: receipt.id,
+      read: {
+        tool: 'conversation.task.checkpoint',
+        operation: 'result',
+        resultId: receipt.id,
+        resultView: 'arguments',
+      },
+    };
+    // Reproduce the prior version's poisoned prepared record without using the new writer.
+    const poisoned = store.putResult(
+      p.id,
+      f.task.taskId,
+      'legacy-poisoned',
+      tool,
+      JSON.stringify({ status: 'legacy_failure' }),
+      pointer,
+      'failed',
+    );
+    return { pointer, poisonedId: poisoned.id };
+  });
+  const preserve = vi.fn((identity: LlmGenerationIdentity, name: string, args: unknown) =>
+    f.loop.preserveToolArguments(identity, name, args),
+  );
+  const gateway = new AgentProviderToolGateway(
+    {
+      executeTools: vi.fn(),
+      confirmTool: vi.fn(),
+      selectMedia: vi.fn(),
+      startProviderStep: vi.fn(),
+      completeProviderStep: vi.fn(),
+      terminateGeneration: vi.fn(),
+      resolveToolArguments: (identity, name, args) =>
+        f.loop.resolveToolArguments(identity, name, args),
+      preserveToolArguments: preserve,
+    },
+    f.prepared.stream,
+    [preparedArgumentsDefinition(SYSTEM_AGENT_TOOLS.find((t) => t.name === tool)!)],
+    vi.fn(),
+    vi.fn(),
+  );
+  const prepare = gateway.tools()[0]!.prepareArguments!;
+  for (const input of [archive.pointer, { preparedArguments: { resultId: archive.poisonedId } }]) {
+    let message = '';
+    try {
+      prepare(input);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('ARCHIVED_ARGUMENTS_NOT_EXECUTABLE');
+    expect(message).toContain('operation=state');
+    expect(message).toContain('resultView');
+    expect(message).toContain('content');
+    expect(message).not.toContain('Arguments retained');
+    expect(message).not.toContain('BUNDLE_SUBMIT_INVALID');
+    expect(message).not.toContain('must have required properties');
+  }
+  expect(preserve).not.toHaveBeenCalled();
+  expect(() => f.loop.preserveToolArguments(f.prepared.stream, tool, archive.pointer)).toThrow(
+    'ARCHIVED_ARGUMENTS_NOT_EXECUTABLE',
+  );
+  f.project.access(false, (db) => {
+    expect(
+      db
+        .prepare(
+          "SELECT COUNT(*) n FROM agent_context_results WHERE task_id=? AND call_id LIKE 'prepared:%'",
+        )
+        .get(f.task.taskId),
+    ).toEqual({ n: 0 });
+  });
+});
+
+it('locates actual failed arguments without changing their text, task scope or submit CAS', async () => {
+  const f = await productionBundleFixture();
+  fixtures.push(f);
+  f.project.access(true, (db, p) => {
+    const store = new AgentContextStore(db);
+    const name = 'production.bundle.submit';
+    const original = {
+      partKey: 'original',
+      expectedRevision: 7,
+      prompts: [
+        {
+          kind: 'character',
+          localKey: 'hero',
+          title: '主角',
+          prompt: '  哈哈110\r\n\n'.repeat(600),
+        },
+      ],
+    };
+    const result = store.putResult(
+      p.id,
+      f.task.taskId,
+      'failed-original',
+      name,
+      'rejected',
+      original,
+      'failed',
+    );
+    const pointer = {
+      archivedArguments: true,
+      resultId: result.id,
+      read: { resultView: 'arguments' },
+    };
+    let reason = '';
+    try {
+      resolvePreparedArguments(store, p.id, f.task.taskId, name, pointer);
+    } catch (error) {
+      reason = (error as Error).message;
+    }
+    const reference = { preparedArguments: { resultId: result.id } };
+    expect(reason).toContain(JSON.stringify(reference));
+    expect(reason).not.toContain(original.prompts[0]!.prompt);
+    expect(resolvePreparedArguments(store, p.id, f.task.taskId, name, reference)).toEqual(original);
+    expect(() => resolvePreparedArguments(store, p.id, 'other-task', name, pointer)).toThrow(
+      'unavailable in this task',
+    );
+    expect(() =>
+      resolvePreparedArguments(store, 'other-project', f.task.taskId, name, pointer),
+    ).toThrow('unavailable in this task');
+    expect(() =>
+      resolvePreparedArguments(store, p.id, f.task.taskId, name, {
+        ...reference,
+        expectedRevision: 8,
+      }),
+    ).toThrow('PATCH_INVALID');
+    expect(store.result(p.id, f.task.taskId, result.id)?.arguments).toEqual(original);
+    expect(
+      db.prepare('SELECT COUNT(*) n FROM agent_tool_calls WHERE task_id=?').get(f.task.taskId),
+    ).toEqual({ n: 0 });
+  });
+});

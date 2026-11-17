@@ -109,6 +109,16 @@ describe('generation feedback', () => {
     });
   });
 
+  it('explains local poll parsing failures without blaming the network or recommending resubmission', () => {
+    const message = 'Native Provider error is invalid.';
+    const feedback = generationErrorFeedback(message, 'transport');
+    expect(feedback.userMessage).toContain('查询结果解析失败');
+    expect(feedback.userMessage).toContain('恢复查询');
+    expect(feedback.userMessage).toContain('避免重复提交');
+    expect(feedback.userMessage).not.toContain('网络');
+    expect(feedback.technicalDetail).toBe(message);
+  });
+
   it('explains image dimension failures while retaining the provider limits', () => {
     const message =
       'Provider request failed with HTTP 400: invalid_parameter: status_code=400, kind=invalid_request, message=size must be WIDTHxHEIGHT, multiples of 16, aspect ratio at most 3, 655360..8294400 pixels and each edge at most 3840';

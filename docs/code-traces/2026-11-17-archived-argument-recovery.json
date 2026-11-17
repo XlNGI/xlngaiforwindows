@@ -1,0 +1,263 @@
+{
+  "generatedAt": "2026-11-16T17:02:07.409Z",
+  "status": "implemented_packaged_offline_verified",
+  "incident": {
+    "projectOpenedReadOnly": true,
+    "task": {
+      "id": "3998a5ec-9bff-40b6-becd-6895ed8e355c",
+      "status": "failed",
+      "created_at": "2026-11-16T16:21:30.391Z",
+      "updated_at": "2026-11-16T16:39:13.604Z"
+    },
+    "bundle": {
+      "revision": 14,
+      "stage": {
+        "purpose": "prop-image",
+        "version": 4,
+        "stageKey": "props-v1"
+      },
+      "candidateCount": 17,
+      "kinds": {
+        "document": 11,
+        "scene": 1,
+        "shot": 5
+      }
+    },
+    "committedBundles": 0,
+    "poisonedPreparedRecord": {
+      "id": "bdda08a2-b38b-4081-a7c1-983a9546c140",
+      "tool": "production.bundle.submit",
+      "arguments": {
+        "archivedArguments": true,
+        "resultId": "42863221-a274-46c3-bd11-28ed43161c1d",
+        "read": {
+          "tool": "conversation.task.checkpoint",
+          "operation": "result",
+          "resultId": "42863221-a274-46c3-bd11-28ed43161c1d",
+          "resultView": "arguments",
+          "expectedHash": "cf6951e00dfa9f631b30615547699ca1374494a861e4f51e33e928412c8e4c97"
+        }
+      }
+    },
+    "pointerTarget": {
+      "id": "42863221-a274-46c3-bd11-28ed43161c1d",
+      "tool": "production.bundle.submission",
+      "status": "completed",
+      "arguments": {}
+    },
+    "validationEvents": [
+      {
+        "sequence": 84,
+        "event_type": "tool_validation_failed",
+        "summary": "{\"operation\":\"production.bundle.submit\",\"argumentBytes\":301,\"reason\":\"Unsupported fields: \\\"archivedArguments\\\", \\\"resultId\\\", \\\"read\\\".\\nBUNDLE_SUBMIT_INVALID: unsupported field.\\nValidation failed for tool \\\"production.bundle.submit\\\":\\n  - root: must not have additional properties\\n  - partKey: must have required properties partKey, expectedRevision\\n  - preparedArguments: must have required properties preparedArguments\\n  - root: must match a schema in anyOf\"}"
+      },
+      {
+        "sequence": 85,
+        "event_type": "tool_validation_failed",
+        "summary": "{\"operation\":\"production.bundle.submit\",\"argumentBytes\":301,\"reason\":\"Unsupported fields: \\\"archivedArguments\\\", \\\"resultId\\\", \\\"read\\\".\\nBUNDLE_SUBMIT_INVALID: unsupported field.\\nValidation failed for tool \\\"production.bundle.submit\\\":\\n  - root: must not have additional properties\\n  - partKey: must have required properties partKey, expectedRevision\\n  - preparedArguments: must have required properties preparedArguments\\n  - root: must match a schema in anyOf\"}"
+      },
+      {
+        "sequence": 87,
+        "event_type": "tool_validation_failed",
+        "summary": "{\"operation\":\"production.bundle.submit\",\"argumentBytes\":301,\"reason\":\"Unsupported fields: \\\"archivedArguments\\\", \\\"resultId\\\", \\\"read\\\".\\nBUNDLE_SUBMIT_INVALID: unsupported field.\\nValidation failed for tool \\\"production.bundle.submit\\\":\\n  - root: must not have additional properties\\n  - partKey: must have required properties partKey, expectedRevision\\n  - preparedArguments: must have required properties preparedArguments\\n  - root: must match a schema in anyOf\"}"
+      },
+      {
+        "sequence": 88,
+        "event_type": "agent.task.failed",
+        "summary": "BUNDLE_NO_PROGRESS_LIMIT: production.bundle.submit: Unsupported fields: \"archivedArguments\", \"resultId\", \"read\".\nBUNDLE_SUBMIT_INVALID: unsupported field.\nValidation failed for tool \"production.bundle.submit\":\n  - root: must not have additional properties\n  - partKey: must have required properties partKey, expectedRevision\n  - preparedArguments: must have required properties preparedArguments\n  - root: must match a schema in anyOf repeated 3 times without candidate or accepted review progress. Preserve the package and report the unresolved field."
+      }
+    ]
+  },
+  "runningWorkerAtDiagnosis": {
+    "processId": 245748,
+    "desktopProcessId": 255560,
+    "path": "C:/Users/MSI/AppData/Local/Temp/ai-video-nsis-install-6ac33740ec2047acaaa8abf71a2962e9/ai-video-worker.exe",
+    "sha256": "b76773b05e025587b1123def2cda0a1bf5111a8dd930cdde53bcbe4d217de5ab",
+    "matchesPriorDeliveredPackage": true
+  },
+  "implementation": {
+    "validHistoryReferences": true,
+    "rejectArchivePointersBeforePreserving": true,
+    "rejectLegacyPoisonedPreparedArguments": true,
+    "scopeAndCasUnchanged": true,
+    "repeatedFailureGuardUnchanged": true,
+    "runtimeSemanticGateAdded": false
+  },
+  "verification": {
+    "preFixRegressionFailures": 4,
+    "focusedTests": 125,
+    "workspaceCounts": [
+      8,
+      49,
+      32,
+      881,
+      83,
+      105,
+      1647
+    ],
+    "workspaceTotal": 2805,
+    "packagedSidecar": {
+      "executableSha256": "022db80bc281973ff8a70c1ef46a5f701bfad2e8c7a9cca01e472023d1cb2bd7",
+      "validation": "offline-scripted-native-host",
+      "realProviderValidation": false,
+      "installedInstanceUpdated": false,
+      "reports": [
+        {
+          "protocol": "openai-responses",
+          "taskId": "b3e18977-e6bc-423d-aec8-a08540631cb5",
+          "status": "completed",
+          "counts": {
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "voice": 2,
+            "plan": 0,
+            "shot": 1,
+            "storyScene": 1
+          },
+          "timing": {
+            "businessSaved": true,
+            "readbackVerified": true,
+            "counts": {
+              "voice": 2,
+              "character": 2,
+              "scene": 1,
+              "prop": 1,
+              "storyScene": 1,
+              "shot": 1
+            },
+            "requestedAt": "2026-11-16T16:56:43.359Z",
+            "preparationMs": 6,
+            "taskCreatedAt": "2026-11-16T16:56:43.365Z",
+            "elapsedMs": 4190
+          },
+          "independentReopenReadback": true,
+          "lostAcknowledgementReplay": true,
+          "multipart": true,
+          "processRestartWithFrozenPurpose": true,
+          "structuralRepair": true,
+          "archivedPointerRejectedWithoutPoisoningRetry": true,
+          "reusableHistoricalArguments": true,
+          "mediaJobs": 0,
+          "paidRequests": 0,
+          "elapsedMs": 5076.7693
+        },
+        {
+          "protocol": "openai-chat-completions",
+          "taskId": "7948cbd6-07ac-4df2-b352-b6042294ab41",
+          "status": "completed",
+          "counts": {
+            "character": 2,
+            "scene": 1,
+            "prop": 1,
+            "voice": 2,
+            "plan": 0,
+            "shot": 1,
+            "storyScene": 1
+          },
+          "timing": {
+            "businessSaved": true,
+            "readbackVerified": true,
+            "counts": {
+              "voice": 2,
+              "character": 2,
+              "scene": 1,
+              "prop": 1,
+              "storyScene": 1,
+              "shot": 1
+            },
+            "requestedAt": "2026-11-16T16:56:48.437Z",
+            "preparationMs": 7,
+            "taskCreatedAt": "2026-11-16T16:56:48.444Z",
+            "elapsedMs": 4271
+          },
+          "independentReopenReadback": true,
+          "lostAcknowledgementReplay": true,
+          "multipart": true,
+          "processRestartWithFrozenPurpose": true,
+          "structuralRepair": true,
+          "archivedPointerRejectedWithoutPoisoningRetry": true,
+          "reusableHistoricalArguments": true,
+          "mediaJobs": 0,
+          "paidRequests": 0,
+          "elapsedMs": 5118.371000000001
+        }
+      ]
+    },
+    "ordinaryPackagedSidecar": {
+      "executableSha256": "022db80bc281973ff8a70c1ef46a5f701bfad2e8c7a9cca01e472023d1cb2bd7",
+      "validation": "offline-scripted-native-host",
+      "installedInstanceUpdated": false,
+      "reports": [
+        {
+          "protocol": "openai-responses",
+          "method": "agent.run",
+          "frozenSnapshot": true,
+          "scopedIsolation": true,
+          "clearEffective": true,
+          "mediaJobs": 0,
+          "realProviderCalls": 0
+        },
+        {
+          "protocol": "openai-responses",
+          "method": "agent.generation.prepare",
+          "frozenSnapshot": true,
+          "scopedIsolation": true,
+          "clearEffective": true,
+          "mediaJobs": 0,
+          "realProviderCalls": 0
+        },
+        {
+          "protocol": "openai-chat-completions",
+          "method": "agent.run",
+          "frozenSnapshot": true,
+          "scopedIsolation": true,
+          "clearEffective": true,
+          "mediaJobs": 0,
+          "realProviderCalls": 0
+        },
+        {
+          "protocol": "openai-chat-completions",
+          "method": "agent.generation.prepare",
+          "frozenSnapshot": true,
+          "scopedIsolation": true,
+          "clearEffective": true,
+          "mediaJobs": 0,
+          "realProviderCalls": 0
+        }
+      ]
+    }
+  },
+  "sources": {
+    "apps/worker/src/agent-prepared-arguments.ts": "f0620529424661f714114d9fb959404b9ff875bf2b696820448c1f00a1a8ac95",
+    "apps/worker/src/agent-context-manager.ts": "60fb5bafaa5f1642d2534f620d308b55f55f97d9a88efc567d1a80bdbfa97713",
+    "apps/worker/src/agent-provider-tool-gateway.ts": "7a899c4d87fa7a2307ed6a90b228bf5b77d653cf0f9bf690dc0beef91e05a038",
+    "apps/worker/src/agent-context-manager.test.ts": "93aea38cb466ef9f5d87e5c345547fc9c78e65359fc93e2e9a50554955fd794f",
+    "apps/worker/src/production-bundle-recovery.test.ts": "f3592b6b5e41e1003926786ab49c2a643bac9242998dbc36defb178c0dc32ca8",
+    "apps/worker/scripts/validate-production-bundle-sidecar.mjs": "74071f81f9c0cce6b805ca497017b95f1db738dbe36f9cdbf6d5719e2c27986e"
+  },
+  "artifacts": {
+    "installer": {
+      "path": "apps/desktop/src-tauri/target/release/bundle/nsis/unicomp_0.1.0_x64-setup-archive-reference-repair-20261117.exe",
+      "bytes": 77312188,
+      "sha256": "c8bba4241e51a065e4ae28a7493c293b1ec6082f4c28895109fe7e0152aaaa9a"
+    },
+    "worker": {
+      "path": "apps/desktop/src-tauri/binaries/ai-video-worker-x86_64-pc-windows-msvc.exe",
+      "bytes": 77303486,
+      "sha256": "022db80bc281973ff8a70c1ef46a5f701bfad2e8c7a9cca01e472023d1cb2bd7"
+    }
+  },
+  "intermediateFailures": [
+    "New test returned validator any value; corrected callback return and lint reran.",
+    "First packaged fixture used unsupported operation=get in recovery guidance; corrected production guidance and fixture to operation=state, then rebuilt and reran."
+  ],
+  "boundaries": {
+    "installedInstanceUpdated": false,
+    "userProjectModified": false,
+    "originalTaskRerun": false,
+    "realProviderCalls": 0,
+    "mediaCalls": 0,
+    "priorRealContentLimitationsStillOpen": true
+  }
+}

@@ -9,6 +9,6 @@ export function readMarkdownDocument(path: string): Promise<MarkdownImportResult
   return invoke<MarkdownImportResult>('markdown_import', { path }).catch((reason: unknown) => {
     if (reason instanceof Error) throw reason;
     if (typeof reason === 'string' && reason.trim()) throw new Error(reason.trim());
-    throw new Error('Markdown 文件读取失败');
+    throw new Error('剧本文件读取失败');
   });
 }

@@ -28,6 +28,7 @@ import type {
   VideoProviderRegion,
 } from '@ai-video/contracts';
 import {
+  canResumeVideoPolling,
   officialVideoContracts,
   officialVideoAudioContracts,
   mediaModelBindings,
@@ -350,7 +351,7 @@ export class VideoGenerationService {
       return this.transitionFailure(
         job.id,
         'provider',
-        `Provider polling failed with HTTP ${params.providerStatus}.`,
+        `Provider polling failed with HTTP ${params.providerStatus}. ${providerFailureMessage(params.providerBody)}`,
         metadata,
         'failed',
         projectSessionId,
@@ -423,11 +424,12 @@ export class VideoGenerationService {
     return downloading;
   }
 
-  /** Persist a transient polling failure without turning an active remote task into a failure. */
+  /** A local query failure does not establish that the accepted remote task has failed. */
   recordPollFailure(params: {
     jobId: string;
     providerTaskId: string;
     message: string;
+    retryable?: boolean;
     projectSessionId?: string;
   }): VideoGenerationJobInfo {
     const providerTaskId = requireProviderTaskId(params.providerTaskId);
@@ -443,15 +445,19 @@ export class VideoGenerationService {
       }
       const now = new Date().toISOString();
       const metadata = this.metadata(job);
+      const retryable = params.retryable !== false;
       const message = sanitizeError(params.message || 'Native Provider polling failed.');
       const updatedMetadata: VideoJobMetadata = {
         ...metadata,
         lastPollError: message,
         lastPollErrorAt: now,
         pollFailureCount: (metadata.pollFailureCount ?? 0) + 1,
+        ...(retryable ? {} : { pausedAt: now }),
       };
-      const updated = {
+      const updated: JobRecord = {
         ...job,
+        status: retryable ? 'polling' : 'paused',
+        mediaState: 'polling',
         metadataJson: JSON.stringify(updatedMetadata),
         updatedAt: now,
       };
@@ -462,12 +468,14 @@ export class VideoGenerationService {
         projectId: project.id,
         phase: 'poll',
         status: updated.status,
-        summary: 'Provider video polling failed; retry scheduled.',
+        summary: retryable
+          ? 'Provider video polling failed; retry scheduled.'
+          : 'Provider video polling paused; remote task outcome is unknown.',
         detailsJson: JSON.stringify({
           providerTaskId,
           error: message,
           pollFailureCount: updatedMetadata.pollFailureCount,
-          retryable: true,
+          retryable,
         }),
         createdAt: now,
       });
@@ -500,24 +508,107 @@ export class VideoGenerationService {
       const repositories = createRepositories(database);
       const job = repositories.jobs.get(jobId);
       this.requireVideoJob(job, project.id);
-      if (job.status !== 'paused') return this.infoFromRepositories(job);
-      if (!job.providerTaskId) throw new Error('Paused video job has no provider task.');
-      const now = new Date().toISOString();
       const metadata = this.metadata(job);
+      if (metadata.pollRecoveryJobId) {
+        const recovery = repositories.jobs.get(metadata.pollRecoveryJobId);
+        this.requireVideoJob(recovery, project.id);
+        if (
+          recovery.providerTaskId !== job.providerTaskId ||
+          this.metadata(recovery).pollRecoveryOfJobId !== job.id
+        )
+          throw new Error('Video polling recovery does not match the original task.');
+        return recovery.status === 'paused'
+          ? this.resume(recovery.id)
+          : this.infoFromRepositories(recovery);
+      }
+      if (!canResumeVideoPolling(this.infoFromRepositories(job)))
+        return this.infoFromRepositories(job);
+      if (!job.providerTaskId) throw new Error('Paused video job has no provider task.');
+      if (job.status === 'failed') {
+        // Terminal rows remain immutable. This local record only queries the accepted remote task.
+        return database.transaction(() => {
+          const now = new Date().toISOString();
+          const recovery: JobRecord = {
+            id: randomUUID(),
+            projectId: job.projectId,
+            shotId: job.shotId,
+            adapterKey: job.adapterKey,
+            providerTaskId: job.providerTaskId,
+            status: 'polling',
+            mediaState: 'polling',
+            requestJson: job.requestJson,
+            taskSnapshotJson: job.taskSnapshotJson,
+            metadataJson: JSON.stringify({
+              ...metadata,
+              pollRecoveryOfJobId: job.id,
+              failureKind: undefined,
+              pausedAt: undefined,
+              pollAttempts: 0,
+              lastPolledAt: undefined,
+              lastPollError: undefined,
+              lastPollErrorAt: undefined,
+              pollFailureCount: undefined,
+              pollDeadlineAt: new Date(Date.now() + DEFAULT_POLL_TIMEOUT_MS).toISOString(),
+            } satisfies VideoJobMetadata),
+            createdAt: now,
+            updatedAt: now,
+          };
+          repositories.jobs.save(recovery);
+          repositories.jobs.save({
+            ...job,
+            metadataJson: JSON.stringify({ ...metadata, pollRecoveryJobId: recovery.id }),
+          });
+          for (const entry of [job, recovery])
+            repositories.generationJobEvents.append({
+              id: randomUUID(),
+              jobId: entry.id,
+              projectId: project.id,
+              phase: 'poll',
+              status: entry.status,
+              summary: 'Video polling recovery linked to the existing remote task.',
+              detailsJson: JSON.stringify({
+                sourceJobId: job.id,
+                recoveryJobId: recovery.id,
+                providerTaskId: job.providerTaskId,
+                paidSubmission: false,
+              }),
+              createdAt: now,
+            });
+          repositories.projects.touch(now);
+          project.updatedAt = now;
+          return this.infoFromRepositories(recovery);
+        })();
+      }
+      const now = new Date().toISOString();
       const pausedAt = metadata.pausedAt ? Date.parse(metadata.pausedAt) : Date.now();
       const deadline = metadata.pollDeadlineAt ? Date.parse(metadata.pollDeadlineAt) : Date.now();
       const pausedDuration = Math.max(0, Date.now() - pausedAt);
       const resumed: JobRecord = {
         ...job,
         status: 'polling',
+        mediaState: 'polling',
+        errorJson: undefined,
         metadataJson: JSON.stringify({
           ...metadata,
           pausedAt: undefined,
+          failureKind: undefined,
           pollDeadlineAt: new Date(deadline + pausedDuration).toISOString(),
         } satisfies VideoJobMetadata),
         updatedAt: now,
       };
       repositories.jobs.save(resumed);
+      repositories.generationJobEvents.append({
+        id: randomUUID(),
+        jobId: job.id,
+        projectId: project.id,
+        phase: 'poll',
+        status: 'polling',
+        summary: 'Provider video polling resumed for the existing task.',
+        detailsJson: JSON.stringify({
+          providerTaskId: job.providerTaskId,
+        }),
+        createdAt: now,
+      });
       repositories.projects.touch(now);
       project.updatedAt = now;
       return this.infoFromRepositories(resumed);
@@ -997,6 +1088,10 @@ export class VideoGenerationService {
           ? parsed.assetKind
           : 'shot-video',
       providerBaseUrl: parsed.providerBaseUrl,
+      pollRecoveryOfJobId:
+        typeof parsed.pollRecoveryOfJobId === 'string' ? parsed.pollRecoveryOfJobId : undefined,
+      pollRecoveryJobId:
+        typeof parsed.pollRecoveryJobId === 'string' ? parsed.pollRecoveryJobId : undefined,
       providerRegion: requireProviderRegion(parsed.providerRegion ?? 'global'),
       providerProfileId: parsed.providerProfileId
         ? requireProviderProfileId(parsed.providerProfileId)
@@ -1067,6 +1162,8 @@ export class VideoGenerationService {
       mediaState: job.mediaState ?? inferLegacyMediaState(job.status),
       request: JSON.parse(job.requestJson) as AdapterParameters,
       metadata: {
+        pollRecoveryOfJobId: metadata.pollRecoveryOfJobId,
+        pollRecoveryJobId: metadata.pollRecoveryJobId,
         providerBaseUrl: metadata.providerBaseUrl,
         providerRegion: metadata.providerRegion,
         providerProfileId: metadata.providerProfileId,
@@ -1289,7 +1386,7 @@ function findNamedString(value: unknown, keys: string[]): string | undefined {
   const object = value as Record<string, unknown>;
   for (const key of keys) {
     const candidate = object[key];
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim().slice(0, 200);
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim().slice(0, 500);
   }
   const data = object.output ?? object.data;
   return data && typeof data === 'object' ? findNamedString(data, keys) : undefined;

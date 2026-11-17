@@ -301,10 +301,11 @@ export class ProjectTaskRuntime {
         try {
           this.recordUpdate(
             scheduled,
-            this.videos.fail({
+            this.videos.recordPollFailure({
               jobId: scheduled.job.id,
-              failureKind: 'transport',
+              providerTaskId: scheduled.job.providerTaskId!,
               message: error instanceof Error ? error.message : 'Native Provider polling failed.',
+              retryable: false,
               projectSessionId: this.runningSessionId,
             }),
           );
@@ -501,7 +502,7 @@ function parseProviderError(value: unknown): NativeProviderMediaPollResult['erro
   const error = value as Record<string, unknown>;
   assertExactKeys(error, ['code', 'message', 'retryable']);
   if (
-    (error.code !== undefined && typeof error.code !== 'string') ||
+    (error.code !== undefined && error.code !== null && typeof error.code !== 'string') ||
     typeof error.message !== 'string' ||
     error.message.length < 1 ||
     error.message.length > 500 ||
@@ -510,7 +511,8 @@ function parseProviderError(value: unknown): NativeProviderMediaPollResult['erro
     throw new InvalidPollResultError('Native Provider error is invalid.');
   }
   return {
-    code: error.code,
+    // Older Native builds serialized an absent optional code as JSON null.
+    code: error.code === null ? undefined : error.code,
     message: error.message,
     retryable: error.retryable,
   };
@@ -518,7 +520,8 @@ function parseProviderError(value: unknown): NativeProviderMediaPollResult['erro
 
 function normalizedProviderBody(result: NativeProviderMediaPollResult): Record<string, unknown> {
   return {
-    state: result.providerState ?? result.state,
+    // Native owns state normalization; providerState is diagnostic, not a state override.
+    state: result.state,
     ...(result.progress === undefined ? {} : { progress: result.progress }),
     ...(result.cost ? { cost: result.cost } : {}),
     ...(result.output ? { output: result.output } : {}),

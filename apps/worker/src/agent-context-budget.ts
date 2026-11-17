@@ -50,6 +50,7 @@ const WORK_PROGRESS_TOOLS = new Set([
   'novel.adaptation.submit_proposal',
   'media.review.prepare',
   'shot.continuity.save',
+  'shot.image.save',
 ]);
 const BODY_KEYS = new Set(['content', 'contentMarkdown', 'text']);
 const PROTECTED_KEYS = /constraint|continuity|locked|requirement|instruction|manual/i;
@@ -739,6 +740,16 @@ export function assertNoReadLoop(context: Context, durable?: ReadLoopSupervision
         ]);
         if (!seenDiscovery.has(discovery)) {
           seenDiscovery.add(discovery);
+          // Immutable result pages are explicit reads too. A new nonempty range
+          // advances recovery/inspection even when no business write has occurred.
+          if (
+            typeof result.content === 'string' &&
+            result.content.length > 0 &&
+            typeof result.offset === 'number' &&
+            typeof result.endOffset === 'number' &&
+            result.endOffset > result.offset
+          )
+            preparationCounts.clear();
           clearFailures(failureLocators(args, { id: result.resultId }));
         }
       }

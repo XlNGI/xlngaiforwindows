@@ -34,9 +34,7 @@ export function ScriptWorkspace({
           value={content}
           onChange={onContentChange}
           autoPreviewOnBlur
-          placeholder={
-            '\u4f7f\u7528 Markdown \u7f16\u5199\u5927\u7eb2\u3001\u8ba1\u5212\u6216\u672c\u96c6\u628a\u63a7\u2026'
-          }
+          placeholder={'编写剧本、大纲、计划或本集把控，支持普通文本和 Markdown…'}
           readOnly={!writable}
         />
         {message ? <div className="inline-status">{message}</div> : null}
